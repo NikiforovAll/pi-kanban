@@ -1,0 +1,5876 @@
+//#region STATE
+let sessions = [];
+let currentSessionId = null;
+let currentTasks = [];
+let viewMode = 'session';
+let sessionFilter = 'active';
+let sessionLimit = '20';
+let filterProject = '__recent__'; // null = all, '__recent__' = last 24h, or project path
+let recentProjects = new Set();
+let projectsCacheDirty = true;
+const collapsedProjectGroups = new Set();
+let stableGroupOrder = []; // cached project path order to prevent jumping
+let searchQuery = ''; // Search query for fuzzy search
+let allTasksCache = []; // Cache all tasks for search
+let bulkDeleteSessionId = null; // Track session for bulk delete
+let ownerFilter = '';
+let currentAgents = [];
+let currentWaiting = null;
+let lastAgentsHash = '';
+let messagePanelOpen = false;
+let lastMessagesHash = '';
+let currentMessages = [];
+let agentDurationInterval = null;
+let agentPollInterval = null;
+let selectedTaskId = null;
+let selectedSessionId = null;
+let focusZone = 'board'; // 'board' | 'sidebar'
+let appConfig = { marketplaceUrl: null, costUrl: null, memoryUrl: null };
+let selectedSessionIdx = -1;
+let selectedSessionKbId = null;
+let sessionJustSelected = false;
+let agentLogMode = null;
+let agentLogSSE = null;
+let msgHasMore = false;
+let msgLoadingMore = false;
+let msgUserScrolledUp = false;
+const MSG_MAX_LOADED = 200;
+let currentProjectPath = null;
+let currentProjectSessionIds = [];
+const dismissedSessionIds = new Set();
+const dismissedAgentIds = new Set();
+
+function resetMessageScrollState() {
+  msgUserScrolledUp = false;
+  msgHasMore = false;
+  msgLoadingMore = false;
+  currentMessages = [];
+  lastMessagesHash = '';
+  const btn = document.getElementById('msg-jump-latest');
+  if (btn) btn.style.display = 'none';
+}
+
+function getUrlState() {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    session: params.get('session'),
+    view: params.get('view'),
+    filter: params.get('filter'),
+    limit: params.get('limit'),
+    project: params.get('project'),
+    owner: params.get('owner'),
+    search: params.get('search'),
+    messages: params.has('messages')
+      ? params.get('messages') === '1'
+      : localStorage.getItem('message-panel-open') === 'true',
+    projectView: params.get('projectView'),
+  };
+}
+
+function updateUrl() {
+  const params = new URLSearchParams();
+  if (viewMode === 'all') params.set('view', 'all');
+  if (viewMode === 'project' && currentProjectPath) params.set('projectView', btoa(currentProjectPath));
+  if (currentSessionId) params.set('session', currentSessionId);
+  if (sessionFilter !== 'active') params.set('filter', sessionFilter);
+  if (sessionLimit !== '20') params.set('limit', sessionLimit);
+  if (filterProject && filterProject !== '__recent__') params.set('project', filterProject);
+  if (ownerFilter) params.set('owner', ownerFilter);
+  if (searchQuery) params.set('search', searchQuery);
+  if (messagePanelOpen) params.set('messages', '1');
+  const qs = params.toString();
+  const url = qs ? `?${qs}` : window.location.pathname;
+  history.replaceState(null, '', url);
+  persistLastView();
+}
+
+const LAST_VIEW_KEY = 'lastView';
+function persistLastView() {
+  try {
+    const data = {
+      view: viewMode,
+      session: currentSessionId,
+      projectPath: viewMode === 'project' ? currentProjectPath : null,
+    };
+    localStorage.setItem(LAST_VIEW_KEY, JSON.stringify(data));
+  } catch (_) {}
+}
+function loadLastView() {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_VIEW_KEY)) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function resetState() {
+  history.replaceState(null, '', window.location.pathname);
+  try {
+    localStorage.removeItem(LAST_VIEW_KEY);
+  } catch (_) {}
+  sessionFilter = 'active';
+  sessionLimit = '20';
+  filterProject = '__recent__';
+  ownerFilter = '';
+  searchQuery = '';
+  viewMode = 'all';
+  if (agentLogMode) exitAgentLogMode();
+  currentSessionId = null;
+  currentProjectPath = null;
+  currentProjectSessionIds = [];
+  resetMessageScrollState();
+  const searchInput = document.getElementById('search-input');
+  if (searchInput) searchInput.value = '';
+  document.getElementById('search-clear-btn')?.classList.remove('visible');
+  loadPreferences();
+  fetchSessions().then(() => showAllTasks());
+}
+
+//#endregion
+
+//#region DOM
+const sessionsList = document.getElementById('sessions-list');
+const noSession = document.getElementById('no-session');
+const sessionView = document.getElementById('session-view');
+const sessionTitle = document.getElementById('session-title');
+const sessionMeta = document.getElementById('session-meta');
+const progressPercent = document.getElementById('progress-percent');
+const progressBar = document.getElementById('progress-bar');
+const pendingTasks = document.getElementById('pending-tasks');
+const inProgressTasks = document.getElementById('in-progress-tasks');
+const completedTasks = document.getElementById('completed-tasks');
+const pendingCount = document.getElementById('pending-count');
+const inProgressCount = document.getElementById('in-progress-count');
+const completedCount = document.getElementById('completed-count');
+const detailPanel = document.getElementById('detail-panel');
+const detailContent = document.getElementById('detail-content');
+const connectionStatus = document.getElementById('connection-status');
+const CONTENT_TRUNCATE_MAX = 1500;
+const COLUMNS = [{ el: pendingTasks }, { el: inProgressTasks }, { el: completedTasks }];
+
+let lastSessionsHash = '';
+let lastTasksHash = '';
+
+//#endregion
+
+//#region DATA_FETCHING
+async function fetchSessions(includeTasks = true) {
+  try {
+    const allPinnedIds = new Set([...pinnedSessionIds, ...stickySessionIds]);
+    if (revealedPlanSessionId) allPinnedIds.add(revealedPlanSessionId);
+    if (revealedStorageSessionId) allPinnedIds.add(revealedStorageSessionId);
+    const pinnedParam = allPinnedIds.size > 0 ? `&pinned=${[...allPinnedIds].join(',')}` : '';
+    const projectParam =
+      filterProject && filterProject !== '__recent__' ? `&project=${encodeURIComponent(filterProject)}` : '';
+    const sessionsPromise = fetch(`/api/sessions?limit=${sessionLimit}${pinnedParam}${projectParam}`).then((r) =>
+      r.json(),
+    );
+
+    let newSessions, newTasks;
+    if (includeTasks) {
+      [newSessions, newTasks] = await Promise.all([sessionsPromise, fetch('/api/tasks/all').then((r) => r.json())]);
+    } else {
+      newSessions = await sessionsPromise;
+    }
+
+    const sessionsHash = JSON.stringify(newSessions);
+    if (includeTasks) {
+      const tasksHash = JSON.stringify(newTasks);
+      if (sessionsHash === lastSessionsHash && tasksHash === lastTasksHash) return;
+      lastTasksHash = tasksHash;
+      allTasksCache = newTasks;
+    } else {
+      if (sessionsHash === lastSessionsHash) return;
+    }
+    lastSessionsHash = sessionsHash;
+
+    sessions = newSessions;
+    renderSessions();
+    renderLiveUpdatesFromCache();
+  } catch (error) {
+    console.error('Failed to fetch sessions:', error);
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function handleSearch(query) {
+  searchQuery = query.toLowerCase().trim();
+
+  // Show/hide clear button
+  const clearBtn = document.getElementById('search-clear-btn');
+  if (searchQuery) {
+    clearBtn.classList.add('visible');
+  } else {
+    clearBtn.classList.remove('visible');
+  }
+
+  updateUrl();
+  renderSessions();
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function clearSearch() {
+  const searchInput = document.getElementById('search-input');
+  searchInput.value = '';
+  searchQuery = '';
+  document.getElementById('search-clear-btn').classList.remove('visible');
+  updateUrl();
+  renderSessions();
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function deleteAllSessionTasks(sessionId) {
+  const session = sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+
+  // When viewing a single session, currentTasks already contains only that session's tasks
+  // When viewing "All Tasks", tasks have sessionId property, so we filter
+  const sessionTasks =
+    currentSessionId === sessionId ? currentTasks : currentTasks.filter((t) => t.sessionId === sessionId);
+
+  if (sessionTasks.length === 0) {
+    alert('No tasks to delete in this session');
+    return;
+  }
+
+  bulkDeleteSessionId = sessionId;
+
+  const displayName = session.name || sessionId;
+  const message = `Delete all ${sessionTasks.length} task(s) from session "${displayName}"?`;
+
+  document.getElementById('delete-session-tasks-message').textContent = message;
+
+  const modal = document.getElementById('delete-session-tasks-modal');
+  modal.classList.add('visible');
+
+  // Handle ESC key
+  const keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeDeleteSessionTasksModal();
+      document.removeEventListener('keydown', keyHandler);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+}
+
+function closeDeleteSessionTasksModal() {
+  const modal = document.getElementById('delete-session-tasks-modal');
+  modal.classList.remove('visible');
+  bulkDeleteSessionId = null;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function confirmDeleteSessionTasks() {
+  if (!bulkDeleteSessionId) return;
+
+  const sessionId = bulkDeleteSessionId;
+  closeDeleteSessionTasksModal();
+
+  // Get tasks to delete
+  const sessionTasks =
+    currentSessionId === sessionId ? currentTasks : currentTasks.filter((t) => t.sessionId === sessionId);
+
+  // Sort tasks by dependency order (blocked tasks first, then blockers)
+  const sortedTasks = topologicalSort(sessionTasks);
+
+  let successCount = 0;
+  let failedCount = 0;
+  const failedTasks = [];
+
+  for (const task of sortedTasks) {
+    try {
+      const res = await fetch(`/api/tasks/${sessionId}/${task.id}`, {
+        method: 'DELETE',
+      });
+
+      if (res.ok) {
+        successCount++;
+      } else {
+        failedCount++;
+        const error = await res.json();
+        failedTasks.push({ id: task.id, subject: task.subject, error: error.error });
+        console.error(`Failed to delete task ${task.id}:`, error);
+      }
+    } catch (error) {
+      failedCount++;
+      failedTasks.push({ id: task.id, subject: task.subject, error: 'Network error' });
+      console.error(`Error deleting task ${task.id}:`, error);
+    }
+  }
+
+  // Show result modal
+  showDeleteResultModal(successCount, failedCount, failedTasks);
+
+  // Close detail panel if open
+  closeDetailPanel();
+
+  // Refresh the view
+  await refreshCurrentView();
+}
+
+//#endregion
+
+//#region BULK_DELETE
+// Topological sort for task deletion order
+function topologicalSort(tasks) {
+  const result = [];
+  const visited = new Set();
+  const visiting = new Set();
+  const taskMap = new Map(tasks.map((t) => [t.id, t]));
+
+  function visit(taskId) {
+    if (visited.has(taskId)) return;
+    if (visiting.has(taskId)) return; // Cycle - skip
+
+    visiting.add(taskId);
+    const task = taskMap.get(taskId);
+
+    if (task?.blocks && task.blocks.length > 0) {
+      // Visit all tasks that this task blocks (dependencies first)
+      for (const blockedId of task.blocks) {
+        if (taskMap.has(blockedId)) {
+          visit(blockedId);
+        }
+      }
+    }
+
+    visiting.delete(taskId);
+    visited.add(taskId);
+    if (task) result.push(task);
+  }
+
+  // Visit all tasks
+  for (const task of tasks) {
+    visit(task.id);
+  }
+
+  return result;
+}
+
+function showDeleteResultModal(successCount, failedCount, failedTasks) {
+  const modal = document.getElementById('delete-result-modal');
+  const messageEl = document.getElementById('delete-result-message');
+  const detailsEl = document.getElementById('delete-result-details');
+
+  if (failedCount === 0) {
+    messageEl.textContent = `Successfully deleted all ${successCount} task(s).`;
+    detailsEl.style.display = 'none';
+  } else {
+    messageEl.textContent = `Deleted ${successCount} task(s). Failed to delete ${failedCount} task(s).`;
+
+    const failedList = failedTasks
+      .map((t) => `<li><strong>${escapeHtml(t.subject)}</strong> (#${escapeHtml(t.id)}): ${escapeHtml(t.error)}</li>`)
+      .join('');
+    detailsEl.innerHTML = `<ul style="margin: 8px 0 0 0; padding-left: 20px;">${failedList}</ul>`;
+    detailsEl.style.display = 'block';
+  }
+
+  modal.classList.add('visible');
+
+  // Handle ESC key
+  const keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeDeleteResultModal();
+      document.removeEventListener('keydown', keyHandler);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+}
+
+function closeDeleteResultModal() {
+  const modal = document.getElementById('delete-result-modal');
+  modal.classList.remove('visible');
+}
+
+function fuzzyMatch(text, query) {
+  if (!query) return true;
+  if (!text) return false;
+
+  text = text.toLowerCase();
+  query = query.toLowerCase();
+
+  // Prioritize exact substring match
+  if (text.includes(query)) return true;
+
+  // Split by common delimiters to search in individual words
+  const words = text.split(/[\s\-_/.\\]+/);
+
+  // Check if query matches start of any word
+  for (const word of words) {
+    if (word.startsWith(query)) return true;
+  }
+
+  // Check if any word contains the query
+  for (const word of words) {
+    if (word.includes(query)) return true;
+  }
+
+  return false;
+}
+
+//#endregion
+
+//#region LIVE_UPDATES
+function renderLiveUpdatesFromCache() {
+  let activeTasks = allTasksCache.filter((t) => t.status === 'in_progress' && !isInternalTask(t));
+  if (filterProject) {
+    activeTasks = activeTasks.filter((t) => matchesProjectFilter(t.project));
+  }
+  renderLiveUpdates(activeTasks);
+}
+
+function toggleSection(containerId, chevronId) {
+  const container = document.getElementById(containerId);
+  const chevron = document.getElementById(chevronId);
+  const collapsed = container.classList.toggle('collapsed');
+  chevron.classList.toggle('rotated', collapsed);
+  localStorage.setItem(`${containerId}Collapsed`, collapsed);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleLiveUpdates() {
+  toggleSection('live-updates', 'live-updates-chevron');
+}
+
+function renderLiveUpdates(activeTasks) {
+  const container = document.getElementById('live-updates');
+
+  if (activeTasks.length === 0) {
+    container.innerHTML = '<div class="live-empty">No active tasks</div>';
+    return;
+  }
+
+  container.innerHTML = activeTasks
+    .map(
+      (task) => `
+        <div class="live-item" onclick="openLiveTask('${task.sessionId}', '${task.id}')">
+          <span class="pulse"></span>
+          <div class="live-item-content">
+            <div class="live-item-action" title="${escapeHtml(task.activeForm || task.subject)}">${escapeHtml(task.activeForm || task.subject)}</div>
+            <div class="live-item-session" title="${escapeHtml(task.sessionName || task.sessionId)}">${escapeHtml(task.sessionName || task.sessionId)}</div>
+          </div>
+        </div>
+      `,
+    )
+    .join('');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function openLiveTask(sessionId, taskId) {
+  await fetchTasks(sessionId);
+  showTaskDetail(taskId, sessionId);
+}
+
+let lastCurrentTasksHash = '';
+
+async function fetchTasks(sessionId) {
+  try {
+    viewMode = 'session';
+    document.getElementById('message-toggle')?.style.removeProperty('display');
+    const res = await fetch(`/api/sessions/${sessionId}`);
+
+    let newTasks;
+    if (res.ok) {
+      newTasks = await res.json();
+    } else if (res.status === 404) {
+      newTasks = [];
+    } else {
+      throw new Error(`Failed to fetch tasks: ${res.status}`);
+    }
+
+    const hash = JSON.stringify(newTasks);
+    if (sessionId === currentSessionId && hash === lastCurrentTasksHash) {
+      return;
+    }
+    lastCurrentTasksHash = hash;
+
+    currentTasks = newTasks;
+    if (agentLogMode && sessionId !== currentSessionId) exitAgentLogMode();
+    if (sessionId !== currentSessionId && document.getElementById('scratchpad-modal').classList.contains('visible'))
+      closeScratchpad();
+    if (revealedPlanSessionId && sessionId !== revealedPlanSessionId) {
+      revealedPlanSessionId = null;
+    }
+    if (revealedStorageSessionId && sessionId !== revealedStorageSessionId) {
+      revealedStorageSessionId = null;
+    }
+    if (currentSessionId && currentSessionId !== sessionId) deferredPinPlacement.delete(currentSessionId);
+    currentSessionId = sessionId;
+    currentPins = loadPins(sessionId);
+    ownerFilter = '';
+    resetMessageScrollState();
+    for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
+    for (const k of Object.keys(teamColorMap)) delete teamColorMap[k];
+    sessionJustSelected = true;
+    resetAgentState();
+    updateUrl();
+    renderSession();
+    renderSessions();
+    fetchAgents(sessionId);
+    if (!agentLogMode) fetchMessages(sessionId);
+  } catch (error) {
+    console.error('Failed to fetch tasks:', error);
+    currentTasks = [];
+    currentSessionId = sessionId;
+    lastCurrentTasksHash = '';
+    updateUrl();
+    renderSession();
+  }
+}
+
+const _AGENT_COOLDOWN_MS = 3 * 60 * 1000;
+const _AGENT_STALE_MS = 5 * 60 * 1000; // kept for reference; no longer used for force-stopping
+const WAITING_TTL_MS = 30 * 60 * 1000;
+const AGENT_LOG_MAX = 8;
+
+function resetAgentState() {
+  currentAgents = [];
+  currentWaiting = null;
+  lastAgentsHash = '';
+  renderAgentFooter();
+}
+
+async function fetchAgents(sessionId) {
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/agents`);
+    if (!res.ok) {
+      resetAgentState();
+      return;
+    }
+    const data = await res.json();
+    const rawAgents = Array.isArray(data) ? data : data.agents || [];
+    const agents = rawAgents.filter((a) => !dismissedAgentIds.has(a.agentId));
+    currentWaiting = data.waitingForUser || null;
+    const hash = JSON.stringify({ agents, waitingForUser: currentWaiting, teamColors: data.teamColors });
+    if (hash === lastAgentsHash) return;
+    lastAgentsHash = hash;
+    currentAgents = agents;
+    updateTeamColors(agents, data.teamColors);
+    for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
+    renderAgentFooter();
+    if (currentSessionId === sessionId) renderKanban();
+  } catch (e) {
+    console.error('[fetchAgents]', e);
+  }
+}
+
+async function fetchProjectView(projectPath) {
+  viewMode = 'project';
+  currentProjectPath = projectPath;
+  currentSessionId = null;
+  currentMessages = [];
+  lastMessagesHash = '';
+  if (messagePanelOpen) toggleMessagePanel();
+  document.getElementById('message-toggle')?.style.setProperty('display', 'none');
+  const msgContent = document.getElementById('message-panel-content');
+  if (msgContent) msgContent.innerHTML = '';
+  const msgPinned = document.getElementById('message-panel-pinned');
+  if (msgPinned) msgPinned.innerHTML = '';
+  const projectSessions = sessions.filter((s) => s.project === projectPath);
+  currentProjectSessionIds = projectSessions.map((s) => s.id);
+  const activeSessionIds = projectSessions.filter((s) => isSessionActive(s) || isAnyPinned(s.id)).map((s) => s.id);
+
+  const encoded = btoa(projectPath);
+  const [tasksResult, agentResults] = await Promise.all([
+    fetch(`/api/projects/${encodeURIComponent(encoded)}/tasks`)
+      .then((r) => r.json())
+      .catch((e) => {
+        console.error('[fetchProjectView] tasks:', e);
+        return [];
+      }),
+    Promise.all(
+      activeSessionIds.map((id) =>
+        fetch(`/api/sessions/${id}/agents`)
+          .then((r) => r.json())
+          .catch(() => ({ agents: [] })),
+      ),
+    ),
+  ]);
+  currentTasks = tasksResult;
+  const seen = new Set();
+  currentAgents = [];
+  const mergedColors = {};
+  let mergedWaiting = null;
+  for (let i = 0; i < agentResults.length; i++) {
+    const r = agentResults[i];
+    const sid = activeSessionIds[i];
+    const agents = r.agents || (Array.isArray(r) ? r : []);
+    for (const a of agents) {
+      if (a.agentId && !seen.has(a.agentId)) {
+        seen.add(a.agentId);
+        a._sourceSessionId = sid;
+        currentAgents.push(a);
+      }
+    }
+    if (r.teamColors) Object.assign(mergedColors, r.teamColors);
+    if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
+  }
+  currentWaiting = mergedWaiting;
+  Object.assign(teamColorMap, mergedColors);
+
+  renderProjectView();
+  renderAgentFooter();
+  renderKanban();
+  updateUrl();
+}
+
+async function refreshProjectAgents() {
+  if (!currentProjectPath) return;
+  const projectSessions = sessions.filter((s) => s.project === currentProjectPath);
+  const activeSessionIds = projectSessions.filter((s) => isSessionActive(s) || isAnyPinned(s.id)).map((s) => s.id);
+  const agentResults = await Promise.all(
+    activeSessionIds.map((id) =>
+      fetch(`/api/sessions/${id}/agents`)
+        .then((r) => r.json())
+        .catch(() => ({ agents: [] })),
+    ),
+  );
+  const seen = new Set();
+  currentAgents = [];
+  let mergedWaiting = null;
+  for (let i = 0; i < agentResults.length; i++) {
+    const r = agentResults[i];
+    const sid = activeSessionIds[i];
+    const agents = r.agents || (Array.isArray(r) ? r : []);
+    for (const a of agents) {
+      if (a.agentId && !seen.has(a.agentId)) {
+        seen.add(a.agentId);
+        a._sourceSessionId = sid;
+        currentAgents.push(a);
+      }
+    }
+    if (r.teamColors) Object.assign(teamColorMap, r.teamColors);
+    if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
+  }
+  currentWaiting = mergedWaiting;
+  const hash = JSON.stringify({ agents: currentAgents, waiting: currentWaiting });
+  if (hash === lastAgentsHash) return;
+  lastAgentsHash = hash;
+  renderAgentFooter();
+}
+
+//#endregion
+
+//#region MESSAGE_PANEL
+function toggleMessagePanel() {
+  const panel = document.getElementById('message-panel');
+  messagePanelOpen = !messagePanelOpen;
+  localStorage.setItem('message-panel-open', messagePanelOpen);
+  panel.classList.toggle('visible', messagePanelOpen);
+  document.getElementById('message-toggle')?.classList.toggle('active', messagePanelOpen);
+  if (messagePanelOpen && currentSessionId) {
+    if (currentMessages.length) renderMessages(currentMessages);
+    fetchMessages(currentSessionId);
+  }
+  updateUrl();
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+async function openSessionWithBookmarks(sessionId) {
+  if (!messagePanelOpen) {
+    const panel = document.getElementById('message-panel');
+    messagePanelOpen = true;
+    localStorage.setItem('message-panel-open', 'true');
+    panel.classList.add('visible');
+    document.getElementById('message-toggle')?.classList.add('active');
+  }
+  await fetchTasks(sessionId);
+  if (currentMessages.length) renderMessages(currentMessages);
+  fetchMessages(sessionId);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function viewAgentLog(agentId) {
+  let agent = findAgentById(agentId);
+  if (!agent && currentSessionId) {
+    await fetchAgents(currentSessionId);
+    agent = findAgentById(agentId);
+  }
+  if (!agent) {
+    if (!currentSessionId) return;
+    agent = { agentId: agentId, type: 'Agent', _sourceSessionId: currentSessionId };
+  }
+  const resolvedId = agent.agentId;
+  const shortId = resolvedId.length > 8 ? resolvedId.slice(0, 8) : resolvedId;
+  const agentSessionId = agent._sourceSessionId || currentSessionId;
+  agentLogMode = { agentId: resolvedId, sessionId: agentSessionId, agentType: agent.type || 'unknown' };
+  resetMessageScrollState();
+  closeAgentModal();
+  document.getElementById('message-toggle')?.style.removeProperty('display');
+  if (!messagePanelOpen) toggleMessagePanel();
+  const header = document.querySelector('.message-panel-header h3');
+  if (header) {
+    header.innerHTML = `<span class="agent-log-title"><button class="agent-log-back" onclick="exitAgentLogMode()" title="Back to session log">&larr;</button> ${escapeHtml(agent.type || 'unknown')} <code class="agent-log-id">(${escapeHtml(shortId)})</code></span>`;
+  }
+  fetchAgentMessages();
+  if (agentLogSSE) {
+    agentLogSSE.close();
+    agentLogSSE = null;
+  }
+  agentLogSSE = new EventSource(`/api/sessions/${agentLogMode.sessionId}/agents/${resolvedId}/messages/stream`);
+  agentLogSSE.addEventListener('agent-log-update', (e) => {
+    if (!agentLogMode || agentLogMode.agentId !== resolvedId) return;
+    try {
+      const data = JSON.parse(e.data);
+      currentMessages = data.messages;
+      if (messagePanelOpen) renderMessages(data.messages);
+      maybeFollowLatest();
+    } catch (_) {}
+  });
+  agentLogSSE.onerror = () => {};
+}
+
+function exitAgentLogMode() {
+  agentLogMode = null;
+  if (agentLogSSE) {
+    agentLogSSE.close();
+    agentLogSSE = null;
+  }
+  if (viewMode === 'project') {
+    if (messagePanelOpen) toggleMessagePanel();
+    document.getElementById('message-toggle')?.style.setProperty('display', 'none');
+    return;
+  }
+  const header = document.querySelector('.message-panel-header h3');
+  if (header) header.textContent = 'Session Log';
+  resetMessageScrollState();
+  if (currentSessionId) fetchMessages(currentSessionId);
+}
+
+async function fetchAgentMessages() {
+  if (!agentLogMode) return;
+  const { sessionId, agentId } = agentLogMode;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/agents/${agentId}/messages?limit=100`);
+    if (!res.ok || !agentLogMode || agentLogMode.agentId !== agentId) return;
+    const data = await res.json();
+    if (!agentLogMode || agentLogMode.agentId !== agentId) return;
+    currentMessages = data.messages;
+    if (messagePanelOpen) renderMessages(data.messages);
+    maybeFollowLatest();
+  } catch (e) {
+    console.error('[fetchAgentMessages]', e);
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openLiveLatestMessage() {
+  if (currentMessages.length) {
+    msgDetailFollowLatest = true;
+    showMsgDetail(currentMessages.length - 1);
+  }
+}
+
+async function fetchMessages(sessionId) {
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/messages?limit=15`);
+    if (!res.ok) return;
+    const data = await res.json();
+    let agentEnriched = false;
+    for (const m of data.messages) {
+      if (m.agentId && m.agentPrompt) {
+        const agent = currentAgents.find((a) => a.agentId === m.agentId);
+        if (agent && !agent.prompt) {
+          agent.prompt = m.agentPrompt;
+          agentEnriched = true;
+        }
+      }
+    }
+    if (agentEnriched) renderAgentFooter();
+    if (agentLogMode) return;
+
+    if (!msgUserScrolledUp) {
+      const hash = JSON.stringify(data.messages);
+      if (hash === lastMessagesHash) return;
+      lastMessagesHash = hash;
+      msgHasMore = data.hasMore !== false;
+      currentMessages = data.messages;
+      if (messagePanelOpen) renderMessages(data.messages);
+    } else {
+      if (data.messages.length && currentMessages.length) {
+        const lastKnown = currentMessages[currentMessages.length - 1].timestamp;
+        const newMsgs = data.messages.filter((m) => m.timestamp > lastKnown);
+        if (newMsgs.length) {
+          currentMessages = [...currentMessages, ...newMsgs];
+          if (currentMessages.length > MSG_MAX_LOADED) {
+            currentMessages = currentMessages.slice(-MSG_MAX_LOADED);
+            msgHasMore = true;
+          }
+          if (messagePanelOpen) renderMessages(currentMessages);
+        }
+      }
+    }
+
+    maybeFollowLatest();
+  } catch (e) {
+    console.error('[fetchMessages]', e);
+  }
+}
+
+async function loadOlderMessages() {
+  if (agentLogMode || msgLoadingMore || !msgHasMore || !currentMessages.length) return;
+  msgLoadingMore = true;
+  const container = document.getElementById('message-panel-content');
+  const loader = document.createElement('div');
+  loader.className = 'msg-loading-more';
+  loader.textContent = 'Loading...';
+  container.prepend(loader);
+  try {
+    const before = currentMessages[0].timestamp;
+    const res = await fetch(`/api/sessions/${currentSessionId}/messages?limit=15&before=${encodeURIComponent(before)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    msgHasMore = data.hasMore && data.messages.length > 0;
+    if (data.messages.length) {
+      loader.remove();
+      const prevHeight = container.scrollHeight;
+      currentMessages = [...data.messages, ...currentMessages];
+      if (currentMessages.length > MSG_MAX_LOADED) {
+        currentMessages = currentMessages.slice(0, MSG_MAX_LOADED);
+      }
+      renderMessages(currentMessages);
+      container.scrollTop = container.scrollHeight - prevHeight;
+    }
+  } catch (e) {
+    console.error('[loadOlderMessages]', e);
+  } finally {
+    if (loader.parentNode) loader.remove();
+    requestAnimationFrame(() => {
+      msgLoadingMore = false;
+      // Chain auto-load if content still doesn't overflow
+      if (msgHasMore && currentMessages.length < MSG_MAX_LOADED && container.scrollHeight <= container.clientHeight) {
+        loadOlderMessages();
+      }
+    });
+  }
+}
+
+function parseCommandMessage(text) {
+  const nameMatch = text.match(/<command-name>([^<]+)<\/command-name>/);
+  if (nameMatch) return nameMatch[1].trim();
+  const msgMatch = text.match(/<command-message>([^<]+)<\/command-message>/);
+  if (msgMatch) return `/${msgMatch[1].trim()}`;
+  return null;
+}
+
+function cleanMessageText(text) {
+  const cmd = parseCommandMessage(text);
+  if (cmd) return cmd;
+  return stripAnsi(text)
+    .replace(/<[^>]+>/g, '')
+    .replace(/\*\*/g, '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function renderMsgPinBtn(m, i) {
+  const pinned = isPinned(m);
+  return `<button class="msg-pin-btn${pinned ? ' pinned' : ''}" onclick="event.stopPropagation();togglePin(${i})" title="${pinned ? 'Unpin' : 'Pin'} message">${PIN_SVG}</button>`;
+}
+
+function renderPinnedSection() {
+  if (!currentPins.length) return '';
+  const chevron =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M6 9l6 6 6-6"/></svg>';
+  const items = currentPins
+    .map((p, pi) => {
+      const click = `onclick="showPinnedMsgDetail(${pi})" style="cursor:pointer"`;
+      const unpin = `<button class="pinned-item-unpin" onclick="event.stopPropagation();unpinById(${pi})" title="Unpin">${PIN_SVG}</button>`;
+      if (p.type === 'user') {
+        const text = escapeHtml(cleanMessageText(p.text || ''));
+        return `<div class="msg-item msg-user" ${click}>
+            ${MSG_ICON_USER}
+            <div class="msg-body"><div class="msg-text">${text}</div><div class="msg-time">${formatDate(p.timestamp)}</div></div>${unpin}
+          </div>`;
+      } else if (p.type === 'assistant') {
+        return `<div class="msg-item msg-assistant" ${click}>
+            ${MSG_ICON_ASSISTANT}
+            <div class="msg-body"><div class="msg-text">${escapeHtml(cleanMessageText(p.text || ''))}</div><div class="msg-time">${formatDate(p.timestamp)}</div></div>${unpin}
+          </div>`;
+      } else if (p.type === 'tool_use') {
+        const toolDetail = getToolDetail(p.tool, p.params, p.detail);
+        const pinnedAgentLogBtn = resolveAgentLogBtn(p);
+        return `<div class="msg-item msg-tool" ${click}>
+            ${getToolIcon(p.tool)}
+            <div class="msg-body"><div class="msg-text">${escapeHtml(p.tool || '')}${toolDetail}</div><div class="msg-time">${formatDate(p.timestamp)}</div></div>${pinnedAgentLogBtn}${unpin}
+          </div>`;
+      } else if (p.type === 'agent') {
+        const agentLogBtn = agentLogButton(p.agentId);
+        const msgTrunc = p.lastMessage
+          ? escapeHtml(
+              stripAnsi(stripTeammateWrapper(p.lastMessage.trim()))
+                .replace(/[\r\n]+/g, ' ')
+                .slice(0, 60),
+            )
+          : '';
+        const agentDetail = msgTrunc ? ` <span style="color:var(--text-muted)">${msgTrunc}</span>` : '';
+        return `<div class="msg-item msg-tool" ${click}>
+            ${MSG_ICON_TOOL}
+            <div class="msg-body"><div class="msg-text">${escapeHtml(p.agentType || 'Agent')}${agentDetail}</div><div class="msg-time">${formatDate(p.timestamp)}</div></div>${agentLogBtn}${unpin}
+          </div>`;
+      }
+      return '';
+    })
+    .join('');
+  const label = `Pinned (${currentPins.length})`;
+  const hasItems = currentPins.length > 0;
+  return `<div class="pinned-section">
+        <div class="pinned-header${pinnedCollapsed ? ' collapsed' : ''}${hasItems ? '' : ' empty'}" ${hasItems ? 'onclick="togglePinnedCollapse()"' : ''}>
+          <span>${label}</span>${hasItems ? chevron : ''}
+        </div>
+        ${hasItems ? `<div class="pinned-items${pinnedCollapsed ? ' collapsed' : ''}">${items}</div>` : ''}
+      </div>`;
+}
+
+function resolveAgentLogBtn(m) {
+  if (m.tool === 'Agent' && m.agentId) return agentLogButton(m.agentId);
+  if (m.tool === 'SendMessage' && m.params?.to) {
+    const recipient = currentAgents.find((a) => (a.type || a.name) === m.params.to);
+    if (recipient) return agentLogButton(recipient.agentId);
+  }
+  return '';
+}
+
+function toolGroupKey(m) {
+  return m.type === 'tool_use' ? `${m.tool}\0${m.detail || ''}` : null;
+}
+
+function renderToolItem(m, i, compact) {
+  const toolDetail = getToolDetail(m.tool, m.params, m.detail);
+  const agentLink =
+    m.tool === 'Agent' && m.agentId
+      ? ` <span class="msg-agent-link" title="View agent" onclick="event.stopPropagation();showAgentModal('${escapeHtml(m.agentId)}')">⇗</span>`
+      : '';
+  const agentLogBtn = resolveAgentLogBtn(m);
+  const recipientColor = m.tool === 'SendMessage' && m.params?.to ? resolveNamedColor(teamColorMap[m.params.to]) : null;
+  const borderStyle = recipientColor ? `border-left:3px solid ${recipientColor.color};` : '';
+  const compactClass = compact ? ' msg-tool-grouped' : '';
+  const combinedStyle = `style="${borderStyle}cursor:pointer"`;
+  const itemClickAttr =
+    m.tool === 'Agent' && m.agentId
+      ? `onclick="showAgentModal('${escapeHtml(m.agentId)}')" ${combinedStyle}`
+      : `onclick="msgDetailFollowLatest=false;showMsgDetail(${i})" ${combinedStyle}`;
+  const pinBtn = renderMsgPinBtn(m, i);
+  return `<div class="msg-item msg-tool${compactClass}" ${itemClickAttr}>
+      ${getToolIcon(m.tool)}
+      <div class="msg-body"><div class="msg-text">${escapeHtml(m.tool)}${toolDetail}${agentLink}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
+    </div>`;
+}
+
+function renderMessageList(messages) {
+  const parts = [];
+  let i = 0;
+  while (i < messages.length) {
+    const m = messages[i];
+
+    if (m.type === 'tool_use') {
+      const key = toolGroupKey(m);
+      let runEnd = i + 1;
+      while (runEnd < messages.length && toolGroupKey(messages[runEnd]) === key) runEnd++;
+      const count = runEnd - i;
+
+      if (count >= 2) {
+        const first = messages[i];
+        const last = messages[runEnd - 1];
+        const toolDetail = getToolDetail(first.tool, first.params, first.detail);
+        const gid = `tool-group-${i}`;
+        const timeRange = `${formatDate(first.timestamp)} – ${formatDate(last.timestamp)}`;
+        const grpAgentLogBtn = resolveAgentLogBtn(first);
+        const grpPinBtn = renderMsgPinBtn(first, i);
+        parts.push(`<div class="msg-tool-group">
+            <div class="msg-item msg-tool msg-tool-group-header" onclick="toggleToolGroup('${gid}')" style="cursor:pointer">
+              ${getToolIcon(first.tool)}
+              <div class="msg-body"><div class="msg-text">${escapeHtml(first.tool)}${toolDetail}<span class="tool-count-badge">×${count}</span></div><div class="msg-time">${timeRange}</div></div>${grpAgentLogBtn}${grpPinBtn}
+            </div>
+            <div class="msg-tool-group-items" id="${gid}">${Array.from({ length: count }, (_, j) => renderToolItem(messages[i + j], i + j, true)).join('')}</div>
+          </div>`);
+        i = runEnd;
+        continue;
+      }
+
+      parts.push(renderToolItem(m, i, false));
+      i++;
+      continue;
+    }
+
+    const clickable = `onclick="msgDetailFollowLatest=false;showMsgDetail(${i})" style="cursor:pointer"`;
+    const pinBtn = renderMsgPinBtn(m, i);
+    if (m.type === 'user') {
+      if (m.systemLabel) {
+        parts.push(`<div class="msg-item msg-system" ${clickable}>
+            ${MSG_ICON_SYSTEM}
+            <div class="msg-body"><div class="msg-text"><code>${escapeHtml(m.systemLabel)}</code></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${pinBtn}
+          </div>`);
+      } else {
+        const cmd = parseCommandMessage(m.text);
+        const displayText = cmd ? cmd : escapeHtml(cleanMessageText(m.text));
+        const isCmd = !!cmd;
+        parts.push(`<div class="msg-item msg-user${isCmd ? ' msg-cmd' : ''}" ${clickable}>
+            ${MSG_ICON_USER}
+            <div class="msg-body"><div class="msg-text">${isCmd ? `<code>${escapeHtml(displayText)}</code>` : displayText}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${pinBtn}
+          </div>`);
+      }
+    } else if (m.type === 'assistant') {
+      parts.push(`<div class="msg-item msg-assistant" ${clickable}>
+          ${MSG_ICON_ASSISTANT}
+          <div class="msg-body"><div class="msg-text">${escapeHtml(cleanMessageText(m.text))}</div><div class="msg-time">${m.model ? `${escapeHtml(m.model)} · ` : ''}${formatDate(m.timestamp)}</div></div>${pinBtn}
+        </div>`);
+    } else if (m.type === 'teammate') {
+      if (m.teammateId && m.color && !teamColorMap[m.teammateId]) teamColorMap[m.teammateId] = m.color;
+      const tmColor = m.color ? resolveNamedColor(m.color)?.color || m.color : '';
+      const nameSpan = `<span class="teammate-name" style="${tmColor ? `color:${escapeHtml(tmColor)}` : ''}">${escapeHtml(m.teammateId || 'teammate')}</span>`;
+      let tmLookupName = m.teammateId;
+      if (m.teammateId === 'system' && m.protocolType === 'teammate_terminated' && m.protocolData?.message) {
+        const shutMatch = m.protocolData.message.match(/^(.+?) has shut down/);
+        if (shutMatch) tmLookupName = shutMatch[1];
+      }
+      const tmAgent = tmLookupName ? currentAgents.find((a) => (a.type || a.name) === tmLookupName) : null;
+      const tmLogBtn = tmAgent ? agentLogButton(tmAgent.agentId) : '';
+      if (m.isIdle) {
+        parts.push(`<div class="msg-item msg-teammate msg-idle" ${clickable}>
+            ${MSG_ICON_IDLE}
+            <div class="msg-body"><div class="msg-text">${nameSpan} <span class="idle-label">${escapeHtml(m.protocolLabel || 'idle')}</span></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}
+          </div>`);
+      } else if (m.isProtocol) {
+        parts.push(`<div class="msg-item msg-teammate msg-protocol" ${clickable}>
+            ${MSG_ICON_TEAMMATE}
+            <div class="msg-body"><div class="msg-text">${nameSpan} <span class="protocol-label">${escapeHtml(m.protocolLabel || m.protocolType)}</span></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}
+          </div>`);
+      } else {
+        const summaryText = m.summary ? escapeHtml(m.summary) : escapeHtml((m.text || '').slice(0, 80));
+        parts.push(`<div class="msg-item msg-teammate" ${clickable}>
+            ${MSG_ICON_TEAMMATE}
+            <div class="msg-body"><div class="msg-text">${nameSpan} ${summaryText}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}${pinBtn}
+          </div>`);
+      }
+    }
+    i++;
+  }
+  return parts.join('');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+function toggleToolGroup(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('show');
+}
+
+function renderMessages(messages) {
+  const container = document.getElementById('message-panel-content');
+  const pinnedContainer = document.getElementById('message-panel-pinned');
+  pinnedContainer.innerHTML = agentLogMode ? '' : renderPinnedSection();
+  if (!messages.length) {
+    container.innerHTML = '<div class="msg-empty">No messages found for this session</div>';
+    return;
+  }
+  const msgsHtml = renderMessageList(messages);
+  const limitBanner =
+    currentMessages.length >= MSG_MAX_LOADED
+      ? `<div class="msg-limit-banner">Showing last ${MSG_MAX_LOADED} messages</div>`
+      : '';
+  container.innerHTML = limitBanner + msgsHtml;
+  if (!msgUserScrolledUp) container.scrollTop = container.scrollHeight;
+  // Auto-load more if content doesn't overflow yet
+  if (
+    msgHasMore &&
+    !msgLoadingMore &&
+    currentMessages.length < MSG_MAX_LOADED &&
+    container.scrollHeight <= container.clientHeight
+  ) {
+    loadOlderMessages();
+  }
+}
+
+let currentMsgDetailIdx = null;
+let msgDetailFollowLatest = false;
+let currentPins = [];
+let pinnedCollapsed = false;
+
+const PIN_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+const MSG_ICON_USER =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+const MSG_ICON_ASSISTANT =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="9" cy="16" r="1.5"/><circle cx="15" cy="16" r="1.5"/><path d="M12 2v4M8 7h8"/></svg>';
+const MSG_ICON_TOOL =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
+const MSG_ICON_SYSTEM =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+const MSG_ICON_TEAMMATE =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
+const MSG_ICON_IDLE =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6"/></svg>';
+const ICON_TASK =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
+const ICON_WEB =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>';
+const TOOL_ICONS = {
+  Bash: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><polyline points="7 10 10 13 7 16"/><line x1="13" y1="16" x2="17" y2="16"/></svg>',
+  Read: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+  Write:
+    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>',
+  Edit: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+  Glob: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><circle cx="14" cy="14" r="3"/><line x1="16.5" y1="16.5" x2="19" y2="19"/></svg>',
+  Grep: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  Agent: MSG_ICON_TEAMMATE,
+  SendMessage:
+    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
+  TaskCreate: ICON_TASK,
+  TaskUpdate: ICON_TASK,
+  TaskGet: ICON_TASK,
+  TaskList: ICON_TASK,
+  ToolSearch:
+    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
+  AskUserQuestion:
+    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  Skill:
+    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+  WebFetch: ICON_WEB,
+  WebSearch: ICON_WEB,
+  NotebookEdit:
+    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>',
+  LSP: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
+};
+function getToolIcon(toolName) {
+  return TOOL_ICONS[toolName] || MSG_ICON_TOOL;
+}
+const AGENT_LOG_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+function agentLogButton(agentId) {
+  return `<button class="msg-agent-log-btn" onclick="event.stopPropagation();viewAgentLog('${escapeHtml(agentId)}')" title="View agent log">${AGENT_LOG_ICON}</button>`;
+}
+
+function getPinId(m) {
+  const content = m.type === 'tool_use' ? `${m.tool}:${(m.detail || '').slice(0, 100)}` : (m.text || '').slice(0, 100);
+  return `${m.type}|${m.timestamp}|${content}`;
+}
+
+function loadPins(sessionId) {
+  try {
+    return JSON.parse(localStorage.getItem(`pinned-messages-${sessionId}`)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function savePins(sessionId, pins) {
+  localStorage.setItem(`pinned-messages-${sessionId}`, JSON.stringify(pins));
+}
+
+function isPinned(m) {
+  return currentPins.some((p) => p.id === getPinId(m));
+}
+
+function isAgentPinned(agentId) {
+  return currentPins.some((p) => p.id === `agent|${agentId}`);
+}
+
+function toggleAgentPin(agentId) {
+  const agent = currentAgents.find((a) => a.agentId === agentId);
+  if (!agent || !currentSessionId) return;
+  const id = `agent|${agentId}`;
+  const idx = currentPins.findIndex((p) => p.id === id);
+  if (idx >= 0) {
+    currentPins.splice(idx, 1);
+  } else {
+    pinnedCollapsed = false;
+    currentPins.push({
+      id,
+      type: 'agent',
+      agentId: agent.agentId,
+      agentType: agent.type || 'unknown',
+      lastMessage: agent.lastMessage || null,
+      timestamp: agent.startedAt || agent.updatedAt,
+      pinnedAt: new Date().toISOString(),
+    });
+  }
+  savePins(currentSessionId, currentPins);
+  renderMessages(currentMessages);
+  renderAgentFooter();
+}
+
+function togglePin(msgIndex) {
+  const m = currentMessages[msgIndex];
+  if (!m || !currentSessionId) return;
+  const id = getPinId(m);
+  const idx = currentPins.findIndex((p) => p.id === id);
+  if (idx >= 0) {
+    currentPins.splice(idx, 1);
+  } else {
+    pinnedCollapsed = false;
+    currentPins.push({
+      id,
+      type: m.type,
+      text: m.text || null,
+      fullText: m.fullText || null,
+      tool: m.tool || null,
+      toolUseId: m.toolUseId || null,
+      toolResult: m.toolResult || null,
+      toolResultTruncated: m.toolResultTruncated || false,
+      detail: m.detail || null,
+      fullDetail: m.fullDetail || null,
+      description: m.description || null,
+      timestamp: m.timestamp,
+      model: m.model || null,
+      agentId: m.agentId || null,
+      agentPrompt: m.agentPrompt || null,
+      agentLastMessage: m.agentLastMessage || null,
+      pinnedAt: new Date().toISOString(),
+    });
+  }
+  savePins(currentSessionId, currentPins);
+  renderMessages(currentMessages);
+  updateMsgDetailPinState();
+}
+
+function unpinById(pinIdx) {
+  if (!currentSessionId || pinIdx < 0 || pinIdx >= currentPins.length) return;
+  const wasAgent = currentPins[pinIdx].type === 'agent';
+  currentPins.splice(pinIdx, 1);
+  savePins(currentSessionId, currentPins);
+  renderMessages(currentMessages);
+  if (wasAgent) renderAgentFooter();
+  updateMsgDetailPinState();
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function togglePinFromModal() {
+  if (currentMsgDetailIdx != null && currentMessages[currentMsgDetailIdx]) {
+    togglePin(currentMsgDetailIdx);
+  } else if (currentPinDetailId != null) {
+    const pinIdx = currentPins.findIndex((p) => p.id === currentPinDetailId);
+    if (pinIdx >= 0) unpinById(pinIdx);
+    currentPinDetailId = null;
+    closeMsgDetailModal();
+  }
+}
+
+let currentPinDetailId = null;
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function showPinnedMsgDetail(pinIdx) {
+  const pin = currentPins[pinIdx];
+  if (!pin) return;
+  const idx = currentMessages.findIndex((m) => getPinId(m) === pin.id);
+  if (idx >= 0) {
+    currentPinDetailId = null;
+    showMsgDetail(idx);
+    return;
+  }
+  currentMsgDetailIdx = null;
+  currentPinDetailId = pin.id;
+  _renderPinToDetail(pin);
+  const body = document.getElementById('msg-detail-body');
+  const pinModal = document.getElementById('msg-detail-modal').querySelector('.modal');
+  autoSizeModal(pinModal, body);
+  const pinBtn = document.getElementById('msg-detail-pin-btn');
+  if (pinBtn) pinBtn.classList.add('active');
+  document.getElementById('msg-detail-modal').classList.add('visible');
+}
+
+function updateMsgDetailPinState() {
+  const pinBtn = document.getElementById('msg-detail-pin-btn');
+  if (!pinBtn) return;
+  if (currentMsgDetailIdx != null && currentMessages[currentMsgDetailIdx]) {
+    pinBtn.classList.toggle('active', isPinned(currentMessages[currentMsgDetailIdx]));
+  } else if (currentPinDetailId) {
+    pinBtn.classList.toggle(
+      'active',
+      currentPins.some((p) => p.id === currentPinDetailId),
+    );
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function togglePinnedCollapse() {
+  pinnedCollapsed = !pinnedCollapsed;
+  const header = document.querySelector('.pinned-header');
+  const items = document.querySelector('.pinned-items');
+  if (header) header.classList.toggle('collapsed', pinnedCollapsed);
+  if (items) items.classList.toggle('collapsed', pinnedCollapsed);
+}
+
+//#endregion
+
+//#region PINNING
+let pinnedSessionIds = new Set();
+let stickySessionIds = new Set();
+// Pinning the currently-selected session keeps it in place until deselected (less UI movement).
+const deferredPinPlacement = new Set();
+
+function loadPinnedSessions() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('pinned-sessions')) || []);
+  } catch {
+    return new Set();
+  }
+}
+
+function loadStickySessions() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('sticky-sessions')) || []);
+  } catch {
+    return new Set();
+  }
+}
+
+function savePinnedSessions() {
+  localStorage.setItem('pinned-sessions', JSON.stringify([...pinnedSessionIds]));
+  localStorage.setItem('sticky-sessions', JSON.stringify([...stickySessionIds]));
+}
+
+// Mirror pin state to server so it can be queried by the CLI. UI remains source of truth for itself.
+function offloadSessionPin(sessionId) {
+  const state = getSessionPinState(sessionId);
+  fetch('/api/session/pin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: sessionId, state }),
+  }).catch(() => {});
+}
+
+function toggleSessionPin(sessionId) {
+  if (pinnedSessionIds.has(sessionId)) {
+    pinnedSessionIds.delete(sessionId);
+    stickySessionIds.delete(sessionId);
+    deferredPinPlacement.delete(sessionId);
+  } else {
+    pinnedSessionIds.add(sessionId);
+    if (sessionId === currentSessionId) deferredPinPlacement.add(sessionId);
+  }
+  savePinnedSessions();
+  offloadSessionPin(sessionId);
+  renderSessions();
+}
+
+function toggleSessionSticky(sessionId) {
+  if (stickySessionIds.has(sessionId)) {
+    stickySessionIds.delete(sessionId);
+    pinnedSessionIds.delete(sessionId);
+    deferredPinPlacement.delete(sessionId);
+  } else {
+    pinnedSessionIds.add(sessionId);
+    stickySessionIds.add(sessionId);
+    if (sessionId === currentSessionId) deferredPinPlacement.add(sessionId);
+  }
+  savePinnedSessions();
+  offloadSessionPin(sessionId);
+  renderSessions();
+}
+
+function isPlacedPinned(id) {
+  return pinnedSessionIds.has(id) && !deferredPinPlacement.has(id);
+}
+function isPlacedSticky(id) {
+  return stickySessionIds.has(id) && !deferredPinPlacement.has(id);
+}
+
+function handleSessionPinEvent({ id, state }) {
+  if (!id) return;
+  pinnedSessionIds.delete(id);
+  stickySessionIds.delete(id);
+  deferredPinPlacement.delete(id);
+  if (state === 'pinned') pinnedSessionIds.add(id);
+  if (state === 'sticky') {
+    pinnedSessionIds.add(id);
+    stickySessionIds.add(id);
+  }
+  savePinnedSessions();
+  renderSessions();
+}
+
+function getSessionPinState(sessionId) {
+  if (stickySessionIds.has(sessionId)) return 'sticky';
+  if (pinnedSessionIds.has(sessionId)) return 'pinned';
+  return 'none';
+}
+
+function isAnyPinned(sessionId) {
+  return pinnedSessionIds.has(sessionId) || stickySessionIds.has(sessionId);
+}
+
+function _renderPinToDetail(pin) {
+  const body = document.getElementById('msg-detail-body');
+  const agentBtn = document.getElementById('msg-detail-agent-btn');
+  agentBtn.style.display = 'none';
+  if (pin.type === 'tool_use') {
+    document.getElementById('msg-detail-title').textContent = pin.tool || 'Tool';
+    const fullText = pin.fullDetail || pin.detail || '';
+    const pinParamsHtml = renderToolParamsHtml(pin.params);
+    const pinResultHtml = renderToolResultHtml(
+      pin.toolResult,
+      pin.toolResultTruncated,
+      pin.toolResultFull,
+      pin.toolUseId,
+    );
+    const pinDetailEscaped = escapeHtml(fullText);
+    const pinDetailRendered = pin.tool === 'Bash' ? highlightBash(pinDetailEscaped) : pinDetailEscaped;
+    body.innerHTML =
+      (fullText ? `<pre class="${TINTED_PRE_CLASS}">${pinDetailRendered}</pre>` : '<em>No details</em>') +
+      pinParamsHtml +
+      pinResultHtml;
+  } else if (pin.type === 'agent') {
+    document.getElementById('msg-detail-title').textContent = pin.agentType || 'Agent';
+    const lastMsg = stripAnsi(pin.lastMessage || '');
+    body.innerHTML = lastMsg ? renderMarkdown(lastMsg) : '<em>No agent message</em>';
+  } else {
+    const text = stripAnsi(pin.fullText || pin.text || '');
+    document.getElementById('msg-detail-title').textContent = pin.type === 'assistant' ? 'Pi' : 'User';
+    body.innerHTML = renderMarkdown(text);
+  }
+  document.getElementById('msg-detail-meta').textContent = formatDate(pin.timestamp);
+}
+
+const SESSION_PIN_SVG = PIN_SVG.replace('width="14" height="14"', 'width="12" height="12"');
+const MARKETPLACE_SVG =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 01-8 0"/></svg>';
+const MEMORY_SVG =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>';
+const LINK_SVG_PATHS =
+  '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>';
+const linkSvg = (size) =>
+  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${LINK_SVG_PATHS}</svg>`;
+
+//#endregion
+
+//#region MODALS
+function showMsgDetail(idx) {
+  currentMsgDetailIdx = idx;
+  const m = currentMessages[idx];
+  if (!m) return;
+  const body = document.getElementById('msg-detail-body');
+  if (m.type === 'tool_use') {
+    document.getElementById('msg-detail-title').textContent = m.tool;
+    const fullText = m.fullDetail || m.detail || '';
+    const descHtml =
+      m.description && m.description !== fullText
+        ? `<div style="margin-bottom:8px;color:var(--text-secondary);font-size:0.85rem">${escapeHtml(m.description)}</div>`
+        : '';
+    let agentExtraHtml = '';
+    const agentBtn = document.getElementById('msg-detail-agent-btn');
+    if (m.tool === 'Agent' && m.agentId) {
+      const agentRespText = m.agentLastMessage ? stripAnsi(m.agentLastMessage.trim()) : null;
+      const agentPromptText = m.agentPrompt || null;
+      const respHtml = agentRespText ? renderMarkdown(agentRespText) : null;
+      const promptHtml = agentPromptText ? renderMarkdown(agentPromptText) : null;
+      agentExtraHtml += renderAgentTabs(promptHtml, respHtml, agentPromptText, agentRespText);
+      agentBtn.style.display = '';
+      agentBtn.dataset.agentId = m.agentId;
+    } else {
+      agentBtn.style.display = 'none';
+    }
+    const sendProto = m.tool === 'SendMessage' && m.params?.protocol;
+    const toolParamsHtml = renderToolParamsHtml(
+      sendProto ? Object.fromEntries(Object.entries(m.params).filter(([k]) => k !== 'protocol')) : m.params,
+    );
+    const hideResult = m.tool === 'SendMessage' || TASK_TOOLS.has(m.tool);
+    const taskResultHtml = TASK_TOOLS.has(m.tool) ? renderTaskResult(m.toolResult) : '';
+    const toolResultHtml = hideResult
+      ? ''
+      : renderToolResultHtml(m.toolResult, m.toolResultTruncated, m.toolResultFull, m.toolUseId);
+    const hasAgentTabs = m.tool === 'Agent' && m.agentId && (m.agentLastMessage || m.agentPrompt);
+    let mainHtml;
+    if (sendProto) {
+      mainHtml = descHtml + renderProtocolDetail(m.params.protocol);
+    } else if (m.tool === 'SendMessage' && fullText) {
+      mainHtml = `${descHtml}<div class="markdown-body">${renderMarkdown(fullText)}</div>`;
+    } else if (hasAgentTabs) {
+      mainHtml = descHtml || '';
+    } else if (taskResultHtml) {
+      mainHtml = '';
+    } else if (fullText) {
+      const detailEscaped = escapeHtml(fullText);
+      const detailRendered = m.tool === 'Bash' ? highlightBash(detailEscaped) : detailEscaped;
+      mainHtml = `${descHtml}<pre class="${TINTED_PRE_CLASS}">${detailRendered}</pre>`;
+    } else {
+      mainHtml = TASK_TOOLS.has(m.tool) ? '' : '<em>No details</em>';
+    }
+    body.innerHTML = mainHtml + toolParamsHtml + taskResultHtml + (hasAgentTabs ? '' : toolResultHtml) + agentExtraHtml;
+  } else if (m.type === 'teammate') {
+    document.getElementById('msg-detail-title').textContent = m.teammateId || 'Teammate';
+    document.getElementById('msg-detail-agent-btn').style.display = 'none';
+    if (m.isProtocol) {
+      body.innerHTML = m.protocolData
+        ? renderProtocolDetail(m.protocolData)
+        : `<div class="teammate-idle-detail"><span class="protocol-label">${escapeHtml(m.protocolLabel || m.protocolType)}</span></div>`;
+    } else {
+      const text = stripAnsi(m.fullText || m.text || '');
+      body.innerHTML = renderMarkdown(text);
+    }
+  } else {
+    const rawText = stripAnsi(m.fullText || m.text);
+    const cmd = m.type === 'user' ? parseCommandMessage(rawText) : null;
+    document.getElementById('msg-detail-title').textContent =
+      m.type === 'assistant' ? 'Pi' : m.systemLabel ? 'System' : 'User';
+    document.getElementById('msg-detail-agent-btn').style.display = 'none';
+    if (m.compactSummary) {
+      body.innerHTML = renderMarkdown(m.compactSummary);
+    } else if (cmd) {
+      const argsMatch = rawText.match(/<command-args>([^<]*)<\/command-args>/);
+      const args = argsMatch?.[1].trim() ? argsMatch[1].trim() : null;
+      const cleanBody = rawText
+        .replace(/<command-[^>]+>[\s\S]*?<\/command-[^>]+>/g, '')
+        .replace(/<local-command-[^>]+>[\s\S]*?<\/local-command-[^>]+>/g, '')
+        .trim();
+      let cmdHtml = `<code>${escapeHtml(cmd)}${args ? ` ${escapeHtml(args)}` : ''}</code>`;
+      if (cleanBody) cmdHtml += `<div style="margin-top:10px">${renderMarkdown(cleanBody)}</div>`;
+      body.innerHTML = cmdHtml;
+    } else {
+      body.innerHTML = renderMarkdown(rawText);
+    }
+  }
+  const modal = document.getElementById('msg-detail-modal').querySelector('.modal');
+  autoSizeModal(modal, body);
+  modal.classList.toggle('live', msgDetailFollowLatest);
+  const overlay = document.getElementById('msg-detail-modal');
+  overlay.classList.toggle('live-overlay', msgDetailFollowLatest);
+
+  const meta = [formatDate(m.timestamp)];
+  if (m.model) meta.unshift(m.model);
+  meta.push(`${idx + 1} of ${currentMessages.length}`);
+  document.getElementById('msg-detail-meta').textContent = meta.join(' · ');
+  currentPinDetailId = null;
+  updateMsgDetailPinState();
+  overlay.classList.add('visible');
+}
+
+function closeMsgDetailModal() {
+  resetModalFullscreen('msg-detail-modal');
+  msgDetailFollowLatest = false;
+}
+
+function _setModalWidth(modal, slot, on, maxWidth, width) {
+  const mwKey = `prev${slot}MaxWidth`;
+  const wKey = `prev${slot}Width`;
+  if (on) {
+    modal.dataset[mwKey] = modal.style.maxWidth || '';
+    modal.dataset[wKey] = modal.style.width || '';
+    modal.style.maxWidth = maxWidth;
+    modal.style.width = width;
+  } else {
+    modal.style.maxWidth = modal.dataset[mwKey] || '';
+    modal.style.width = modal.dataset[wKey] || '';
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleModalFullscreen(modalId) {
+  const modal = document.querySelector(`#${modalId} .modal`);
+  const isFs = modal.classList.toggle('fullscreen');
+  _setModalWidth(modal, 'Fs', isFs, '', '');
+  updateFullscreenBtnIcon(`${modalId}-fullscreen-btn`, isFs);
+}
+
+function resetModalFullscreen(modalId) {
+  const modal = document.getElementById(modalId);
+  modal.classList.remove('visible');
+  modal.querySelector('.modal').classList.remove('fullscreen');
+  updateFullscreenBtnIcon(`${modalId}-fullscreen-btn`, false);
+  return modal;
+}
+
+function updateFullscreenBtnIcon(btnId, isFullscreen) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.innerHTML = isFullscreen
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+}
+
+let _toastTimer = null;
+let _manualRefreshing = false;
+//#endregion
+
+//#region TOAST
+function showToast(msg, type) {
+  const el = document.getElementById('toast');
+  clearTimeout(_toastTimer);
+  el.style.transition = 'none';
+  el.classList.remove('visible', 'toast-success', 'toast-error', 'toast-info');
+  void el.offsetHeight;
+  el.style.transition = '';
+  el.textContent = msg;
+  if (type) el.classList.add(`toast-${type}`);
+  el.classList.add('visible');
+  _toastTimer = setTimeout(() => el.classList.remove('visible'), 2000);
+}
+
+async function copyWithFeedback(text, btn) {
+  if (btn.dataset.copying) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.dataset.copying = '1';
+    const svg = btn.innerHTML;
+    btn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M20 6L9 17l-5-5"/></svg>';
+    setTimeout(() => {
+      btn.innerHTML = svg;
+      delete btn.dataset.copying;
+    }, 1500);
+  } catch (e) {
+    console.error('Failed to copy:', e);
+  }
+}
+
+//#endregion
+
+//#region TOOL_RENDERING
+const PROTOCOL_SKIP_KEYS = new Set(['type', 'from', 'timestamp', 'paneId', 'backendType']);
+function renderProtocolDetail(data) {
+  if (!data || typeof data !== 'object') return '';
+  const typeBadge = data.type
+    ? `<span class="protocol-type-badge">${escapeHtml(data.type.replace(/_/g, ' '))}</span>`
+    : '';
+  const fields = Object.entries(data)
+    .filter(([k]) => !PROTOCOL_SKIP_KEYS.has(k))
+    .map(([k, v]) => {
+      const label = escapeHtml(
+        k
+          .replace(/([A-Z])/g, ' $1')
+          .replace(/_/g, ' ')
+          .trim()
+          .toLowerCase(),
+      );
+      let val;
+      if (typeof v === 'boolean') {
+        val = `<span class="protocol-bool protocol-bool-${v}">${v ? 'yes' : 'no'}</span>`;
+      } else if (v == null) {
+        val = `<span style="color:var(--text-muted)">null</span>`;
+      } else {
+        val = escapeHtml(String(v));
+      }
+      return `<div class="protocol-field"><span class="protocol-field-key">${label}</span>${val}</div>`;
+    });
+  return `<div class="protocol-detail">${typeBadge}${fields.length ? `<div class="protocol-fields">${fields.join('')}</div>` : ''}</div>`;
+}
+
+const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList']);
+const TASK_STATUS_COLORS = {
+  pending: 'var(--text-muted)',
+  in_progress: 'var(--info)',
+  completed: 'var(--success)',
+  deleted: 'var(--danger)',
+};
+function formatTaskStatusBadge(status) {
+  const color = TASK_STATUS_COLORS[status] || 'var(--text-muted)';
+  return `<span style="color:${color};font-weight:600;text-transform:uppercase;font-size:0.85em">${escapeHtml(status)}</span>`;
+}
+function formatTaskToolDetail(params) {
+  if (!params) return '';
+  const parts = [];
+  if (params.taskId) {
+    const id = String(params.taskId).replace(/^#/, '');
+    parts.push(`<span style="color:var(--text-muted)">#${escapeHtml(id)}</span>`);
+  }
+  if (params.status) parts.push(formatTaskStatusBadge(params.status));
+  if (params.subject) parts.push(`<span style="color:var(--text-secondary)">${escapeHtml(params.subject)}</span>`);
+  return parts.length ? ` ${parts.join(' ')}` : '';
+}
+function getToolDetail(tool, params, detail) {
+  if (TASK_TOOLS.has(tool)) return formatTaskToolDetail(params);
+  if (!detail) return '';
+  let extra = '';
+  if (tool === 'Read' && params) {
+    const parts = [];
+    if (params.offset) parts.push(`L${params.offset}`);
+    if (params.limit) parts.push(`+${params.limit}`);
+    if (parts.length) extra = ` <span style="color:var(--text-muted)">${parts.join(' ')}</span>`;
+  }
+  return ` <span style="color:var(--text-secondary)">${escapeHtml(detail)}</span>${extra}`;
+}
+function renderTaskResult(toolResult) {
+  if (!toolResult) return '';
+  const lines = toolResult.trim().split('\n');
+  const fields = [];
+  for (const line of lines) {
+    const m = line.match(/^([A-Za-z #]+):\s*(.+)$/);
+    if (m) fields.push([m[1].trim(), m[2].trim()]);
+  }
+  if (!fields.length) return '';
+  const title = fields.find(([k]) => /^Task/.test(k));
+  const status = fields.find(([k]) => k === 'Status');
+  const rest = fields.filter(([k]) => !/^Task/.test(k) && k !== 'Status');
+  let html = '<div class="protocol-detail">';
+  if (title) html += `<span class="protocol-type-badge">${escapeHtml(title[1])}</span>`;
+  if (status) html += `<span style="display:inline-block;margin-bottom:6px">${formatTaskStatusBadge(status[1])}</span>`;
+  if (rest.length) {
+    html += '<div class="protocol-fields">';
+    for (const [k, v] of rest) {
+      html += `<div class="protocol-field"><span class="protocol-field-key">${escapeHtml(k.toLowerCase())}</span>${escapeHtml(v)}</div>`;
+    }
+    html += '</div>';
+  }
+  return `${html}</div>`;
+}
+
+function renderToolParamsHtml(params) {
+  if (!params) return '';
+  const BLOCK_KEYS = new Set(['old_string', 'new_string', 'content', 'plan', 'edits']);
+  const badges = [],
+    blocks = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (BLOCK_KEYS.has(k)) continue;
+    const display = typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v);
+    if (display.length > 60) {
+      blocks.push({ k, display });
+    } else {
+      badges.push(
+        `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:3px;background:var(--bg-secondary);font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> ${escapeHtml(display)}</span>`,
+      );
+    }
+  }
+  let html = '';
+  if (badges.length) html += `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">${badges.join('')}</div>`;
+  for (const { k, display } of blocks) {
+    html += `<div style="margin-top:6px;font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> <span style="word-break:break-all">${escapeHtml(display)}</span></div>`;
+  }
+  if (params.old_string || params.new_string) {
+    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">`;
+    if (params.old_string) {
+      html += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px">old_string</div>
+            <pre class="${TINTED_PRE_CLASS}" style="max-height:200px;overflow:auto;border-left:3px solid #e55;padding-left:8px">${escapeHtml(params.old_string)}</pre>`;
+    }
+    if (params.new_string) {
+      html += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px;margin-top:6px">new_string</div>
+            <pre class="${TINTED_PRE_CLASS}" style="max-height:200px;overflow:auto;border-left:3px solid #5b5;padding-left:8px">${escapeHtml(params.new_string)}</pre>`;
+    }
+    html += `</div>`;
+  }
+  if (params.content) {
+    const contentTruncated = params.content.length > CONTENT_TRUNCATE_MAX;
+    const truncContent = contentTruncated
+      ? `${params.content.slice(0, CONTENT_TRUNCATE_MAX)}\n... (truncated)`
+      : params.content;
+    let writeMoreBtn = '',
+      fullBlock = '';
+    if (contentTruncated) {
+      const toggle = makeExpandToggle(escapeHtml(truncContent), escapeHtml(params.content), {
+        fontSize: '0.75rem',
+        maxHeight: '500px',
+        tinted: true,
+      });
+      writeMoreBtn = ` ${toggle.btn}`;
+      fullBlock = toggle.full;
+    }
+    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
+          <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px">content${writeMoreBtn}</div>
+          <pre class="${TINTED_PRE_CLASS}" style="max-height:300px;overflow:auto">${escapeHtml(truncContent)}</pre>
+          ${fullBlock}
+        </div>`;
+  }
+  if (Array.isArray(params.edits) && params.edits.length) {
+    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">`;
+    html += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">${params.edits.length} edits</div>`;
+    params.edits.forEach((e, i) => {
+      const oldS = e.old_string || e.oldText || '';
+      const newS = e.new_string || e.newText || '';
+      html += `<div style="margin-top:${i ? 8 : 0}px">
+            <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">edit ${i + 1} — old</div>
+            <pre class="${TINTED_PRE_CLASS}" style="max-height:160px;overflow:auto;border-left:3px solid #e55;padding-left:8px">${escapeHtml(oldS)}</pre>
+            <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;margin-bottom:2px">edit ${i + 1} — new</div>
+            <pre class="${TINTED_PRE_CLASS}" style="max-height:160px;overflow:auto;border-left:3px solid #5b5;padding-left:8px">${escapeHtml(newS)}</pre>
+          </div>`;
+    });
+    html += `</div>`;
+  }
+  if (params.plan) {
+    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
+          <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">Plan</div>
+          <div class="markdown-body">${renderMarkdown(params.plan)}</div>
+        </div>`;
+  }
+  return html;
+}
+
+// Strip cat -n style line number prefix (e.g. "   1→" or "   1\t") from tool output
+function stripLineNumbers(text) {
+  return text.replace(/^ *\d+[→\t]/gm, '');
+}
+
+function highlightBash(escaped) {
+  return escaped
+    .replace(/^(\s*)(#.*)$/gm, '$1<span style="color:#6a9955">$2</span>')
+    .replace(/(&#x27;[\s\S]*?&#x27;|&quot;[\s\S]*?&quot;)/g, '<span style="color:#ce9178">$1</span>')
+    .replace(
+      /\b(if|then|else|elif|fi|for|do|done|while|until|case|esac|function|return|in|select)\b/g,
+      '<span style="color:#c586c0">$1</span>',
+    )
+    .replace(
+      /\b(echo|cd|ls|cat|grep|awk|sed|rm|cp|mv|mkdir|chmod|chown|export|source|exit|test|read|printf|set|unset|eval|exec|trap|wait|kill|sudo|apt|npm|npx|git|docker|curl|wget|pip|python|node|make|dotnet)\b/g,
+      '<span style="color:#569cd6">$1</span>',
+    )
+    .replace(/(\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*)/g, '<span style="color:#9cdcfe">$1</span>')
+    .replace(/((?:^|\s)(?:&amp;&amp;|\|\||[|;])(?:\s|$))/g, '<span style="color:#d4d4d4;font-weight:bold">$1</span>');
+}
+
+const TINTED_PRE_CLASS = 'msg-detail-pre msg-detail-pre-tinted';
+let _expandIdCounter = 0;
+function _applyExpandToggle(btn, fullEl) {
+  const truncEl = btn.parentElement.nextElementSibling;
+  const expand = fullEl.style.display === 'none';
+  fullEl.style.display = expand ? 'block' : 'none';
+  if (truncEl) truncEl.style.display = expand ? 'none' : 'block';
+  btn.textContent = expand ? 'Show less' : 'Show more';
+  const panel = btn.closest('.message-panel');
+  if (panel) panel.classList.toggle('msg-expanded-wide', expand);
+  const modal = btn.closest('.modal');
+  if (modal) _setModalWidth(modal, 'Expand', expand, '60vw', '60vw');
+}
+function _toggleExpand(btn) {
+  const f = document.getElementById(btn.dataset.expandId);
+  if (f) _applyExpandToggle(btn, f);
+}
+function makeExpandToggle(_truncatedHtml, fullHtml, opts = {}) {
+  const id = `expand-${++_expandIdCounter}`;
+  const fontSize = opts.fontSize || '0.8rem';
+  const maxHeight = opts.maxHeight || '';
+  const cls = opts.tinted ? TINTED_PRE_CLASS : 'msg-detail-pre';
+  const btn = `<button data-expand-id="${id}" onclick="_toggleExpand(this)" class="expand-toggle-btn" style="font-size:${fontSize}">Show more</button>`;
+  const mhStyle = maxHeight ? `max-height:${maxHeight};` : '';
+  const full = `<pre id="${id}" class="${cls}" style="${mhStyle}overflow:auto;display:none">${fullHtml}</pre>`;
+  return { btn, full };
+}
+
+function autoSizeModal(modal, body) {
+  if (modal.classList.contains('fullscreen')) return;
+  modal.style.maxWidth = '';
+  modal.classList.remove('has-mermaid');
+  const hasMermaid = body.querySelector('pre.mermaid') !== null;
+  if (hasMermaid) {
+    modal.classList.add('has-mermaid');
+    return;
+  }
+  const hasTable = body.querySelector('table') !== null;
+  const hasPre = body.querySelector('pre') !== null;
+  const desired = hasTable ? 1100 : body.textContent.length > 2000 || hasPre ? 960 : 860;
+  const current = parseFloat(getComputedStyle(modal).maxWidth) || 0;
+  if (desired > current) modal.style.maxWidth = `${desired}px`;
+}
+
+function renderToolResultHtml(toolResult, isTruncated, fullResult, toolUseId) {
+  if (!toolResult) return '';
+  const stripped = stripLineNumbers(toolResult);
+  const escaped = escapeHtml(stripped);
+  let truncLabel = '',
+    fullBlock = '';
+  if (isTruncated && fullResult) {
+    const toggle = makeExpandToggle(escaped, escapeHtml(stripLineNumbers(fullResult)));
+    truncLabel = toggle.btn;
+    fullBlock = toggle.full;
+  } else if (isTruncated && toolUseId) {
+    const id = `expand-${++_expandIdCounter}`;
+    truncLabel = `<button data-expand-id="${id}" data-tool-use-id="${escapeHtml(toolUseId)}" onclick="_toggleToolResultExpand(this)" class="expand-toggle-btn" style="font-size:0.8rem">Show more</button>`;
+    fullBlock = `<pre id="${id}" class="msg-detail-pre" style="overflow:auto;display:none"></pre>`;
+  } else if (isTruncated) {
+    truncLabel = '<span style="color:var(--text-muted);font-size:0.8rem;margin-left:6px">(truncated)</span>';
+  }
+  return `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+        <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:4px">Output${truncLabel}</div>
+        <pre class="msg-detail-pre" style="overflow:auto">${escaped}</pre>
+        ${fullBlock}
+      </div>`;
+}
+
+async function _toggleToolResultExpand(btn) {
+  const f = document.getElementById(btn.dataset.expandId);
+  if (!f) return;
+  if (!btn.dataset.loaded) {
+    if (!currentSessionId || !btn.dataset.toolUseId) return;
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+    try {
+      const r = await fetch(
+        `/api/sessions/${encodeURIComponent(currentSessionId)}/tool-result/${encodeURIComponent(btn.dataset.toolUseId)}`,
+      );
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const { content } = await r.json();
+      f.textContent = stripLineNumbers(content);
+      btn.dataset.loaded = '1';
+    } catch (_e) {
+      btn.textContent = 'Show more';
+      btn.disabled = false;
+      showToast('Failed to load full output');
+      return;
+    }
+    btn.disabled = false;
+  }
+  _applyExpandToggle(btn, f);
+}
+
+function buildToolContent(m) {
+  let content = m.fullDetail || m.detail || '';
+  if (m.toolResult) content += `\n\n--- Output ---\n\n${m.toolResultFull || m.toolResult}`;
+  return content;
+}
+
+function getMessageDisplayContent(m) {
+  return m.type === 'tool_use' ? buildToolContent(m) : m.compactSummary || stripAnsi(m.fullText || m.text);
+}
+
+function getDetailMsg() {
+  if (currentMsgDetailIdx != null) return currentMessages[currentMsgDetailIdx];
+  if (currentPinDetailId) return currentPins.find((p) => p.id === currentPinDetailId);
+  return null;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function copyMsgToClipboard(btn) {
+  const m = getDetailMsg();
+  if (!m) return;
+  copyWithFeedback(getMessageDisplayContent(m), btn);
+}
+
+async function postAndToast(url, body, label) {
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    showToast(r.ok ? `Opened ${label}` : `Failed to open ${label}`);
+  } catch (_e) {
+    showToast(`Failed to open ${label}`);
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function openMsgInEditor() {
+  const m = getDetailMsg();
+  if (!m) return;
+  const title = m.type === 'tool_use' ? m.tool : m.compactSummary ? 'compact-summary' : m.type;
+  postAndToast('/api/open-in-editor', { content: getMessageDisplayContent(m), title }, 'in editor');
+}
+
+function formatDuration(ms) {
+  if (!ms) return '0s';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+//#endregion
+
+//#region AGENTS
+function renderAgentFooter() {
+  const footer = document.getElementById('agent-footer');
+  const content = document.getElementById('agent-footer-content');
+  const label = document.getElementById('agent-footer-label');
+  const now = Date.now();
+
+  const agents = currentAgents;
+  // Filter shutdown ghosts: for same-type agents, keep if they overlapped (parallel)
+  // or started >30s after previous stopped (legitimate re-spawn). Filter the rest.
+  const byType = {};
+  for (const a of agents) {
+    const groupKey = a.agentName || a.type;
+    if (!byType[groupKey]) byType[groupKey] = [];
+    byType[groupKey].push(a);
+  }
+  const filtered = [];
+  for (const group of Object.values(byType)) {
+    group.sort((a, b) => new Date(a.startedAt || 0) - new Date(b.startedAt || 0));
+    filtered.push(group[0]);
+    let maxStop = group[0].stoppedAt ? new Date(group[0].stoppedAt).getTime() : Infinity;
+    for (let i = 1; i < group.length; i++) {
+      const cur = group[i];
+      const hasContent = cur.prompt || cur.lastMessage;
+      const curStart = new Date(cur.startedAt || 0).getTime();
+      const overlapped = curStart < maxStop;
+      const reSpawn = curStart - maxStop > 30000;
+      const isActive = cur.status === 'active' || cur.status === 'idle';
+      if (overlapped || reSpawn || isActive || hasContent) filtered.push(cur);
+      const curStop = cur.stoppedAt ? new Date(cur.stoppedAt).getTime() : Infinity;
+      if (curStop > maxStop) maxStop = curStop;
+    }
+  }
+  // Sort: active/idle first, then by updatedAt desc
+  const statusOrder = { active: 0, idle: 1, stopped: 2 };
+  const visible = filtered
+    .sort(
+      (a, b) =>
+        (statusOrder[a.status] ?? 2) - (statusOrder[b.status] ?? 2) ||
+        new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0),
+    )
+    .slice(0, AGENT_LOG_MAX);
+
+  const permFresh = currentWaiting?.timestamp && now - new Date(currentWaiting.timestamp).getTime() < WAITING_TTL_MS;
+
+  if (visible.length === 0 && !permFresh) {
+    footer.classList.remove('visible');
+    clearInterval(agentDurationInterval);
+    agentDurationInterval = null;
+    clearInterval(agentPollInterval);
+    agentPollInterval = null;
+    return;
+  }
+
+  footer.classList.add('visible');
+  label.textContent = `Agents Log (${visible.length})`;
+
+  const collapsed = localStorage.getItem('agentFooterCollapsed') === 'true';
+  footer.classList.toggle('collapsed', collapsed);
+  document.getElementById('agent-footer-toggle').innerHTML = collapsed ? '&#x25B4;' : '&#x25BE;';
+
+  const permHtml = permFresh
+    ? `<div class="permission-badge">${currentWaiting.kind === 'question' ? '❓ Question pending' : `⏳ Awaiting: ${escapeHtml(currentWaiting.toolName || 'unknown')}`}</div>`
+    : '';
+
+  content.innerHTML =
+    permHtml +
+    visible
+      .map((a) => {
+        const elapsed =
+          a.status === 'stopped' && a.stoppedAt
+            ? new Date(a.stoppedAt).getTime() - new Date(a.startedAt || a.stoppedAt).getTime()
+            : now - new Date(a.startedAt || a.updatedAt).getTime();
+        const statusText =
+          a.status === 'stopped'
+            ? `stopped · ${formatDuration(elapsed)}`
+            : a.status === 'idle'
+              ? `idle · ${formatDuration(elapsed)}`
+              : `active · ${formatDuration(elapsed)}`;
+        const descText = a.description || '';
+        const promptTrimmed = stripAnsi(stripTeammateWrapper((a.prompt || '').trim())).replace(/[\r\n]+/g, ' ');
+        const displayText = descText || promptTrimmed;
+        const displayTrunc = displayText.length > 60 ? `${displayText.substring(0, 60)}…` : displayText;
+        const msgHtml = displayTrunc
+          ? `<div class="agent-message" title="${escapeHtml(displayText)}">${escapeHtml(displayTrunc)}</div>`
+          : '';
+        const rawType = a.type || 'unknown';
+        const colonIdx = rawType.indexOf(':');
+        const typeNs = colonIdx > 0 ? rawType.substring(0, colonIdx + 1) : '';
+        const typeName = colonIdx > 0 ? rawType.substring(colonIdx + 1) : rawType;
+        const agentNameVal = a.agentName || null;
+        const nameColor = agentNameVal ? getOwnerColor(agentNameVal) : null;
+        const nameBadgeHtml = nameColor
+          ? `<span class="task-owner-badge task-owner-badge--compact" style="background:${nameColor.bg};color:${nameColor.color}">${escapeHtml(agentNameVal)}</span>`
+          : '';
+        const agentColor = resolveNamedColor(a.color);
+        const colorStyle = agentColor ? ` style="border-left:3px solid ${agentColor.color}"` : '';
+        return `<div class="agent-card"${colorStyle} onclick="showAgentModal('${a.agentId}')">
+          <div class="agent-type-row">${typeNs ? `<span class="agent-type-ns">${escapeHtml(typeNs)}</span>` : ''}<span class="agent-type-name">${escapeHtml(typeName)}</span>${nameBadgeHtml}</div>
+          <div class="agent-status-row"><span class="agent-dot ${a.status}"></span><span class="agent-status">${statusText}</span></div>
+          ${msgHtml}
+        </div>`;
+      })
+      .join('');
+
+  clearInterval(agentDurationInterval);
+  if (visible.some((a) => a.status === 'active' || a.status === 'idle')) {
+    agentDurationInterval = setInterval(() => renderAgentFooter(), 1000);
+    if (!agentPollInterval) {
+      agentPollInterval = setInterval(() => {
+        if (viewMode === 'project' && currentProjectPath) {
+          refreshProjectAgents();
+        } else if (currentSessionId) {
+          fetchAgents(currentSessionId);
+        }
+      }, 3000);
+    }
+  } else {
+    agentDurationInterval = setInterval(() => renderAgentFooter(), 10000);
+    clearInterval(agentPollInterval);
+    agentPollInterval = null;
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleAgentFooter() {
+  const footer = document.getElementById('agent-footer');
+  const collapsed = !footer.classList.contains('collapsed');
+  footer.classList.toggle('collapsed', collapsed);
+  localStorage.setItem('agentFooterCollapsed', collapsed);
+  document.getElementById('agent-footer-toggle').innerHTML = collapsed ? '&#x25B4;' : '&#x25BE;';
+}
+
+let _agentModalPromptText = null;
+let _agentModalResponseText = null;
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function copyAgentModalAll(btn) {
+  const parts = [];
+  if (_agentModalPromptText) parts.push(`## Prompt\n${_agentModalPromptText}`);
+  if (_agentModalResponseText) parts.push(`## Response\n${_agentModalResponseText}`);
+  if (!parts.length) return;
+  copyWithFeedback(parts.join('\n\n'), btn);
+}
+
+let currentAgentModalId = null;
+
+function updateAgentModalPinState() {
+  const btn = document.getElementById('agent-modal-pin-btn');
+  if (!btn || !currentAgentModalId) return;
+  btn.classList.toggle('active', isAgentPinned(currentAgentModalId));
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function togglePinFromAgentModal() {
+  if (!currentAgentModalId) return;
+  toggleAgentPin(currentAgentModalId);
+  updateAgentModalPinState();
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function dismissAgent(agentId) {
+  if (!currentSessionId || !agentId) return;
+  dismissedAgentIds.add(agentId);
+  currentWaiting = null;
+  lastAgentsHash = '';
+  try {
+    await fetch(`/api/sessions/${currentSessionId}/agents/${agentId}/stop`, { method: 'POST' });
+  } catch (e) {
+    console.error('[dismissAgent]', e);
+  }
+  fetchAgents(currentSessionId);
+}
+
+function findAgentById(agentId) {
+  let agent = currentAgents.find((a) => a.agentId === agentId);
+  if (!agent) {
+    const atIdx = agentId.indexOf('@');
+    const memberName = atIdx > 0 ? agentId.substring(0, atIdx) : null;
+    if (memberName) agent = currentAgents.find((a) => a.type === memberName);
+  }
+  return agent || null;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function showAgentModal(agentId) {
+  const agent = findAgentById(agentId);
+  if (!agent) return;
+  currentAgentModalId = agentId;
+  const modal = document.getElementById('agent-modal');
+  const title = document.getElementById('agent-modal-title');
+  const body = document.getElementById('agent-modal-body');
+  const now = Date.now();
+  const started = agent.startedAt ? new Date(agent.startedAt) : null;
+  const stopped = agent.stoppedAt ? new Date(agent.stoppedAt) : null;
+  const elapsed = stopped && started ? stopped.getTime() - started.getTime() : started ? now - started.getTime() : 0;
+
+  const statusDot = `<span class="agent-dot ${agent.status}" style="display:inline-block;vertical-align:middle;margin-right:6px;"></span>`;
+  const modalNameLabel = agent.agentName ? ` · ${escapeHtml(agent.agentName)}` : '';
+  title.innerHTML = `${statusDot} ${escapeHtml(agent.type || 'unknown')}${modalNameLabel}`;
+
+  const shortModel = agent.model ? agent.model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
+  const shortId = agent.agentId ? agent.agentId.slice(0, 8) : '';
+  const chip = (label, value, opts = {}) => {
+    const cls = opts.cls ? ` ${opts.cls}` : '';
+    const style = opts.style ? ` style="${opts.style}"` : '';
+    const title = opts.title ? ` title="${escapeHtml(opts.title)}"` : '';
+    const labelHtml = label ? `<span class="agent-chip-label">${label}</span>` : '';
+    return `<span class="agent-chip${cls}"${style}${title}>${labelHtml}<span class="agent-chip-val">${value}</span></span>`;
+  };
+
+  const chips = [];
+  if (agent.agentId) chips.push(chip('id', escapeHtml(shortId), { cls: 'agent-chip-mono', title: agent.agentId }));
+  chips.push(chip('', escapeHtml(agent.status), { cls: `agent-chip-status agent-chip-${agent.status}` }));
+  chips.push(chip('⏱', formatDuration(elapsed)));
+  if (shortModel) chips.push(chip('model', escapeHtml(shortModel), { cls: 'agent-chip-mono' }));
+  if (agent.agentName) {
+    const c = getOwnerColor(agent.agentName);
+    chips.push(
+      chip('owner', escapeHtml(agent.agentName), {
+        style: `background:${c.bg};color:${c.color};border-color:transparent;`,
+      }),
+    );
+  }
+  if (started) chips.push(chip('started', started.toLocaleTimeString()));
+  if (stopped) chips.push(chip('stopped', stopped.toLocaleTimeString()));
+
+  const agentMsg = currentMessages.find((m) => m.tool === 'Agent' && m.agentId === agentId);
+
+  let html = `<div class="agent-chips">${chips.join('')}</div>`;
+
+  const promptText = stripTeammateWrapper(agentMsg?.agentPrompt || agent.prompt || null);
+  const rawResponse = agent.lastMessage || agentMsg?.agentLastMessage || null;
+  const responseText = rawResponse ? stripAnsi(rawResponse.trim()) : null;
+  _agentModalPromptText = promptText;
+  _agentModalResponseText = responseText;
+  const promptHtml = promptText ? renderMarkdown(promptText) : null;
+  const responseHtml = responseText ? renderMarkdown(responseText) : null;
+  html += renderAgentTabs(promptHtml, responseHtml, promptText, responseText);
+
+  body.innerHTML = html;
+  updateAgentModalPinState();
+  autoSizeModal(modal.querySelector('.modal'), body);
+  const dismissBtn = document.getElementById('agent-modal-dismiss-btn');
+  dismissBtn.style.display = agent.status === 'active' || agent.status === 'idle' ? '' : 'none';
+  modal.classList.add('visible');
+  const keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeAgentModal();
+      document.removeEventListener('keydown', keyHandler);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+}
+
+function closeAgentModal() {
+  resetModalFullscreen('agent-modal');
+  currentAgentModalId = null;
+}
+
+//#endregion
+
+//#region RENDERING
+let revealedPlanSessionId = null;
+let revealedStorageSessionId = null;
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function revealPlanSession(planSessionId) {
+  if (revealedPlanSessionId === planSessionId) {
+    revealedPlanSessionId = null;
+    renderSessions();
+    return;
+  }
+  revealedPlanSessionId = planSessionId;
+  if (!sessions.some((s) => s.id === planSessionId)) {
+    lastSessionsHash = '';
+    await fetchSessions();
+  }
+  await fetchTasks(planSessionId);
+  const el = document.querySelector(`.session-item[data-session-id="${CSS.escape(planSessionId)}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+async function showAllTasks() {
+  try {
+    viewMode = 'all';
+    if (agentLogMode) exitAgentLogMode();
+    currentSessionId = null;
+    ownerFilter = '';
+    resetAgentState();
+    const res = await fetch('/api/tasks/all');
+    allTasksCache = await res.json();
+    let tasks = allTasksCache;
+    if (filterProject) {
+      tasks = tasks.filter((t) => matchesProjectFilter(t.project));
+    }
+    currentTasks = tasks;
+    updateUrl();
+    renderAllTasks();
+    renderSessions();
+    renderLiveUpdatesFromCache();
+  } catch (error) {
+    console.error('Failed to fetch all tasks:', error);
+  }
+}
+
+function renderAllTasks() {
+  noSession.style.display = 'none';
+  sessionView.classList.add('visible');
+  document.getElementById('owner-filter-bar').classList.remove('visible');
+
+  const visibleTasks = currentTasks.filter((t) => !isInternalTask(t));
+  const totalTasks = visibleTasks.length;
+  const completed = visibleTasks.filter((t) => t.status === 'completed').length;
+  const percent = totalTasks > 0 ? Math.round((completed / totalTasks) * 100) : 0;
+
+  const isFiltered = filterProject && filterProject !== '__recent__';
+  const projectName = isFiltered ? filterProject.split(/[/\\]/).pop() : null;
+  sessionTitle.textContent = isFiltered
+    ? `Tasks: ${projectName}`
+    : filterProject === '__recent__'
+      ? 'Recent Tasks'
+      : 'All Tasks';
+  sessionMeta.textContent = isFiltered
+    ? `${totalTasks} tasks in this project`
+    : `${totalTasks} tasks across ${sessions.length} sessions`;
+  progressPercent.textContent = `${percent}%`;
+  progressBar.style.width = `${percent}%`;
+
+  renderKanban();
+}
+
+function renderSessions() {
+  // Update project dropdown
+  updateProjectDropdown();
+
+  // Filter pipeline: active filter → force-include revealed/current (non-pinned) sessions →
+  // project filter → search filter → ensure pinned/sticky sessions are always included
+  const LIVE_INDICATOR_MS = 10 * 1000;
+  let filteredSessions = sessions;
+  if (sessionFilter === 'active') {
+    const ACTIVE_PLAN_MS = 15 * 60 * 1000;
+    const now = Date.now();
+    const activeSessionIds = new Set();
+    filteredSessions = filteredSessions.filter((s) => {
+      if (dismissedSessionIds.has(s.id)) return false;
+      const isActive =
+        s.hasMessages &&
+        ((!s.sharedTaskList && (s.pending > 0 || s.inProgress > 0)) ||
+          s.hasActiveAgents ||
+          s.hasWaitingForUser ||
+          s.hasRecentLog ||
+          (s.hasPlan && !s.planImplementationSessionId && now - new Date(s.modifiedAt).getTime() <= ACTIVE_PLAN_MS));
+      if (isActive) activeSessionIds.add(s.id);
+      return isActive;
+    });
+    // Force-include revealed/current sessions that didn't pass the active filter.
+    // Skip pinned sessions — they are prepended separately below (lines ~2180) to preserve stable position.
+    const filteredIds = new Set(filteredSessions.map((s) => s.id));
+    for (const id of [revealedPlanSessionId, revealedStorageSessionId, currentSessionId]) {
+      if (id && !filteredIds.has(id) && !isAnyPinned(id)) {
+        const session = sessions.find((s) => s.id === id);
+        if (session) {
+          const insertAt = filteredSessions.findIndex((s) => s.modifiedAt < session.modifiedAt);
+          if (insertAt === -1) filteredSessions.push(session);
+          else filteredSessions.splice(insertAt, 0, session);
+        }
+      }
+    }
+  }
+  if (filterProject) {
+    filteredSessions = filteredSessions.filter((s) => matchesProjectFilter(s.project));
+  }
+
+  // Apply search filter
+  if (searchQuery) {
+    const taskMatchIds = new Set();
+    for (const t of allTasksCache) {
+      if (
+        (t.subject && fuzzyMatch(t.subject, searchQuery)) ||
+        (t.description && fuzzyMatch(t.description, searchQuery)) ||
+        (t.activeForm && fuzzyMatch(t.activeForm, searchQuery))
+      )
+        taskMatchIds.add(t.sessionId);
+    }
+    const matchesSearch = (s) =>
+      (s.name && fuzzyMatch(s.name, searchQuery)) ||
+      (s.id && fuzzyMatch(s.id, searchQuery)) ||
+      (s.project && fuzzyMatch(s.project, searchQuery)) ||
+      (s.description && fuzzyMatch(s.description, searchQuery)) ||
+      taskMatchIds.has(s.id);
+
+    filteredSessions = filteredSessions.filter(matchesSearch);
+
+    // Re-add pinned/sticky sessions that match the query but were excluded by active filter
+    if (pinnedSessionIds.size > 0 || stickySessionIds.size > 0) {
+      const filteredIds = new Set(filteredSessions.map((s) => s.id));
+      const missingPinned = sessions.filter((s) => isAnyPinned(s.id) && !filteredIds.has(s.id) && matchesSearch(s));
+      if (missingPinned.length) filteredSessions = [...missingPinned, ...filteredSessions];
+    }
+  }
+
+  // Include pinned/sticky sessions even if they don't match active/recent filter
+  if (!searchQuery && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
+    const filteredIds = new Set(filteredSessions.map((s) => s.id));
+    const missingPinned = sessions.filter((s) => isAnyPinned(s.id) && !filteredIds.has(s.id));
+    if (missingPinned.length) filteredSessions = [...missingPinned, ...filteredSessions];
+  }
+
+  if (filteredSessions.length === 0) {
+    let emptyMsg = 'No sessions found';
+    let emptyHint = 'Tasks appear when you use Pi';
+
+    if (searchQuery) {
+      emptyMsg = `No results for "${searchQuery}"`;
+      emptyHint = 'Try a different search term or clear the search';
+    } else if (filterProject && sessionFilter === 'active') {
+      emptyMsg = 'No active sessions for this project';
+      emptyHint = 'Try "All Sessions" or "All Projects"';
+    } else if (filterProject) {
+      emptyMsg = 'No sessions for this project';
+      emptyHint = 'Select "All Projects" to see all';
+    } else if (sessionFilter === 'active') {
+      emptyMsg = 'No active sessions';
+      emptyHint = 'Select "All Sessions" to see all';
+    }
+    sessionsList.innerHTML = `
+          <div style="padding: 24px 12px; text-align: center; color: var(--text-muted); font-size: 12px;">
+            <p>${emptyMsg}</p>
+            <p style="margin-top: 8px; font-size: 11px;">${emptyHint}</p>
+          </div>
+        `;
+    return;
+  }
+
+  // Helper to render a single session card
+  const renderSessionCard = (session) => {
+    const total = session.taskCount;
+    const percent = total > 0 ? Math.round((session.completed / total) * 100) : 0;
+    const isActive = session.id === currentSessionId && viewMode === 'session';
+    const hasInProgress = session.inProgress > 0;
+    const isLive =
+      hasInProgress || (session.modifiedAt && Date.now() - new Date(session.modifiedAt).getTime() <= LIVE_INDICATOR_MS);
+    const rawName = session.name || session.id;
+    const sessionName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawName)
+      ? rawName.slice(0, 8)
+      : rawName;
+    const useGrouped = sessionFilter === 'active' && session.project;
+    const primaryName = useGrouped ? sessionName : session.project ? session.project.split('/').pop() : sessionName;
+    const secondaryName = useGrouped ? null : session.project ? sessionName : null;
+
+    const gitBranch = session.gitBranch ? escapeHtml(session.gitBranch) : null;
+    const createdDisplay = session.createdAt ? formatDate(session.createdAt) : '';
+    const modifiedDisplay = formatDate(session.modifiedAt);
+    const timeDisplay =
+      session.createdAt && createdDisplay !== modifiedDisplay
+        ? `Created ${createdDisplay} · Modified ${modifiedDisplay}`
+        : modifiedDisplay;
+    const tooltip = [session.id, timeDisplay, gitBranch ? `Branch: ${gitBranch}` : ''].filter(Boolean).join(' | ');
+    const isTeam = session.isTeam;
+    const memberCount = session.memberCount || 0;
+
+    const pinState = getSessionPinState(session.id);
+    const pinClass = pinState === 'sticky' ? ' sticky' : pinState === 'pinned' ? ' pinned' : '';
+    const pinTitle =
+      pinState === 'pinned' || pinState === 'sticky' ? 'Unpin session (.)' : 'Pin session (. · > sticky)';
+    const showCtx = !!session.contextStatus;
+    const linkedDocsCount = getSessionPreviewPaths(session.id).length;
+    const bookmarksCount = loadPins(session.id).length;
+    const tempClass = session.hasRecentLog || session.inProgress || session.hasWaitingForUser ? 'warm' : 'stale';
+    return `
+          <button onclick="fetchTasks('${session.id}')" data-session-id="${session.id}" class="session-item ${isActive ? 'active' : ''} ${session.hasWaitingForUser ? 'permission-pending' : ''} ${tempClass} ${showCtx ? 'has-context' : ''}" title="${tooltip}">
+            <span class="session-pin-btn${pinClass}" onclick="event.stopPropagation();toggleSessionPin('${escapeHtml(session.id)}')" title="${pinTitle} session">${SESSION_PIN_SVG}</span>
+            <div class="session-name">${escapeHtml(primaryName)}</div>
+            ${secondaryName ? `<div class="session-secondary">${escapeHtml(secondaryName)}</div>` : ''}
+            ${gitBranch ? `<div class="session-branch">${gitBranch}</div>` : ''}
+            ${session.planTitle ? `<div class="session-plan">${escapeHtml(session.planTitle)}</div>` : ''}
+            <div class="session-progress">
+              <span class="session-indicators">
+                ${isTeam ? `<span class="team-badge" title="${memberCount} team members"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>${memberCount}</span>` : ''}
+                ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
+                ${isTeam || session.project || showCtx ? `<span class="team-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${session.id}')" title="View session info">ℹ</span>` : ''}
+                ${session.hasPlan ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${session.id}')" title="View plan"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
+                ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${session.id}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
+                ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${session.id}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>${bookmarksCount}</span>` : ''}
+                ${session.hasRunningAgents ? '<span class="agent-badge" title="Active agents">🤖</span>' : ''}
+                ${session.planSourceSessionId ? `<span class="plan-indicator" title="Implements plan — click to reveal plan session" onclick="event.stopPropagation(); revealPlanSession('${escapeHtml(session.planSourceSessionId)}')">📋</span>` : ''}
+                ${session.hasWaitingForUser ? '<span class="agent-badge" title="Waiting for user">❓</span>' : ''}
+                ${(window.__HUB__?.enabled || appConfig.marketplaceUrl) && session.project ? `<span class="marketplace-btn" data-project-path="${escapeHtml(session.project)}" onclick="event.stopPropagation(); openMarketplace(this.dataset.projectPath)" title="Open in Marketplace">${MARKETPLACE_SVG}</span>` : ''}
+                ${(window.__HUB__?.enabled || appConfig.memoryUrl) && session.project ? `<span class="marketplace-btn" data-project-path="${escapeHtml(session.project)}" onclick="event.stopPropagation(); openMemory(this.dataset.projectPath)" title="Open in Memory">${MEMORY_SVG}</span>` : ''}
+                ${isLive ? '<span class="pulse"></span>' : ''}
+              </span>
+              <div class="progress-bar"><div class="progress-fill" style="width: ${percent}%"></div></div>
+              <span class="progress-text">${session.completed}/${total}</span>
+            </div>
+            ${showCtx ? renderContextBar(session.contextStatus) : ''}
+            <div class="session-time">${formatDate(session.modifiedAt)}</div>
+          </button>
+        `;
+  };
+
+  // Group active sessions by project
+  if (sessionFilter === 'active') {
+    const groups = new Map();
+    const ungrouped = [];
+    for (const session of filteredSessions) {
+      if (session.project) {
+        if (!groups.has(session.project)) groups.set(session.project, []);
+        groups.get(session.project).push(session);
+      } else {
+        ungrouped.push(session);
+      }
+    }
+    const groupPinned = localStorage.getItem('groupPinnedSessions') !== 'false';
+    const renderGroupSessions = (sessions, pinKey) => {
+      if (!groupPinned || pinnedSessionIds.size === 0) return sessions.map(renderSessionCard).join('');
+      const gPinned = sessions.filter((s) => isPlacedPinned(s.id) && !isPlacedSticky(s.id));
+      if (gPinned.length === 0) return sessions.map(renderSessionCard).join('');
+      const gIdlePinned = gPinned.filter((s) => !isSessionActive(s));
+      const gUnpinned = sessions.filter((s) => !isPlacedPinned(s.id) || isSessionActive(s) || isPlacedSticky(s.id));
+      const pinCollapsed = collapsedProjectGroups.has(pinKey);
+      if (gIdlePinned.length === 0 && !pinCollapsed) return gUnpinned.map(renderSessionCard).join('');
+      return (
+        '<div class="pinned-sub-section">' +
+        '<div class="pinned-sub-header' +
+        (pinCollapsed ? ' collapsed' : '') +
+        '" data-group-path="' +
+        escapeHtml(pinKey) +
+        '">' +
+        '<svg class="group-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>' +
+        '<span class="pinned-sub-label">Pinned</span>' +
+        '<span class="group-count">' +
+        gIdlePinned.length +
+        '</span>' +
+        '<span class="pinned-ungroup-btn" title="Ungroup pinned sessions">&times;</span>' +
+        '</div>' +
+        '<div class="pinned-sub-items' +
+        (pinCollapsed ? ' collapsed' : '') +
+        '">' +
+        gIdlePinned.map(renderSessionCard).join('') +
+        '</div>' +
+        '</div>' +
+        gUnpinned.map(renderSessionCard).join('')
+      );
+    };
+    if (!groupPinned && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
+      const pinWeight = (s) => (isPlacedSticky(s.id) ? 2 : isPlacedPinned(s.id) && !isSessionActive(s) ? 1 : 0);
+      const pinSort = (a, b) => pinWeight(b) - pinWeight(a);
+      for (const [, arr] of groups) arr.sort(pinSort);
+      ungrouped.sort(pinSort);
+    }
+
+    // Stable group order: preserve existing order, append new groups sorted by recency
+    const currentPaths = new Set(groups.keys());
+    const knownPaths = new Set(stableGroupOrder);
+    const keptOrder = stableGroupOrder.filter((p) => currentPaths.has(p));
+    const newPaths = [...currentPaths].filter((p) => !knownPaths.has(p));
+    if (newPaths.length > 1) {
+      const maxTime = new Map(
+        newPaths.map((p) => [p, Math.max(...groups.get(p).map((s) => new Date(s.modifiedAt).getTime()))]),
+      );
+      newPaths.sort((a, b) => maxTime.get(b) - maxTime.get(a));
+    }
+    stableGroupOrder = [...keptOrder, ...newPaths];
+    const sortedGroups = stableGroupOrder.map((p) => [p, groups.get(p)]);
+
+    let html = '';
+    if (!groupPinned && pinnedSessionIds.size > 0) {
+      const hasPinnedInView = filteredSessions.some((s) => pinnedSessionIds.has(s.id));
+      if (hasPinnedInView) {
+        html += `<div class="pinned-regroup-banner">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><path d="M5 10l7-7 7 7"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
+          Group pinned sessions
+        </div>`;
+      }
+    }
+    for (const [projectPath, projectSessions] of sortedGroups) {
+      const folderName = projectPath.split(/[/\\]/).pop();
+      const isCollapsed = collapsedProjectGroups.has(projectPath);
+      const escapedPath = escapeHtml(projectPath);
+      const breadcrumbParts = projectPath
+        .replace(/^\/home\/[^/]+/, '~')
+        .split(/[/\\]/)
+        .filter(Boolean);
+      const breadcrumbHtml = breadcrumbParts
+        .map((p, i) => (i < breadcrumbParts.length - 1 ? `${escapeHtml(p)}<span class="sep">/</span>` : escapeHtml(p)))
+        .join('');
+
+      html += `
+            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}" data-group-path="${escapedPath}">
+              <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              <span class="group-name">${escapeHtml(folderName)}</span>
+              <span class="group-count">${projectSessions.length}</span>
+              <span class="project-view-btn" data-project-path="${escapedPath}" title="Open project view — combined tasks from all sessions">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              </span>
+            </div>
+            <div class="project-group-breadcrumb" data-full-path="${escapedPath}" title="Click to copy path">${breadcrumbHtml}</div>
+            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}">
+              ${renderGroupSessions(projectSessions, `__pinned_${projectPath}__`)}
+            </div>
+          `;
+    }
+
+    if (ungrouped.length > 0 && sortedGroups.length > 0) {
+      const isCollapsed = collapsedProjectGroups.has('__ungrouped__');
+      html += `
+            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}" data-group-path="__ungrouped__">
+              <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              <span class="group-name">Ungrouped</span>
+              <span class="group-count">${ungrouped.length}</span>
+            </div>
+            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}">
+              ${renderGroupSessions(ungrouped, '__pinned___ungrouped__')}
+            </div>
+          `;
+    } else {
+      html += ungrouped.map(renderSessionCard).join('');
+    }
+
+    sessionsList.innerHTML = html;
+  } else {
+    const sticky = filteredSessions.filter((s) => isPlacedSticky(s.id));
+    const idlePinned = filteredSessions.filter((s) => isPlacedPinned(s.id) && !isSessionActive(s));
+    const rest = filteredSessions.filter(
+      (s) => (!isPlacedPinned(s.id) && !isPlacedSticky(s.id)) || (isPlacedPinned(s.id) && isSessionActive(s)),
+    );
+    let html = '';
+    if (sticky.length > 0) {
+      html += sticky.map(renderSessionCard).join('');
+    }
+    const isCollapsed = collapsedProjectGroups.has('__pinned__');
+    const hasPinned = pinnedSessionIds.size > 0 && filteredSessions.some((s) => pinnedSessionIds.has(s.id));
+    if (idlePinned.length > 0 || (hasPinned && isCollapsed)) {
+      html += `
+            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}" data-group-path="__pinned__">
+              <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              <span class="group-name">Pinned</span>
+              <span class="group-count">${idlePinned.length}</span>
+            </div>
+            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}">
+              ${idlePinned.map(renderSessionCard).join('')}
+            </div>
+          `;
+    }
+    html += rest.map(renderSessionCard).join('');
+    sessionsList.innerHTML = html;
+  }
+
+  const navItems = getNavigableItems();
+  const allSessions = getSessionItems();
+  const activeIdx = allSessions.findIndex((el) => el.classList.contains('active'));
+  if (activeIdx >= 0 && (selectedSessionIdx < 0 || sessionJustSelected)) {
+    const navIdx = navItems.indexOf(allSessions[activeIdx]);
+    selectedSessionIdx = navIdx >= 0 ? navIdx : 0;
+    selectedSessionKbId = allSessions[activeIdx].dataset.sessionId || null;
+    sessionJustSelected = false;
+  }
+
+  if (selectedSessionKbId && focusZone === 'sidebar') {
+    const restoredIdx = navItems.findIndex((el) => getKbId(el) === selectedSessionKbId);
+    if (restoredIdx >= 0) {
+      selectedSessionIdx = restoredIdx;
+      navItems[restoredIdx].classList.add('kb-selected');
+    } else {
+      selectedSessionIdx = -1;
+      selectedSessionKbId = null;
+    }
+  } else if (focusZone === 'sidebar' && selectedSessionIdx >= 0) {
+    if (navItems.length > 0) {
+      const clamped = Math.min(selectedSessionIdx, navItems.length - 1);
+      selectedSessionIdx = clamped;
+      const el = navItems[clamped];
+      selectedSessionKbId = getKbId(el);
+      el.classList.add('kb-selected');
+    } else {
+      selectedSessionIdx = -1;
+      selectedSessionKbId = null;
+    }
+  }
+}
+
+function renderSession() {
+  noSession.style.display = 'none';
+  sessionView.classList.add('visible');
+
+  const session = sessions.find((s) => s.id === currentSessionId);
+  if (!session) return;
+
+  const displayName =
+    session.customTitle || session.name || session.gitBranch || session.description || currentSessionId;
+
+  sessionTitle.textContent = displayName;
+
+  // Build meta text with project path and description
+  const projectName = session.project ? session.project.split('/').pop() : null;
+  const metaParts = [`${currentTasks.length} tasks`];
+  if (projectName) {
+    metaParts.push(projectName);
+  }
+  if (session.description && session.description !== displayName) {
+    metaParts.push(session.description);
+  }
+  metaParts.push(formatDate(session.modifiedAt));
+  sessionMeta.textContent = metaParts.join(' · ');
+
+  const completed = currentTasks.filter((t) => t.status === 'completed').length;
+  const percent = currentTasks.length > 0 ? Math.round((completed / currentTasks.length) * 100) : 0;
+
+  progressPercent.textContent = `${percent}%`;
+  progressBar.style.width = `${percent}%`;
+  const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
+  progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
+
+  updateOwnerFilter();
+  renderKanban();
+  renderSessions();
+}
+
+function renderProjectView() {
+  noSession.style.display = 'none';
+  sessionView.classList.add('visible');
+
+  const folderName = currentProjectPath ? currentProjectPath.split(/[/\\]/).pop() : 'Project';
+  sessionTitle.textContent = folderName;
+
+  const metaParts = [`${currentProjectSessionIds.length} sessions`, `${currentTasks.length} tasks`];
+  if (currentProjectPath) metaParts.push(currentProjectPath);
+  sessionMeta.textContent = metaParts.join(' · ');
+
+  const completed = currentTasks.filter((t) => t.status === 'completed').length;
+  const percent = currentTasks.length > 0 ? Math.round((completed / currentTasks.length) * 100) : 0;
+
+  progressPercent.textContent = `${percent}%`;
+  progressBar.style.width = `${percent}%`;
+  const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
+  progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
+
+  updateOwnerFilter();
+  renderKanban();
+  renderSessions();
+}
+
+function renderTaskCard(task) {
+  const isBlocked = task.blockedBy && task.blockedBy.length > 0;
+  const useSlug = viewMode === 'all' || viewMode === 'project';
+  const taskId = useSlug ? `${(task._taskDir || task.sessionId || '')?.slice(0, 4)}-${task.id}` : task.id;
+  const sessionLabel = viewMode === 'all' && task.sessionName ? task.sessionName : null;
+  const statusClass = task.status.replace('_', '-');
+  const actualSessionId = task._taskDir || task.sessionId || currentSessionId || '';
+
+  return `
+        <div
+          role="listitem"
+          tabindex="0"
+          data-task-id="${task.id}"
+          data-session-id="${actualSessionId}"
+          onclick="showTaskDetail('${task.id}', '${actualSessionId}')"
+          class="task-card ${statusClass} ${isBlocked ? 'blocked' : ''}"
+          aria-label="${escapeHtml(task.subject)} — ${task.status.replace('_', ' ')}">
+          <div class="task-id">
+            <span>#${taskId}</span>
+            ${isBlocked ? '<span class="task-badge blocked">Blocked</span>' : ''}
+            ${
+              task.owner
+                ? (
+                    () => {
+                      const c = getOwnerColor(task.owner);
+                      return `<span class="task-owner-badge" style="background:${c.bg};color:${c.color}">${escapeHtml(task.owner)}</span>`;
+                    }
+                  )()
+                : ''
+            }
+          </div>
+          <div class="task-title">${escapeHtml(task.subject)}</div>
+          ${sessionLabel ? `<div class="task-session">${escapeHtml(sessionLabel)}</div>` : ''}
+          ${task.status === 'in_progress' && task.activeForm ? `<div class="task-active">${escapeHtml(task.activeForm)}</div>` : ''}
+          ${isBlocked ? `<div class="task-blocked">Waiting on ${task.blockedBy.map((id) => `#${id}`).join(', ')}</div>` : ''}
+          ${task.description ? `<div class="task-desc">${escapeHtml(task.description.split('\n')[0])}</div>` : ''}
+        </div>
+      `;
+}
+
+//#endregion
+
+//#region KANBAN
+function renderKanban() {
+  let filtered = currentTasks.filter((t) => !isInternalTask(t));
+  if (ownerFilter) {
+    filtered = filtered.filter((t) => t.owner === ownerFilter);
+  }
+  const pending = filtered.filter((t) => t.status === 'pending');
+  const inProgress = filtered.filter((t) => t.status === 'in_progress');
+  const completed = filtered.filter((t) => t.status === 'completed');
+
+  pendingCount.textContent = pending.length;
+  inProgressCount.textContent = inProgress.length;
+  completedCount.textContent = completed.length;
+
+  const emptyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>`;
+
+  pendingTasks.innerHTML =
+    pending.length > 0
+      ? pending.map(renderTaskCard).join('')
+      : `<div class="column-empty">${emptyIcon}<div>No pending tasks</div></div>`;
+
+  inProgressTasks.innerHTML =
+    inProgress.length > 0
+      ? inProgress.map(renderTaskCard).join('')
+      : `<div class="column-empty">${emptyIcon}<div>No active tasks</div></div>`;
+
+  completedTasks.innerHTML =
+    completed.length > 0
+      ? completed.map(renderTaskCard).join('')
+      : `<div class="column-empty">${emptyIcon}<div>No completed tasks</div></div>`;
+
+  if (selectedTaskId) {
+    const card =
+      document.querySelector(`.task-card[data-task-id="${selectedTaskId}"][data-session-id="${selectedSessionId}"]`) ||
+      document.querySelector(`.task-card[data-task-id="${selectedTaskId}"]`);
+    if (card) {
+      if (focusZone === 'board') card.classList.add('selected');
+    } else {
+      selectedTaskId = null;
+      selectedSessionId = null;
+    }
+    if (selectedTaskId && detailPanel.classList.contains('visible')) {
+      showTaskDetail(selectedTaskId, selectedSessionId);
+    }
+  }
+}
+
+//#endregion
+
+//#region DRAG_DROP
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function onCardDragStart(e) {
+  const card = e.target.closest('.task-card');
+  if (!card) return;
+  card.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData(
+    'text/plain',
+    JSON.stringify({
+      taskId: card.dataset.taskId,
+      sessionId: card.dataset.sessionId,
+    }),
+  );
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function onCardDragEnd(e) {
+  const card = e.target.closest('.task-card');
+  if (card) card.classList.remove('dragging');
+  // biome-ignore lint/suspicious/useIterableCallbackReturn: forEach side-effect
+  document.querySelectorAll('.column-tasks.drag-over').forEach((el) => el.classList.remove('drag-over'));
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function onColumnDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  e.currentTarget.classList.add('drag-over');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function onColumnDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    e.currentTarget.classList.remove('drag-over');
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function onColumnDrop(e) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+}
+
+//#endregion
+
+//#region KEYBOARD_NAV
+function selectTask(taskId, sessionId) {
+  const prev = document.querySelector('.task-card.selected');
+  if (prev) prev.classList.remove('selected');
+  selectedTaskId = taskId;
+  selectedSessionId = sessionId;
+  if (!taskId) return;
+  const card =
+    document.querySelector(`.task-card[data-task-id="${taskId}"][data-session-id="${sessionId}"]`) ||
+    document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+  if (card) {
+    card.classList.add('selected');
+    card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function getSelectedCardInfo() {
+  if (!selectedTaskId) return null;
+  for (let ci = 0; ci < COLUMNS.length; ci++) {
+    const cards = Array.from(COLUMNS[ci].el.querySelectorAll('.task-card'));
+    for (let i = 0; i < cards.length; i++) {
+      if (
+        cards[i].dataset.taskId === selectedTaskId &&
+        (!selectedSessionId || cards[i].dataset.sessionId === selectedSessionId)
+      ) {
+        return { colIndex: ci, cardIndex: i, card: cards[i] };
+      }
+    }
+  }
+  return null;
+}
+
+function navigateVertical(direction) {
+  const info = getSelectedCardInfo();
+  if (!info) {
+    for (const col of COLUMNS) {
+      const cards = Array.from(col.el.querySelectorAll('.task-card'));
+      if (cards.length > 0) {
+        selectTask(cards[0].dataset.taskId, cards[0].dataset.sessionId);
+        return;
+      }
+    }
+    return;
+  }
+  const cards = Array.from(COLUMNS[info.colIndex].el.querySelectorAll('.task-card'));
+  const newIndex = info.cardIndex + direction;
+  if (newIndex >= 0 && newIndex < cards.length) {
+    selectTask(cards[newIndex].dataset.taskId, cards[newIndex].dataset.sessionId);
+  }
+}
+
+function navigateHorizontal(direction) {
+  const info = getSelectedCardInfo();
+  if (!info) {
+    navigateVertical(1);
+    return;
+  }
+  let newColIndex = info.colIndex + direction;
+  while (newColIndex >= 0 && newColIndex < COLUMNS.length) {
+    const cards = Array.from(COLUMNS[newColIndex].el.querySelectorAll('.task-card'));
+    if (cards.length > 0) {
+      const clampedIndex = Math.min(info.cardIndex, cards.length - 1);
+      selectTask(cards[clampedIndex].dataset.taskId, cards[clampedIndex].dataset.sessionId);
+      return;
+    }
+    newColIndex += direction;
+  }
+}
+
+function getKbId(el) {
+  return el.dataset.sessionId || el.dataset.groupPath || null;
+}
+
+function getGroupSessionsContainer(header) {
+  const cls = header.classList.contains('pinned-sub-header') ? 'pinned-sub-items' : 'project-group-sessions';
+  let el = header.nextElementSibling;
+  while (el && !el.classList.contains(cls)) el = el.nextElementSibling;
+  return el;
+}
+
+function getNavigableItems() {
+  const items = [];
+  const walkGroupContainer = (container) => {
+    if (!container) return;
+    for (const child of container.children) {
+      if (child.classList.contains('pinned-sub-section')) {
+        const subHeader = child.querySelector('.pinned-sub-header');
+        if (subHeader) items.push(subHeader);
+        const subItems = child.querySelector('.pinned-sub-items');
+        if (subItems && !subItems.classList.contains('collapsed')) {
+          for (const s of subItems.querySelectorAll(':scope > .session-item')) items.push(s);
+        }
+      } else if (child.classList.contains('session-item')) {
+        items.push(child);
+      }
+    }
+  };
+  for (const el of sessionsList.children) {
+    if (el.classList.contains('project-group-header')) {
+      items.push(el);
+      if (!collapsedProjectGroups.has(el.dataset.groupPath)) {
+        walkGroupContainer(getGroupSessionsContainer(el));
+      }
+    } else if (el.classList.contains('session-item')) {
+      items.push(el);
+    }
+  }
+  return items;
+}
+
+function getSessionItems() {
+  return Array.from(sessionsList.querySelectorAll('.session-item'));
+}
+
+function clearKbSelection() {
+  const prev = sessionsList.querySelector('.kb-selected');
+  if (prev) prev.classList.remove('kb-selected');
+}
+
+function selectSessionByIndex(idx, items) {
+  items = items || getNavigableItems();
+  if (items.length === 0) return;
+  clearKbSelection();
+  selectedSessionIdx = Math.max(0, Math.min(idx, items.length - 1));
+  const el = items[selectedSessionIdx];
+  selectedSessionKbId = getKbId(el);
+  el.classList.add('kb-selected');
+  el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function navigateSession(direction, items) {
+  items = items || getNavigableItems();
+  if (items.length === 0) return;
+  if (selectedSessionIdx < 0) {
+    selectSessionByIndex(0, items);
+    return;
+  }
+  const currentEl = items[selectedSessionIdx];
+  let newIdx = selectedSessionIdx + direction;
+  if (!currentEl?.isConnected) {
+    const restoredIdx = selectedSessionKbId ? items.findIndex((el) => getKbId(el) === selectedSessionKbId) : -1;
+    newIdx = restoredIdx >= 0 ? restoredIdx : 0;
+  }
+  if (newIdx < 0) newIdx = items.length - 1;
+  else if (newIdx >= items.length) newIdx = 0;
+  selectSessionByIndex(newIdx, items);
+}
+
+function setGroupCollapsed(header, collapsed) {
+  if (!header) return;
+  const projectPath = header.dataset.groupPath;
+  if (collapsed === collapsedProjectGroups.has(projectPath)) return;
+  if (collapsed) collapsedProjectGroups.add(projectPath);
+  else collapsedProjectGroups.delete(projectPath);
+  header.classList.toggle('collapsed', collapsed);
+  const container = getGroupSessionsContainer(header);
+  if (container) container.classList.toggle('collapsed', collapsed);
+  try {
+    localStorage.setItem('collapsedGroups', JSON.stringify([...collapsedProjectGroups]));
+  } catch (_) {}
+}
+
+function isGroupHeader(el) {
+  return el.classList.contains('project-group-header') || el.classList.contains('pinned-sub-header');
+}
+
+function findParentHeader(el) {
+  const subContainer = el.closest('.pinned-sub-items');
+  if (subContainer?.previousElementSibling?.classList.contains('pinned-sub-header')) {
+    return subContainer.previousElementSibling;
+  }
+  const container = el.closest('.project-group-sessions');
+  if (!container) return null;
+  let header = container.previousElementSibling;
+  while (header && !header.classList.contains('project-group-header')) header = header.previousElementSibling;
+  return header;
+}
+
+function handleSidebarHorizontal(direction) {
+  const items = getNavigableItems();
+  if (selectedSessionIdx < 0 || selectedSessionIdx >= items.length) return;
+  const el = items[selectedSessionIdx];
+  const collapse = direction < 0;
+
+  if (isGroupHeader(el)) {
+    const isCollapsed = collapsedProjectGroups.has(el.dataset.groupPath);
+    if (collapse) {
+      if (!isCollapsed) setGroupCollapsed(el, true);
+    } else if (isCollapsed) {
+      setGroupCollapsed(el, false);
+    } else {
+      navigateSession(1);
+    }
+    return;
+  }
+
+  if (!collapse) {
+    activateSelectedSession(items);
+    return;
+  }
+
+  const header = findParentHeader(el);
+  if (!header) return;
+  const headerIdx = items.indexOf(header);
+  if (headerIdx >= 0) selectSessionByIndex(headerIdx, items);
+}
+
+function activateSelectedSession(items) {
+  items = items || getNavigableItems();
+  if (selectedSessionIdx < 0 || selectedSessionIdx >= items.length) return;
+  const el = items[selectedSessionIdx];
+  if (isGroupHeader(el)) {
+    setGroupCollapsed(el, !collapsedProjectGroups.has(el.dataset.groupPath));
+  } else {
+    el.click();
+  }
+}
+
+function setFocusZone(zone) {
+  const sidebar = document.querySelector('.sidebar');
+  // Clear all zone visuals
+  sidebar.classList.remove('sidebar-focused');
+  clearKbSelection();
+  const selCard = document.querySelector('.task-card.selected');
+  if (selCard) selCard.classList.remove('selected');
+
+  focusZone = zone;
+  if (zone === 'sidebar') {
+    if (sidebar.classList.contains('collapsed')) {
+      sidebar.classList.remove('collapsed');
+      localStorage.setItem('sidebar-collapsed', false);
+    }
+    sidebar.classList.add('sidebar-focused');
+    const items = getNavigableItems();
+    if (items.length > 0) {
+      const activeIdx = items.findIndex((el) => el.classList.contains('active'));
+      if (activeIdx >= 0) {
+        selectSessionByIndex(activeIdx);
+      } else if (selectedSessionKbId) {
+        const restoredIdx = items.findIndex((el) => getKbId(el) === selectedSessionKbId);
+        selectSessionByIndex(restoredIdx >= 0 ? restoredIdx : 0);
+      } else {
+        selectSessionByIndex(0);
+      }
+    }
+  } else {
+    // Session changed while in sidebar — reset stale selection
+    if (selectedSessionId && selectedSessionId !== currentSessionId) {
+      selectedTaskId = null;
+      selectedSessionId = null;
+    }
+    if (selectedTaskId) {
+      const card = document.querySelector(
+        `.task-card[data-task-id="${selectedTaskId}"][data-session-id="${selectedSessionId}"]`,
+      );
+      if (card) card.classList.add('selected');
+    } else {
+      navigateVertical(1);
+    }
+    if (selectedTaskId && detailPanel.classList.contains('visible')) {
+      showTaskDetail(selectedTaskId, selectedSessionId);
+    }
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function getAvailableTasksOptions(currentTaskId = null) {
+  const pending = currentTasks.filter((t) => t.status === 'pending' && t.id !== currentTaskId);
+  const inProgress = currentTasks.filter((t) => t.status === 'in_progress' && t.id !== currentTaskId);
+  const completed = currentTasks.filter((t) => t.status === 'completed' && t.id !== currentTaskId);
+
+  // Build options grouped by status
+  let options = '';
+
+  if (pending.length > 0) {
+    options += '<optgroup label="Pending">';
+    pending.forEach((t, _idx) => {
+      options += `<option value="${t.id}">#${t.id} - ${escapeHtml(t.subject)}</option>`;
+    });
+    options += '</optgroup>';
+  }
+
+  if (inProgress.length > 0) {
+    options += '<optgroup label="In Progress">';
+    inProgress.forEach((t, _idx) => {
+      options += `<option value="${t.id}">#${t.id} - ${escapeHtml(t.subject)}</option>`;
+    });
+    options += '</optgroup>';
+  }
+
+  if (completed.length > 0) {
+    options += '<optgroup label="Completed">';
+    completed.forEach((t, _idx) => {
+      options += `<option value="${t.id}">#${t.id} - ${escapeHtml(t.subject)}</option>`;
+    });
+    options += '</optgroup>';
+  }
+
+  return options;
+}
+
+//#endregion
+
+//#region TASK_DETAIL
+async function showTaskDetail(taskId, sessionId = null) {
+  let task = currentTasks.find(
+    (t) => t.id === taskId && (!sessionId || t.sessionId === sessionId || t._taskDir === sessionId),
+  );
+
+  // If task not found in currentTasks, fetch it from the session
+  if (!task && sessionId && sessionId !== 'undefined') {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}`);
+      const tasks = await res.json();
+      task = tasks.find((t) => t.id === taskId);
+      if (!task) return;
+    } catch (error) {
+      console.error('Failed to fetch task:', error);
+      return;
+    }
+  }
+
+  if (!task) return;
+
+  const actualSid = task.sessionId || sessionId || currentSessionId;
+  selectTask(taskId, actualSid);
+  detailPanel.classList.add('visible');
+
+  const statusLabels = {
+    completed: '<span class="detail-status completed"><span class="dot"></span>Completed</span>',
+    in_progress: '<span class="detail-status in_progress"><span class="dot"></span>In Progress</span>',
+    pending: '<span class="detail-status pending"><span class="dot"></span>Pending</span>',
+  };
+
+  const isBlocked = task.blockedBy && task.blockedBy.length > 0;
+  const actualSessionId = task.sessionId || sessionId || currentSessionId;
+
+  detailContent.innerHTML = `
+        <div class="detail-section">
+          <div class="detail-label">Task #${task.id}</div>
+          <h2 class="detail-title">${escapeHtml(task.subject)}</h2>
+        </div>
+
+        <div class="detail-section" style="display: flex; gap: 12px; align-items: center;">
+          <div>${statusLabels[task.status] || ''}</div>
+          ${task.owner ? `<div style="font-size: 13px; color: ${getOwnerColor(task.owner).color}; font-weight: 500;">${escapeHtml(task.owner)}</div>` : ''}
+          ${isBlocked && task.status !== 'in_progress' ? '<div style="font-size: 10px; color: var(--warning);">Blocked</div>' : ''}
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-label">Description</div>
+          <div class="detail-desc">${task.description ? renderMarkdown(task.description) : '<em style="color: var(--text-muted);">No description</em>'}</div>
+        </div>
+
+        ${
+          task.activeForm && task.status === 'in_progress'
+            ? `
+          <div class="detail-section">
+            <div class="detail-box active">
+              <strong>Currently:</strong> ${escapeHtml(task.activeForm)}
+            </div>
+          </div>
+        `
+            : ''
+        }
+
+        ${
+          task.blockedBy && task.blockedBy.length > 0
+            ? `
+        <div class="detail-section">
+          <div class="detail-label">Blocked By</div>
+          <div class="detail-deps">
+            <div class="detail-box blocked"><strong>Blocked by:</strong> ${task.blockedBy.map((id) => `#${id}`).join(', ')}</div>
+          </div>
+        </div>`
+            : ''
+        }
+
+        ${
+          task.blocks && task.blocks.length > 0
+            ? `
+        <div class="detail-section">
+          <div class="detail-label">Blocks</div>
+          <div class="detail-deps">
+            <div class="detail-box blocks"><strong>Blocks:</strong> ${task.blocks.map((id) => `#${id}`).join(', ')}</div>
+          </div>
+        </div>`
+            : ''
+        }
+
+      `;
+
+  // pi-kanban is read-only — pi owns the source of truth.
+  const deleteBtn = document.getElementById('delete-task-btn');
+  if (deleteBtn) deleteBtn.style.display = 'none';
+}
+
+function closeDetailPanel() {
+  detailPanel.classList.remove('visible');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function showBlockedTaskModal(task) {
+  const messageDiv = document.getElementById('blocked-task-message');
+
+  const blockedByList = task.blockedBy
+    .map((id) => {
+      const blockingTask = currentTasks.find((t) => t.id === id);
+      if (blockingTask) {
+        return `<li><strong>#${blockingTask.id}</strong> - ${escapeHtml(blockingTask.subject)}</li>`;
+      }
+      return `<li><strong>#${id}</strong></li>`;
+    })
+    .join('');
+
+  messageDiv.innerHTML = `
+        <p style="margin-bottom: 12px;">Task <strong>#${task.id}</strong> - ${escapeHtml(task.subject)} is currently blocked by:</p>
+        <ul style="margin: 0 0 16px 20px; padding: 0;">${blockedByList}</ul>
+        <p style="margin: 0; color: var(--text-secondary); font-size: 13px;">
+          Please resolve these dependencies before moving this task to <strong>In Progress</strong>.
+        </p>
+      `;
+
+  const modal = document.getElementById('blocked-task-modal');
+  modal.classList.add('visible');
+
+  // Handle ESC key
+  const keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeBlockedTaskModal();
+      document.removeEventListener('keydown', keyHandler);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+}
+
+function closeBlockedTaskModal() {
+  const modal = document.getElementById('blocked-task-modal');
+  modal.classList.remove('visible');
+}
+
+//#endregion
+
+//#region HELP
+function showHelpModal() {
+  const modal = document.getElementById('help-modal');
+  modal.classList.add('visible');
+
+  // Handle keyboard shortcuts
+  const keyHandler = (e) => {
+    if (e.key === 'Escape' || e.key === '?') {
+      e.preventDefault();
+      closeHelpModal();
+      document.removeEventListener('keydown', keyHandler);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+}
+
+function closeHelpModal() {
+  const modal = document.getElementById('help-modal');
+  modal.classList.remove('visible');
+}
+
+async function refreshCurrentView() {
+  if (viewMode === 'all') {
+    await showAllTasks();
+  } else if (currentSessionId) {
+    await fetchTasks(currentSessionId);
+    renderLiveUpdatesFromCache();
+  } else {
+    await fetchSessions();
+  }
+}
+
+document.getElementById('close-detail').onclick = closeDetailPanel;
+
+//#endregion
+
+//#region SCRATCHPAD
+let _scratchpadSaveTimer = null;
+const _scratchpadModal = document.getElementById('scratchpad-modal');
+const _scratchpadTextarea = document.getElementById('scratchpad-textarea');
+const _scratchpadCharcount = document.getElementById('scratchpad-charcount');
+
+let _scratchpadKeyOverride = null;
+
+function _scratchpadKey() {
+  if (_scratchpadKeyOverride) return _scratchpadKeyOverride;
+  if (currentSessionId) return `scratchpad-${currentSessionId}`;
+  if (currentProjectPath) return `scratchpad-project:${currentProjectPath}`;
+  return null;
+}
+
+function toggleScratchpad() {
+  if (_scratchpadModal.classList.contains('visible')) {
+    closeScratchpad();
+  } else {
+    showScratchpad();
+  }
+}
+
+function showScratchpad(keyOverride) {
+  _scratchpadKeyOverride = keyOverride || null;
+  const key = _scratchpadKey();
+  if (!key) return;
+  _scratchpadTextarea.value = localStorage.getItem(key) || '';
+  _scratchpadCharcount.textContent = `${_scratchpadTextarea.value.length} chars`;
+  _scratchpadModal.classList.add('visible');
+  _scratchpadTextarea.focus();
+}
+
+function closeScratchpad() {
+  if (_scratchpadSaveTimer) {
+    clearTimeout(_scratchpadSaveTimer);
+    _scratchpadSaveTimer = null;
+  }
+  saveScratchpad();
+  _scratchpadKeyOverride = null;
+  _scratchpadModal.classList.remove('visible');
+}
+
+function saveScratchpad() {
+  const key = _scratchpadKey();
+  if (!key) return;
+  const val = _scratchpadTextarea.value;
+  if (val.trim()) {
+    localStorage.setItem(key, val);
+  } else {
+    localStorage.removeItem(key);
+  }
+}
+
+_scratchpadTextarea.addEventListener('input', () => {
+  _scratchpadCharcount.textContent = `${_scratchpadTextarea.value.length} chars`;
+  if (_scratchpadSaveTimer) clearTimeout(_scratchpadSaveTimer);
+  _scratchpadSaveTimer = setTimeout(() => {
+    saveScratchpad();
+    _scratchpadSaveTimer = null;
+  }, 500);
+});
+
+//#endregion
+
+//#region STORAGE_MANAGER
+
+function _getStorageTotalSize() {
+  let bytes = 0;
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    bytes += k.length + localStorage.getItem(k).length;
+  }
+  return bytes * 2; // UTF-16
+}
+
+function _updateStorageTotal() {
+  const el = document.getElementById('storage-total');
+  if (el) el.textContent = `${(_getStorageTotalSize() / 1024).toFixed(1)} KB`;
+}
+
+function _getKnownSessionIds() {
+  return new Set(sessions.map((s) => s.id));
+}
+
+function _sessionLabel(session, id) {
+  return session ? escapeHtml(session.name || session.slug || id.slice(0, 12)) : escapeHtml(id.slice(0, 12));
+}
+
+function _groupByProject(sessionIds) {
+  const sessionMap = new Map(sessions.map((s) => [s.id, s]));
+  const groups = new Map();
+  const orphans = [];
+  for (const id of sessionIds) {
+    const session = sessionMap.get(id);
+    if (!session) {
+      orphans.push({ id, session: null });
+      continue;
+    }
+    const project = session.project || '(no project)';
+    if (!groups.has(project)) groups.set(project, []);
+    groups.get(project).push({ id, session });
+  }
+  return { groups, orphans };
+}
+
+function _projectLabel(project) {
+  if (project === '(no project)') return '(no project)';
+  return project.split(/[/\\]/).pop() || project;
+}
+
+function _escapeForJsAttr(str) {
+  const jsEscaped = str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+  return escapeHtml(jsEscaped);
+}
+
+function _renderProjectGroup(label, meta, innerHtml) {
+  return `<div class="storage-project-group">
+    <div class="storage-project-header">
+      <span>${label}</span>
+      <span class="storage-item-meta">${meta}</span>
+    </div>
+    <div class="storage-session-group">${innerHtml}</div>
+  </div>`;
+}
+
+function _renderOrphanGroup(count, innerHtml) {
+  return _renderProjectGroup('Orphaned', `<span class="storage-item-badge orphan">${count}</span>`, innerHtml);
+}
+
+function showStorageManager() {
+  _updateStorageTotal();
+  _updateOrphanedCount();
+  document.querySelectorAll('.storage-tab').forEach((t) => {
+    t.classList.toggle('active', t.dataset.tab === 'sessions');
+  });
+  _renderStorageTab();
+  document.getElementById('storage-modal').classList.add('visible');
+}
+
+function closeStorageManager() {
+  document.getElementById('storage-modal').classList.remove('visible');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function switchStorageTab(tab) {
+  document.querySelectorAll('.storage-tab').forEach((t) => {
+    t.classList.toggle('active', t.dataset.tab === tab);
+  });
+  _renderStorageTab();
+}
+
+function _renderStorageTab() {
+  const body = document.getElementById('storage-modal-body');
+  const tab = document.querySelector('.storage-tab.active')?.dataset.tab || 'sessions';
+  if (tab === 'sessions') body.innerHTML = _renderStorageSessions();
+  else if (tab === 'scratchpads') body.innerHTML = _renderStorageScratchpads();
+  else if (tab === 'linked-docs') body.innerHTML = _renderStorageLinkedDocs();
+}
+
+function _renderStorageSessions() {
+  const pinnedIds = [...new Set([...pinnedSessionIds, ...stickySessionIds])];
+
+  const msgMap = new Map();
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key.startsWith('pinned-messages-')) continue;
+    const sid = key.slice('pinned-messages-'.length);
+    try {
+      const pins = JSON.parse(localStorage.getItem(key)) || [];
+      if (pins.length) msgMap.set(sid, { pins, key });
+    } catch {}
+  }
+
+  const allIds = [...new Set([...pinnedIds, ...msgMap.keys()])];
+  if (!allIds.length) return '<div class="storage-empty">No pinned sessions or messages</div>';
+  const { groups, orphans } = _groupByProject(allIds);
+
+  function renderMessageItems(id) {
+    const g = msgMap.get(id);
+    if (!g) return '';
+    const eid = escapeHtml(id);
+    const header = `<div class="storage-group-header" style="padding-left:12px;">
+      <span>${g.pins.length} pinned message${g.pins.length > 1 ? 's' : ''}</span>
+      <div class="storage-item-actions">
+        <button class="danger" onclick="_storageClearSessionPins('${eid}')">Clear All</button>
+      </div>
+    </div>`;
+    const items = g.pins
+      .map((p) => {
+        const type = escapeHtml(p.type || '?');
+        const text = escapeHtml((p.text || p.tool || p.agentType || '').slice(0, 60));
+        const pinId = _escapeForJsAttr(p.id || '');
+        const sid = _escapeForJsAttr(id);
+        return `<div class="storage-item storage-item-clickable" style="padding-left:24px;" onclick="_storagePreviewPin('${sid}','${pinId}')">
+        <span class="storage-item-badge">${type}</span>
+        <span class="storage-item-id">${text}</span>
+        <span class="storage-item-meta">${formatDate(p.timestamp)}</span>
+        <div class="storage-item-actions">
+          <button onclick="event.stopPropagation();_storagePreviewPin('${sid}','${pinId}')">View</button>
+          <button class="danger" onclick="event.stopPropagation();_storageUnpinMessage('${sid}','${pinId}')">Unpin</button>
+        </div>
+      </div>`;
+      })
+      .join('');
+    return header + items;
+  }
+
+  function renderSessionItem({ id, session }) {
+    const isPinned = isAnyPinned(id);
+    const eid = escapeHtml(id);
+    const actions = isPinned
+      ? `<button onclick="_storageViewSession('${eid}')">View</button>
+         <button class="danger" onclick="_storageUnpinSession('${eid}')">Unpin</button>`
+      : `<button onclick="_storageViewSession('${eid}')">View</button>`;
+    return `<div class="storage-group-header">
+      <span>${_sessionLabel(session, id)}</span>
+      <div class="storage-item-actions">${actions}</div>
+    </div>${renderMessageItems(id)}`;
+  }
+
+  let html = '';
+  for (const [project, items] of groups) {
+    const count = items.length;
+    html += _renderProjectGroup(
+      escapeHtml(_projectLabel(project)),
+      `${count} session${count > 1 ? 's' : ''}`,
+      items.map(renderSessionItem).join(''),
+    );
+  }
+  if (orphans.length) {
+    html += _renderOrphanGroup(orphans.length, orphans.map(renderSessionItem).join(''));
+  }
+  return html;
+}
+
+async function _storageViewSession(id) {
+  closeStorageManager();
+  revealedStorageSessionId = id;
+  if (!sessions.some((s) => s.id === id)) {
+    lastSessionsHash = '';
+    await fetchSessions();
+  }
+  await fetchTasks(id);
+  const el = document.querySelector(`.session-item[data-session-id="${CSS.escape(id)}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function _storageUnpinSession(id) {
+  pinnedSessionIds.delete(id);
+  stickySessionIds.delete(id);
+  savePinnedSessions();
+  renderSessions();
+  _renderStorageTab();
+  _updateStorageTotal();
+}
+
+function _storageClearSessionPins(sessionId) {
+  localStorage.removeItem(`pinned-messages-${sessionId}`);
+  if (currentSessionId === sessionId) {
+    currentPins = [];
+    const el = document.getElementById('message-panel-pinned');
+    if (el) el.innerHTML = '';
+  }
+  _renderStorageTab();
+  _updateStorageTotal();
+}
+
+function _storageUnpinMessage(sessionId, pinId) {
+  const key = `pinned-messages-${sessionId}`;
+  try {
+    const pins = JSON.parse(localStorage.getItem(key)) || [];
+    const idx = pins.findIndex((p) => p.id === pinId);
+    if (idx < 0) return;
+    pins.splice(idx, 1);
+    if (pins.length) localStorage.setItem(key, JSON.stringify(pins));
+    else localStorage.removeItem(key);
+    if (currentSessionId === sessionId) {
+      currentPins = pins;
+      const el = document.getElementById('message-panel-pinned');
+      if (el) el.innerHTML = renderPinnedSection();
+    }
+  } catch {}
+  _renderStorageTab();
+  _updateStorageTotal();
+}
+
+function _renderStorageScratchpads() {
+  const allItems = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key.startsWith('scratchpad-')) continue;
+    const val = localStorage.getItem(key) || '';
+    const isProject = key.startsWith('scratchpad-project:');
+    const id = isProject ? key.slice('scratchpad-project:'.length) : key.slice('scratchpad-'.length);
+    allItems.push({ key, id, isProject, chars: val.length });
+  }
+  if (!allItems.length) return '<div class="storage-empty">No scratchpads</div>';
+
+  const projectItems = allItems.filter((i) => i.isProject);
+  const sessionItems = allItems.filter((i) => !i.isProject);
+  const sessionIds = sessionItems.map((i) => i.id);
+  const { groups: projectGroups, orphans } = _groupByProject(sessionIds);
+  const scratchBySession = new Map(sessionItems.map((i) => [i.id, i]));
+
+  function renderScratchItem(item) {
+    const session = !item.isProject ? sessions.find((s) => s.id === item.id) : null;
+    const typeBadge = item.isProject
+      ? '<span class="storage-item-badge">project</span>'
+      : '<span class="storage-item-badge">session</span>';
+    const jsKey = _escapeForJsAttr(item.key);
+    const label = item.isProject ? escapeHtml(_projectLabel(item.id)) : _sessionLabel(session, item.id);
+    return `<div class="storage-item">
+      <span class="storage-item-id" title="${escapeHtml(item.id)}">${label}</span>
+      ${typeBadge}
+      <span class="storage-item-meta">${item.chars} chars</span>
+      <div class="storage-item-actions">
+        <button onclick="_storagePreviewScratchpad('${jsKey}')">View</button>
+        <button class="danger" onclick="_storageDeleteScratchpad('${jsKey}')">Delete</button>
+      </div>
+    </div>`;
+  }
+
+  let html = '';
+
+  if (projectItems.length) {
+    html += _renderProjectGroup(
+      'Project Scratchpads',
+      `${projectItems.length}`,
+      projectItems.map(renderScratchItem).join(''),
+    );
+  }
+
+  for (const [project, items] of projectGroups) {
+    const matching = items.map((i) => scratchBySession.get(i.id)).filter(Boolean);
+    if (!matching.length) continue;
+    html += _renderProjectGroup(
+      escapeHtml(_projectLabel(project)),
+      `${matching.length} scratchpad${matching.length > 1 ? 's' : ''}`,
+      matching.map(renderScratchItem).join(''),
+    );
+  }
+
+  if (orphans.length) {
+    const orphanItems = orphans.map((i) => scratchBySession.get(i.id)).filter(Boolean);
+    if (orphanItems.length) {
+      html += _renderOrphanGroup(orphanItems.length, orphanItems.map(renderScratchItem).join(''));
+    }
+  }
+  return html;
+}
+
+function _storagePreviewScratchpad(key) {
+  closeStorageManager();
+  showScratchpad(key);
+}
+
+function _storagePreviewPin(sessionId, pinId) {
+  closeStorageManager();
+  const key = `pinned-messages-${sessionId}`;
+  try {
+    const pins = JSON.parse(localStorage.getItem(key)) || [];
+    const pin = pins.find((p) => p.id === pinId);
+    if (!pin) return;
+    document.getElementById('msg-detail-pin-btn').style.display = 'none';
+    currentMsgDetailIdx = null;
+    currentPinDetailId = null;
+    _renderPinToDetail(pin);
+    document.getElementById('msg-detail-modal').classList.add('visible');
+  } catch (e) {
+    console.error('_storagePreviewPin error:', e);
+  }
+}
+
+function _storageDeleteScratchpad(key) {
+  localStorage.removeItem(key);
+  _renderStorageTab();
+  _updateStorageTotal();
+}
+
+function _renderStorageLinkedDocs() {
+  const entries = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key.startsWith(PREVIEW_STORAGE_PREFIX)) continue;
+    try {
+      const arr = JSON.parse(localStorage.getItem(key)) || [];
+      if (Array.isArray(arr) && arr.length) {
+        entries.push({ sessionId: key.slice(PREVIEW_STORAGE_PREFIX.length), paths: arr });
+      }
+    } catch {}
+  }
+  if (!entries.length) return '<div class="storage-empty">No linked documents</div>';
+
+  const byId = new Map(entries.map((e) => [e.sessionId, e]));
+  const { groups, orphans } = _groupByProject(entries.map((e) => e.sessionId));
+
+  function renderDocRow(sessionId, p) {
+    const name = p.split(/[\\/]/).pop();
+    const sid = _escapeForJsAttr(sessionId);
+    const jsPath = _escapeForJsAttr(p);
+    return `<div class="storage-item" style="padding-left:24px;">
+      <span class="storage-item-id" title="${escapeHtml(p)}">${escapeHtml(name)}</span>
+      <div class="storage-item-actions">
+        <button onclick="_storagePreviewLinkedDoc('${jsPath}')">View</button>
+        <button class="danger" onclick="_storageUnlinkDoc('${sid}','${jsPath}')">Unlink</button>
+      </div>
+    </div>`;
+  }
+
+  function renderSessionItem({ id, session }) {
+    const entry = byId.get(id);
+    if (!entry) return '';
+    const eid = escapeHtml(id);
+    const count = entry.paths.length;
+    const header = `<div class="storage-group-header">
+      <span>${_sessionLabel(session, id)} <span class="storage-item-badge">${count} doc${count > 1 ? 's' : ''}</span></span>
+      <div class="storage-item-actions">
+        <button class="danger" onclick="_storageClearLinkedDocs('${eid}')">Clear All</button>
+      </div>
+    </div>`;
+    const rows = entry.paths.map((p) => renderDocRow(id, p)).join('');
+    return header + rows;
+  }
+
+  let html = '';
+  for (const [project, items] of groups) {
+    const count = items.length;
+    html += _renderProjectGroup(
+      escapeHtml(_projectLabel(project)),
+      `${count} session${count > 1 ? 's' : ''}`,
+      items.map(renderSessionItem).join(''),
+    );
+  }
+  if (orphans.length) {
+    html += _renderOrphanGroup(orphans.length, orphans.map(renderSessionItem).join(''));
+  }
+  return html;
+}
+
+function _storagePreviewLinkedDoc(path) {
+  openPreviewByPath(path);
+}
+
+function _storageUnlinkDoc(sessionId, path) {
+  removeSessionPreviewPath(sessionId, path);
+  if (sessionId === _infoModalSessionId) refreshInfoModalLinkedDocs();
+  renderSessions();
+  _renderStorageTab();
+  _updateStorageTotal();
+}
+
+function _storageClearLinkedDocs(sessionId) {
+  localStorage.removeItem(PREVIEW_STORAGE_PREFIX + sessionId);
+  if (sessionId === _infoModalSessionId) refreshInfoModalLinkedDocs();
+  renderSessions();
+  _renderStorageTab();
+  _updateStorageTotal();
+}
+
+function _findOrphanedKeys() {
+  const known = _getKnownSessionIds();
+  if (!known.size) return [];
+  const orphaned = [];
+  for (const id of pinnedSessionIds) if (!known.has(id)) orphaned.push(`__pinned__${id}`);
+  for (const id of stickySessionIds) if (!known.has(id)) orphaned.push(`__sticky__${id}`);
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key.startsWith('pinned-messages-')) {
+      if (!known.has(key.slice('pinned-messages-'.length))) orphaned.push(key);
+    } else if (key.startsWith('scratchpad-') && !key.startsWith('scratchpad-project:')) {
+      if (!known.has(key.slice('scratchpad-'.length))) orphaned.push(key);
+    } else if (key.startsWith(PREVIEW_STORAGE_PREFIX)) {
+      if (!known.has(key.slice(PREVIEW_STORAGE_PREFIX.length))) orphaned.push(key);
+    }
+  }
+  return orphaned;
+}
+
+function _updateOrphanedCount() {
+  const btn = document.getElementById('storage-cleanup-btn');
+  if (!btn) return;
+  const count = _findOrphanedKeys().length;
+  btn.textContent = count ? `Clean Orphaned (${count})` : 'Clean Orphaned';
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+function cleanupOrphanedStorage() {
+  if (!sessions.length) {
+    showToast('Sessions not loaded yet — try again after they appear');
+    return;
+  }
+  const orphaned = _findOrphanedKeys();
+  let pinsChanged = false;
+  for (const key of orphaned) {
+    if (key.startsWith('__pinned__')) {
+      pinnedSessionIds.delete(key.slice('__pinned__'.length));
+      pinsChanged = true;
+    } else if (key.startsWith('__sticky__')) {
+      stickySessionIds.delete(key.slice('__sticky__'.length));
+      pinsChanged = true;
+    } else {
+      localStorage.removeItem(key);
+    }
+  }
+  if (pinsChanged) savePinnedSessions();
+  const removed = orphaned.length;
+
+  showToast(removed ? `Cleaned ${removed} orphaned item${removed > 1 ? 's' : ''}` : 'No orphaned items found');
+  renderSessions();
+  _renderStorageTab();
+  _updateStorageTotal();
+  _updateOrphanedCount();
+}
+//#endregion
+
+//#region KEYBOARD_SHORTCUTS
+function matchKey(e, ...keys) {
+  if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return false;
+  return keys.some((k) => e.key === k || e.code === k);
+}
+
+const MODAL_ESC_PRIORITY = ['preview-modal', 'msg-detail-modal', 'plan-modal'];
+const MODAL_CLOSERS = {
+  'preview-modal': () => closePreviewModal(),
+  'msg-detail-modal': () => {
+    closeMsgDetailModal();
+    msgDetailFollowLatest = false;
+  },
+  'plan-modal': () => closePlanModal(),
+  'team-modal': () => closeTeamModal(),
+  'agent-modal': () => closeAgentModal(),
+  'help-modal': () => closeHelpModal(),
+};
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+    return;
+  }
+
+  // Modal guard — only Escape, Shift+M, and msg-detail J/K navigation pass through
+  if (document.querySelector('.modal-overlay.visible')) {
+    if (e.key === 'Escape') {
+      if (_scratchpadModal.classList.contains('visible')) {
+        closeScratchpad();
+        return;
+      }
+      // Close only the topmost so a child Esc doesn't also dismiss its parent.
+      const visible = [...document.querySelectorAll('.modal-overlay.visible')];
+      const topId = MODAL_ESC_PRIORITY.find((id) => visible.some((m) => m.id === id)) || visible[visible.length - 1].id;
+      const close = MODAL_CLOSERS[topId];
+      if (close) close();
+      else document.getElementById(topId).classList.remove('visible');
+      e.stopImmediatePropagation();
+    } else if (
+      e.code === 'KeyM' &&
+      e.shiftKey &&
+      document.getElementById('msg-detail-modal').classList.contains('visible')
+    ) {
+      e.preventDefault();
+      closeMsgDetailModal();
+    } else if (document.getElementById('msg-detail-modal').classList.contains('visible')) {
+      if (matchKey(e, 'ArrowDown', 'KeyJ')) {
+        e.preventDefault();
+        if (currentMsgDetailIdx < currentMessages.length - 1) {
+          msgDetailFollowLatest = false;
+          showMsgDetail(currentMsgDetailIdx + 1);
+        } else if (currentMsgDetailIdx === currentMessages.length - 1) {
+          msgDetailFollowLatest = true;
+          showMsgDetail(currentMsgDetailIdx);
+        }
+      } else if (matchKey(e, 'ArrowUp', 'KeyK')) {
+        e.preventDefault();
+        if (currentMsgDetailIdx > 0) {
+          msgDetailFollowLatest = false;
+          showMsgDetail(currentMsgDetailIdx - 1);
+        }
+      }
+    }
+    return;
+  }
+
+  // Global shortcuts
+  if (e.key === '[') {
+    e.preventDefault();
+    toggleSidebar();
+    return;
+  }
+  if (e.code === 'KeyL' && e.shiftKey) {
+    e.preventDefault();
+    toggleMessagePanel();
+    return;
+  }
+  if (e.code === 'KeyM' && e.shiftKey) {
+    e.preventDefault();
+    const msgDetailModal = document.getElementById('msg-detail-modal');
+    if (msgDetailModal.classList.contains('visible')) {
+      closeMsgDetailModal();
+    } else if (currentMessages.length) {
+      msgDetailFollowLatest = true;
+      showMsgDetail(currentMessages.length - 1);
+    }
+    return;
+  }
+  if (e.code === 'KeyS' && e.shiftKey) {
+    e.preventDefault();
+    showStorageManager();
+    return;
+  }
+  if (e.key === '.' || e.key === '>') {
+    const sid = sessionsList.querySelector('.kb-selected')?.dataset.sessionId || currentSessionId;
+    if (sid) {
+      e.preventDefault();
+      (e.shiftKey ? toggleSessionSticky : toggleSessionPin)(sid);
+      return;
+    }
+  }
+
+  // Tab toggles focus zone
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    if (focusZone === 'sidebar') {
+      const hasCards = document.querySelector('.task-card');
+      if (!hasCards) return;
+    }
+    setFocusZone(focusZone === 'board' ? 'sidebar' : 'board');
+    return;
+  }
+
+  // Sidebar navigation
+  if (focusZone === 'sidebar') {
+    if (matchKey(e, 'ArrowDown', 'KeyJ')) {
+      e.preventDefault();
+      navigateSession(1);
+      return;
+    }
+    if (matchKey(e, 'ArrowUp', 'KeyK')) {
+      e.preventDefault();
+      navigateSession(-1);
+      return;
+    }
+    if (matchKey(e, 'ArrowLeft', 'KeyH')) {
+      e.preventDefault();
+      handleSidebarHorizontal(-1);
+      return;
+    }
+    if (matchKey(e, 'ArrowRight', 'KeyL')) {
+      e.preventDefault();
+      handleSidebarHorizontal(1);
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      activateSelectedSession();
+      return;
+    }
+    if (e.key === 'Escape') {
+      setFocusZone('board');
+      return;
+    }
+  }
+
+  // Board navigation
+  if (focusZone === 'board') {
+    if (matchKey(e, 'ArrowDown', 'KeyJ', 'ArrowUp', 'KeyK', 'ArrowLeft', 'KeyH', 'ArrowRight', 'KeyL')) {
+      e.preventDefault();
+      if (!selectedTaskId && !document.querySelector('.task-card.selected')) {
+        setFocusZone('sidebar');
+        return;
+      }
+      if (matchKey(e, 'ArrowDown', 'KeyJ')) navigateVertical(1);
+      else if (matchKey(e, 'ArrowUp', 'KeyK')) navigateVertical(-1);
+      else if (matchKey(e, 'ArrowLeft', 'KeyH')) navigateHorizontal(-1);
+      else if (matchKey(e, 'ArrowRight', 'KeyL')) navigateHorizontal(1);
+
+      if (selectedTaskId && detailPanel.classList.contains('visible')) {
+        showTaskDetail(selectedTaskId, selectedSessionId);
+      }
+      return;
+    }
+
+    if ((e.key === 'Enter' || e.key === ' ') && selectedTaskId && e.target.tagName !== 'BUTTON') {
+      e.preventDefault();
+      if (detailPanel.classList.contains('visible')) {
+        const labelEl = document.querySelector('.detail-label');
+        const shownId = labelEl?.textContent.match(/\d+/)?.[0];
+        if (shownId === selectedTaskId) {
+          closeDetailPanel();
+        } else {
+          showTaskDetail(selectedTaskId, selectedSessionId);
+        }
+      } else {
+        showTaskDetail(selectedTaskId, selectedSessionId);
+      }
+      return;
+    }
+
+  }
+
+  if (e.key === 'Escape') {
+    if (detailPanel.classList.contains('visible')) closeDetailPanel();
+    else if (agentLogMode) exitAgentLogMode();
+    else if (messagePanelOpen) toggleMessagePanel();
+    return;
+  }
+
+  // Shared actions — work in both sidebar and board
+  const contextSid =
+    focusZone === 'sidebar'
+      ? sessionsList.querySelector('.kb-selected')?.dataset.sessionId || currentSessionId
+      : selectedSessionId || currentSessionId;
+  if (matchKey(e, 'KeyP') && !e.shiftKey) {
+    e.preventDefault();
+    if (contextSid) openPlanForSession(contextSid);
+    return;
+  }
+  if (matchKey(e, 'KeyI') && !e.shiftKey) {
+    e.preventDefault();
+    if (contextSid) showSessionInfoModal(contextSid);
+    return;
+  }
+  if (matchKey(e, 'KeyN') && !e.shiftKey) {
+    e.preventDefault();
+    toggleScratchpad();
+    return;
+  }
+  if (e.key === '$' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    hubNavigate('cost', contextSid ? `?view=detail&session=${encodeURIComponent(contextSid)}` : undefined);
+    return;
+  }
+  if (matchKey(e, 'KeyM')) {
+    e.preventDefault();
+    const mSession = contextSid ? sessions.find((s) => s.id === contextSid) : null;
+    hubNavigate('marketplace', mSession?.project ? `?project=${encodeURIComponent(mSession.project)}` : undefined);
+    return;
+  }
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.key === 'm') {
+    e.preventDefault();
+    const mSession = contextSid ? sessions.find((s) => s.id === contextSid) : null;
+    hubNavigate('memory', mSession?.project ? `?project=${encodeURIComponent(mSession.project)}` : undefined);
+    return;
+  }
+  if (e.code === 'KeyC' && e.shiftKey) {
+    e.preventDefault();
+    if (!contextSid) {
+      showToast('No session selected');
+      return;
+    }
+    navigator.clipboard
+      .writeText(contextSid)
+      .then(() => showToast(`Copied session id: ${contextSid.slice(0, 8)}`, 'success'))
+      .catch(() => showToast('Failed to copy session id'));
+    return;
+  }
+  if (matchKey(e, 'KeyR')) {
+    e.preventDefault();
+    if (_manualRefreshing) return;
+    _manualRefreshing = true;
+    lastSessionsHash = '';
+    lastTasksHash = '';
+    const refreshes = [fetchSessions()];
+    if (currentSessionId) refreshes.push(fetchTasks(currentSessionId));
+    refreshRateLimits();
+    Promise.all(refreshes)
+      .then(() => showToast('Data refreshed', 'success'))
+      .finally(() => {
+        _manualRefreshing = false;
+      });
+    return;
+  }
+  if (matchKey(e, 'KeyT')) {
+    e.preventDefault();
+    toggleTheme();
+    return;
+  }
+  if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+    e.preventDefault();
+    showHelpModal();
+  }
+});
+
+//#endregion
+
+//#region MARKDOWN_PREVIEW
+const PREVIEW_STORAGE_PREFIX = 'preview-paths-';
+let currentPreviewPath = null;
+
+function getSessionPreviewPaths(sessionId) {
+  if (!sessionId) return [];
+  try {
+    const raw = localStorage.getItem(PREVIEW_STORAGE_PREFIX + sessionId);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function addSessionPreviewPath(sessionId, filePath) {
+  if (!sessionId || !filePath) return;
+  const paths = getSessionPreviewPaths(sessionId).filter((p) => p !== filePath);
+  paths.unshift(filePath);
+  localStorage.setItem(PREVIEW_STORAGE_PREFIX + sessionId, JSON.stringify(paths.slice(0, 20)));
+}
+
+function removeSessionPreviewPath(sessionId, filePath) {
+  if (!sessionId) return;
+  const paths = getSessionPreviewPaths(sessionId).filter((p) => p !== filePath);
+  if (paths.length) localStorage.setItem(PREVIEW_STORAGE_PREFIX + sessionId, JSON.stringify(paths));
+  else localStorage.removeItem(PREVIEW_STORAGE_PREFIX + sessionId);
+}
+
+function splitFrontmatter(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!m) return { fm: null, body: text };
+  const fm = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/);
+    if (kv) fm[kv[1]] = kv[2].replace(/^['"]|['"]$/g, '');
+  }
+  return { fm, body: m[2] };
+}
+
+function renderFrontmatterBlock(fm) {
+  const rows = Object.entries(fm)
+    .map(
+      ([k, v]) =>
+        `<div class="fm-row"><span class="fm-k">${escapeHtml(k)}</span><span class="fm-v">${escapeHtml(String(v))}</span></div>`,
+    )
+    .join('');
+  return `<details class="preview-fm" open><summary>frontmatter</summary><div class="fm-grid">${rows}</div></details>`;
+}
+
+function openPreviewModal(filePath, content) {
+  currentPreviewPath = filePath;
+  document.getElementById('preview-modal-title').textContent = filePath.split(/[\\/]/).pop();
+  const { fm, body } = /\.(md|markdown)$/i.test(filePath) ? splitFrontmatter(content) : { fm: null, body: content };
+  const bodyEl = document.getElementById('preview-modal-body');
+  bodyEl.innerHTML = (fm ? renderFrontmatterBlock(fm) : '') + renderMarkdown(body);
+  if (!bodyEl.dataset.relLinkBound) {
+    bodyEl.addEventListener('click', (e) => {
+      const a = e.target.closest('a[href]');
+      if (!a) return;
+      const href = a.getAttribute('href');
+      if (!href || href.startsWith('#')) return;
+      const isAbsoluteUrl = /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//');
+      const isAbsolutePath = href.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(href);
+      if (isAbsoluteUrl) return;
+      if (!/\.(md|markdown)(#.*)?$/i.test(href)) return;
+      e.preventDefault();
+      const cleanHref = href.replace(/#.*$/, '');
+      openPreviewByPath(cleanHref, isAbsolutePath ? undefined : currentPreviewPath);
+    });
+    bodyEl.dataset.relLinkBound = '1';
+  }
+  document.getElementById('preview-modal-meta').textContent = filePath;
+  document.getElementById('preview-modal').classList.add('visible');
+  updatePreviewLinkBtn();
+}
+
+function isPreviewLinkedToCurrentSession() {
+  if (!currentPreviewPath || !currentSessionId) return false;
+  return getSessionPreviewPaths(currentSessionId).includes(currentPreviewPath);
+}
+
+function updatePreviewLinkBtn() {
+  const btn = document.getElementById('preview-link-btn');
+  if (!btn) return;
+  if (!currentSessionId) {
+    btn.style.display = 'none';
+    return;
+  }
+  btn.style.display = '';
+  const linked = isPreviewLinkedToCurrentSession();
+  btn.title = linked ? 'Unlink from current session' : 'Link to current session';
+  btn.style.color = linked ? 'var(--accent, #5b9a6b)' : '';
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function togglePreviewSessionLink() {
+  if (!currentPreviewPath || !currentSessionId) {
+    showToast('Select a session first');
+    return;
+  }
+  if (isPreviewLinkedToCurrentSession()) {
+    removeSessionPreviewPath(currentSessionId, currentPreviewPath);
+    showToast('Unlinked from session');
+  } else {
+    addSessionPreviewPath(currentSessionId, currentPreviewPath);
+    showToast('Linked to session');
+  }
+  updatePreviewLinkBtn();
+  if (_infoModalSessionId === currentSessionId) {
+    refreshInfoModalLinkedDocs();
+  }
+  renderSessions();
+}
+
+function refreshInfoModalLinkedDocs() {
+  const bodyEl = document.getElementById('team-modal-body');
+  if (!bodyEl) return;
+  const existing = bodyEl.querySelector('.linked-docs-section');
+  const html = renderLinkedDocsHtml(_infoModalSessionId);
+  if (!existing) {
+    if (!html) return;
+    const planCard = bodyEl.querySelector('[data-plan-card]');
+    const wrap = document.createElement('div');
+    wrap.innerHTML = html;
+    const node = wrap.firstElementChild;
+    if (planCard?.nextSibling) planCard.parentNode.insertBefore(node, planCard.nextSibling);
+    else bodyEl.appendChild(node);
+    bindLinkedDocsHandlers(node, _infoModalSessionId);
+    return;
+  }
+  if (!html) {
+    existing.remove();
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  const node = wrap.firstElementChild;
+  existing.replaceWith(node);
+  bindLinkedDocsHandlers(node, _infoModalSessionId);
+}
+
+function closePreviewModal() {
+  resetModalFullscreen('preview-modal');
+  currentPreviewPath = null;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openPreviewInEditor() {
+  if (!currentPreviewPath) return;
+  postAndToast('/api/open-in-editor', { file: currentPreviewPath }, 'in editor');
+}
+
+async function openPreviewByPath(filePath, base) {
+  if (!filePath) return;
+  try {
+    const qs = new URLSearchParams({ path: filePath });
+    if (base) qs.set('base', base);
+    const r = await fetch(`/api/preview?${qs}`);
+    if (!r.ok) {
+      showToast('Preview file unavailable');
+      return;
+    }
+    const data = await r.json();
+    openPreviewModal(data.path, data.content);
+  } catch {
+    showToast('Failed to load preview');
+  }
+}
+
+function handleSessionOpenEvent(data) {
+  const { id } = data;
+  if (!id) return;
+  const target = sessions.find((s) => s.id === id);
+  if (!target) {
+    showToast(`Session not found: ${id.slice(0, 8)}`);
+    return;
+  }
+  if (sessionFilter !== 'active') {
+    sessionFilter = 'active';
+    const sel = document.getElementById('session-filter');
+    if (sel) sel.value = 'active';
+    updateUrl();
+  }
+  if (!isSessionActive(target)) {
+    stickySessionIds.add(id);
+  }
+  fetchTasks(id);
+}
+
+async function handlePreviewOpenEvent(data) {
+  const { path: filePath, content, sessionId, link } = data;
+  if (sessionId && sessionId !== currentSessionId) {
+    if (sessions.find((s) => s.id === sessionId)) {
+      await fetchTasks(sessionId);
+    } else {
+      showToast(`Preview received for unknown session ${sessionId.slice(0, 8)}`);
+    }
+  }
+  if (link && sessionId && filePath) {
+    const before = getSessionPreviewPaths(sessionId).includes(filePath);
+    addSessionPreviewPath(sessionId, filePath);
+    if (!before) showToast('Linked to session');
+    if (_infoModalSessionId === sessionId) refreshInfoModalLinkedDocs();
+    renderSessions();
+  }
+  openPreviewModal(filePath, content);
+  if (link) updatePreviewLinkBtn();
+}
+
+function getSessionBaseDir(sessionId) {
+  const s = sessions.find((x) => x.id === sessionId);
+  return s?.cwd || s?.project || '';
+}
+
+function renderLinkedDocsHtml(sessionId) {
+  const paths = getSessionPreviewPaths(sessionId);
+  if (!paths.length) return '';
+  const baseDir = getSessionBaseDir(sessionId);
+  const items = paths
+    .map((p, i) => {
+      const name = p.split(/[\\/]/).pop();
+      const rel = baseDir ? toRelativeIfUnder(p, baseDir) : null;
+      const pathSpan = rel ? `<span class="linked-doc-path" title="${escapeHtml(p)}">${escapeHtml(rel)}</span>` : '';
+      return `<li class="linked-doc-item">
+        <a href="#" class="linked-doc-link" data-idx="${i}" title="${escapeHtml(p)}">${escapeHtml(name)}</a>
+        ${pathSpan}
+      </li>`;
+    })
+    .join('');
+  return `<div class="linked-docs-section" style="margin-bottom:16px;font-size:12px;">
+    <div style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;display:flex;align-items:center;gap:6px;">
+      ${linkSvg(12)}
+      <span>Linked documents</span>
+      <span style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:0 6px;font-size:10px;color:var(--text-secondary);">${paths.length}</span>
+    </div>
+    <ul class="linked-doc-list">${items}</ul>
+  </div>`;
+}
+
+function bindLinkedDocsHandlers(container, sessionId) {
+  if (!container) return;
+  const links = container.querySelectorAll('.linked-doc-link');
+  if (!links.length) return;
+  const paths = getSessionPreviewPaths(sessionId);
+  const base = getSessionBaseDir(sessionId);
+  for (const link of links) {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      openPreviewByPath(paths[+link.dataset.idx], base);
+    });
+  }
+}
+//#endregion
+
+//#region SSE
+function setupEventSource() {
+  let retryDelay = 1000;
+  let eventSource;
+  let wasConnected = false;
+  let failCount = 0;
+  const offlineOverlay = document.getElementById('offline-overlay');
+  const offlineStatus = document.getElementById('offline-status');
+
+  function showOffline() {
+    offlineOverlay.classList.add('visible');
+    offlineStatus.textContent = 'Attempting to reconnect...';
+  }
+
+  function hideOffline() {
+    offlineOverlay.classList.remove('visible');
+    failCount = 0;
+  }
+
+  function connect() {
+    eventSource = new EventSource('/api/events');
+
+    eventSource.onopen = () => {
+      if (wasConnected) {
+        console.warn('[SSE] Reconnected after drop — forcing full refresh');
+        fetchSessions().catch(() => {});
+        if (currentSessionId) fetchTasks(currentSessionId);
+      }
+      wasConnected = true;
+      retryDelay = 1000;
+      hideOffline();
+      connectionStatus.innerHTML = `
+            <span class="connection-dot live"></span>
+            <span>Connected</span>
+          `;
+    };
+
+    eventSource.onerror = () => {
+      eventSource.close();
+      failCount++;
+      console.warn('[SSE] Connection lost, retrying in', retryDelay, 'ms');
+      connectionStatus.innerHTML = `
+            <span class="connection-dot error"></span>
+            <span>Reconnecting...</span>
+          `;
+      if (failCount >= 2) showOffline();
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 30000);
+    };
+
+    let taskRefreshTimer = null;
+    let metadataRefreshTimer = null;
+    let agentRefreshTimer = null;
+    const pendingTaskSessionIds = new Set();
+    const pendingAgentSessionIds = new Set();
+
+    function debouncedRefresh(sessionId, isMetadata) {
+      if (isMetadata) {
+        clearTimeout(metadataRefreshTimer);
+        metadataRefreshTimer = setTimeout(async () => {
+          fetchSessions(false).catch((err) => console.error('[SSE] fetchSessions failed:', err));
+          if (currentSessionId) {
+            await fetchAgents(currentSessionId);
+            if (!agentLogMode) fetchMessages(currentSessionId);
+          }
+        }, 2000);
+      } else {
+        pendingTaskSessionIds.add(sessionId);
+        clearTimeout(taskRefreshTimer);
+        taskRefreshTimer = setTimeout(async () => {
+          await fetchSessions().catch((err) => console.error('[SSE] fetchSessions failed:', err));
+          if (viewMode === 'all') {
+            currentTasks = filterProject ? allTasksCache.filter((t) => matchesProjectFilter(t.project)) : allTasksCache;
+            renderAllTasks();
+            renderLiveUpdatesFromCache();
+          } else if (viewMode === 'project' && currentProjectPath) {
+            const hasUpdate = currentProjectSessionIds.some((id) => pendingTaskSessionIds.has(id));
+            if (hasUpdate) fetchProjectView(currentProjectPath);
+          } else if (currentSessionId && pendingTaskSessionIds.has(currentSessionId)) {
+            fetchTasks(currentSessionId);
+          }
+          pendingTaskSessionIds.clear();
+        }, 500);
+      }
+    }
+
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'update' || data.type === 'metadata-update') {
+        if (data.type === 'metadata-update') projectsCacheDirty = true;
+        debouncedRefresh(data.sessionId, data.type === 'metadata-update');
+      }
+
+      if (data.type === 'plan-update') {
+        refreshOpenPlan();
+      }
+
+      if (data.type === 'agent-update') {
+        pendingAgentSessionIds.add(data.sessionId);
+        clearTimeout(agentRefreshTimer);
+        agentRefreshTimer = setTimeout(() => {
+          fetchSessions(false).catch((err) => console.error('[SSE] fetchSessions failed:', err));
+          if (viewMode === 'project' && currentProjectSessionIds.some((id) => pendingAgentSessionIds.has(id))) {
+            refreshProjectAgents();
+          } else if (currentSessionId && pendingAgentSessionIds.has(currentSessionId)) {
+            fetchAgents(currentSessionId);
+          }
+          pendingAgentSessionIds.clear();
+        }, 500);
+      }
+
+      if (data.type === 'context-update') {
+        debouncedRefresh(data.sessionId, true);
+        refreshRateLimits();
+      }
+
+      if (data.type === 'preview:open') {
+        handlePreviewOpenEvent(data);
+      }
+
+      if (data.type === 'session:open') {
+        handleSessionOpenEvent(data);
+      }
+
+      if (data.type === 'session:pin') {
+        handleSessionPinEvent(data);
+      }
+
+      if (data.type === 'team-update') {
+        const teamSession = sessions.find((s) => s.isTeam && s.teamName === data.teamName);
+        if (teamSession) {
+          debouncedRefresh(teamSession.id, false);
+        } else if (currentSessionId) {
+          debouncedRefresh(currentSessionId, false);
+        }
+      }
+    };
+  }
+
+  // When the tab becomes visible after being hidden, catch up immediately
+  let _pollMissed = false;
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && _pollMissed) {
+      _pollMissed = false;
+      fetchSessions().catch(() => {});
+      if (currentSessionId) fetchTasks(currentSessionId).catch(() => {});
+    }
+  });
+
+  // Fallback poll every 30s in case SSE silently drops; skip when tab is hidden
+  setInterval(() => {
+    if (document.hidden) {
+      _pollMissed = true;
+      return;
+    }
+    fetchSessions().catch(() => {});
+  }, 30000);
+
+  connect();
+}
+
+const CONTEXT_COLORS = { green: '#5b9a6b', yellow: '#b8a63e', orange: '#c07840', red: '#b85555' };
+const COST_THRESHOLDS = { green: 0.5, yellow: 2, orange: 5 };
+const MODEL_THRESHOLDS = [
+  { match: /sonnet|haiku/i, yellow: 100000, orange: 130000, red: 150000 },
+  { match: /opus/i, yellow: 100000, orange: 200000, red: 700000 },
+];
+const DEFAULT_THRESHOLDS = { yellow: 100000, orange: 130000, red: 150000 };
+
+//#endregion
+
+//#region CONTEXT_WINDOW
+function getModelThresholds(modelName) {
+  if (!modelName) return DEFAULT_THRESHOLDS;
+  for (const t of MODEL_THRESHOLDS) {
+    if (t.match.test(modelName)) return t;
+  }
+  return DEFAULT_THRESHOLDS;
+}
+
+function getContextColor(usedTokens, modelName) {
+  const t = getModelThresholds(modelName);
+  if (usedTokens < t.yellow) return CONTEXT_COLORS.green;
+  if (usedTokens < t.orange) return CONTEXT_COLORS.yellow;
+  if (usedTokens < t.red) return CONTEXT_COLORS.orange;
+  return CONTEXT_COLORS.red;
+}
+
+function getCostColor(usd) {
+  const val = usd || 0;
+  if (val < COST_THRESHOLDS.green) return CONTEXT_COLORS.green;
+  if (val < COST_THRESHOLDS.yellow) return CONTEXT_COLORS.yellow;
+  if (val < COST_THRESHOLDS.orange) return CONTEXT_COLORS.orange;
+  return CONTEXT_COLORS.red;
+}
+
+function renderMarkers(markers) {
+  return markers
+    .map(
+      (m) =>
+        `<div class="context-bar-marker" style="left:${m.pct}%;background:${m.color}" title="${formatTokens(m.tokens / 1000)}"></div>`,
+    )
+    .join('');
+}
+
+function formatTokens(k) {
+  if (k >= 1000) return `${(k / 1000).toFixed(1)}M`;
+  if (k < 1) return (k * 1000).toFixed(0);
+  return `${Math.round(k)}K`;
+}
+
+function getCtx(raw) {
+  if (!raw) return null;
+  const cw = raw.context_window || {};
+  const size = cw.context_window_size || 0;
+  const pct = cw.used_percentage || 0;
+  const model = raw.model || {};
+  const modelName = model.display_name || model.id || '';
+  const thresholds = getModelThresholds(modelName);
+  const usedTokens = size > 0 ? (pct / 100) * size : 0;
+  const markers =
+    size > 0
+      ? [
+          { tokens: thresholds.yellow, pct: (thresholds.yellow / size) * 100, color: CONTEXT_COLORS.yellow },
+          { tokens: thresholds.orange, pct: (thresholds.orange / size) * 100, color: CONTEXT_COLORS.orange },
+          { tokens: thresholds.red, pct: (thresholds.red / size) * 100, color: CONTEXT_COLORS.red },
+        ].filter((m) => m.pct > 0 && m.pct < 100)
+      : [];
+  return {
+    pct,
+    remaining: cw.remaining_percentage || 100 - pct,
+    size,
+    usedTokens,
+    modelName,
+    inputTokens: cw.total_input_tokens || 0,
+    outputTokens: cw.total_output_tokens || 0,
+    markers,
+  };
+}
+
+function renderContextBar(raw) {
+  const ctx = getCtx(raw);
+  if (!ctx) return '';
+  const color = getContextColor(ctx.usedTokens, ctx.modelName);
+  return `
+        <div class="context-bar" style="display:block">
+          <div class="context-bar-track">
+            <div class="context-bar-fill" style="width:${ctx.pct}%;background:${color}"></div>
+            ${renderMarkers(ctx.markers)}
+          </div>
+          <div class="context-bar-labels">
+            <span style="color:${color}">${Math.round(ctx.pct)}% (${formatTokens(ctx.usedTokens / 1000)})</span>
+            <span>${Math.round(ctx.remaining)}% free</span>
+          </div>
+        </div>`;
+}
+
+function formatCost(usd) {
+  if (!usd) return '$0.00';
+  return `$${usd.toFixed(2)}`;
+}
+
+function renderContextDetail(raw) {
+  const ctx = getCtx(raw);
+  if (!ctx) return '';
+  const totalK = ctx.size / 1000;
+  const color = getContextColor(ctx.usedTokens, ctx.modelName);
+
+  const cw = raw.context_window || {};
+  const usage = cw.current_usage || {};
+  const cost = raw.cost || {};
+
+  return `
+        <div class="detail-context">
+          <div class="detail-context-title">${ctx.modelName ? escapeHtml(ctx.modelName) : 'Context Window'}</div>
+          <div class="detail-context-bar">
+            <div class="context-bar-track">
+              <div class="context-bar-fill" style="width:${ctx.pct}%;background:${color}"></div>
+              ${renderMarkers(ctx.markers)}
+            </div>
+          </div>
+          <div class="detail-context-summary">
+            <span style="color:${color}">${Math.round(ctx.pct)}% used</span>
+            <span>${formatTokens((ctx.pct / 100) * totalK)} / ${formatTokens(totalK)}</span>
+          </div>
+          <div class="detail-context-stats">
+            <div class="stat-item"><span class="stat-label">Cache read</span><span class="stat-value">${formatTokens((usage.cache_read_input_tokens || 0) / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Cache write</span><span class="stat-value">${formatTokens((usage.cache_creation_input_tokens || 0) / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Current input</span><span class="stat-value">${formatTokens((usage.input_tokens || 0) / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Current output</span><span class="stat-value">${formatTokens((usage.output_tokens || 0) / 1000)}</span></div>
+            <div class="stat-divider"></div>
+            <div class="stat-item"><span class="stat-label">Total input</span><span class="stat-value">${formatTokens(ctx.inputTokens / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Total output</span><span class="stat-value">${formatTokens(ctx.outputTokens / 1000)}</span></div>
+            <div class="stat-divider"></div>
+            <div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(cost.total_cost_usd)}">${formatCost(cost.total_cost_usd)}</span></div>
+            <div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(cost.total_duration_ms)}</span></div>
+            <div class="stat-item"><span class="stat-label">API time</span><span class="stat-value">${formatDuration(cost.total_api_duration_ms)}</span></div>
+            <div class="stat-item"><span class="stat-label">Lines</span><span class="stat-value"><span style="color:${CONTEXT_COLORS.green}">+${(cost.total_lines_added || 0).toLocaleString()}</span> / <span style="color:${CONTEXT_COLORS.red}">-${(cost.total_lines_removed || 0).toLocaleString()}</span></span></div>
+          </div>
+        </div>`;
+}
+
+//#endregion
+
+//#region UTILS
+function maybeFollowLatest() {
+  if (msgDetailFollowLatest && currentMessages.length) {
+    showMsgDetail(currentMessages.length - 1);
+  }
+}
+
+function isSessionActive(s) {
+  return s.hasRecentLog || s.inProgress > 0 || s.hasActiveAgents || s.hasWaitingForUser;
+}
+
+function formatDate(dateStr) {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diff = now - date;
+
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return date.toLocaleDateString();
+}
+
+function stripAnsi(text) {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: \x1b is intentional for ANSI escape sequence stripping
+  return typeof text === 'string' ? text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '') : text;
+}
+
+function stripTeammateWrapper(text) {
+  if (typeof text !== 'string') return text;
+  const match = text.match(/^<teammate-message[^>]*>\n?([\s\S]*?)(?:<\/teammate-message>\s*)?$/);
+  return match ? match[1].trim() : text;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function toRelativeIfUnder(filePath, baseDir) {
+  if (!filePath || !baseDir) return null;
+  const fp = filePath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const bd = baseDir.replace(/\\/g, '/').replace(/\/+$/, '');
+  const isWin = /^[a-zA-Z]:\//.test(fp) || /^[a-zA-Z]:\//.test(bd);
+  const a = isWin ? fp.toLowerCase() : fp;
+  const b = isWin ? bd.toLowerCase() : bd;
+  if (a === b) return '.';
+  if (!a.startsWith(`${b}/`)) return null;
+  return fp.slice(bd.length + 1);
+}
+
+function renderMarkdown(text) {
+  if (typeof DOMPurify !== 'undefined' && typeof marked !== 'undefined') {
+    return DOMPurify.sanitize(marked.parse(text));
+  }
+  return `<pre style="white-space:pre-wrap;margin:0;">${escapeHtml(text)}</pre>`;
+}
+
+function isLightTheme() {
+  const saved = localStorage.getItem('theme');
+  return (
+    document.body.classList.contains('light') || (!saved && window.matchMedia('(prefers-color-scheme: light)').matches)
+  );
+}
+
+function getMermaidTheme() {
+  return isLightTheme() ? 'default' : 'dark';
+}
+
+function initMermaidBlocks(container) {
+  if (typeof mermaid === 'undefined') return;
+  const blocks = (container || document).querySelectorAll('pre.mermaid:not([data-processed])');
+  if (blocks.length) mermaid.run({ nodes: [...blocks] });
+}
+
+function reinitMermaidTheme() {
+  if (typeof mermaid === 'undefined') return;
+  mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+  document.querySelectorAll('pre.mermaid[data-processed]').forEach((el) => {
+    el.removeAttribute('data-processed');
+    el.innerHTML = escapeHtml(el.getAttribute('data-original') || '');
+  });
+  initMermaidBlocks();
+}
+
+const _agentTabTexts = {};
+
+function renderAgentTabs(promptHtml, responseHtml, promptText, responseText) {
+  for (const k in _agentTabTexts) delete _agentTabTexts[k];
+  const tabs = [];
+  const panels = [];
+  const id = `at-${Math.random().toString(36).slice(2, 8)}`;
+  if (promptHtml) {
+    tabs.push({ key: 'prompt', label: 'Prompt' });
+    panels.push({ key: 'prompt', html: promptHtml });
+    if (promptText) _agentTabTexts[`${id}-prompt`] = promptText;
+  }
+  if (responseHtml) {
+    tabs.push({ key: 'response', label: 'Response' });
+    panels.push({ key: 'response', html: responseHtml });
+    if (responseText) _agentTabTexts[`${id}-response`] = responseText;
+  }
+  if (!tabs.length) return '';
+  const defaultTab = responseHtml ? 'response' : tabs[0].key;
+  const copyBtnHtml = `<button class="agent-tab-copy" title="Copy" onclick="copyAgentTabActive('${id}',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>`;
+  const tabsHtml = tabs
+    .map(
+      (t) =>
+        `<div class="agent-tab${t.key === defaultTab ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${t.key}" onclick="document.querySelectorAll('[data-tab-group=\\'${id}\\']').forEach(el=>{el.classList.toggle('active',el.dataset.tabKey==='${t.key}')})">${t.label}</div>`,
+    )
+    .join('');
+  const panelsHtml = panels
+    .map(
+      (p) =>
+        `<div class="agent-tab-panel${p.key === defaultTab ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${p.key}"><div class="detail-desc rendered-md" style="font-size:13px;">${p.html}</div></div>`,
+    )
+    .join('');
+  return `<div class="agent-tabs">${tabsHtml}${copyBtnHtml}</div>${panelsHtml}`;
+}
+
+async function copyAgentTab(key, btn) {
+  const text = _agentTabTexts[key];
+  if (!text) return;
+  copyWithFeedback(text, btn);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function copyAgentTabActive(groupId, btn) {
+  const activePanel = document.querySelector(`.agent-tab-panel.active[data-tab-group="${groupId}"]`);
+  if (!activePanel) return;
+  const key = `${groupId}-${activePanel.dataset.tabKey}`;
+  copyAgentTab(key, btn);
+}
+
+const ownerColors = [
+  { bg: 'rgba(37, 99, 235, 0.14)', color: '#1d5bbf' }, // blue
+  { bg: 'rgba(168, 85, 247, 0.14)', color: '#7c3aed' }, // purple
+  { bg: 'rgba(14, 165, 133, 0.14)', color: '#0d7d65' }, // teal
+  { bg: 'rgba(220, 80, 30, 0.14)', color: '#c04a1a' }, // red-orange
+  { bg: 'rgba(202, 138, 4, 0.14)', color: '#92700c' }, // amber
+  { bg: 'rgba(219, 39, 119, 0.14)', color: '#b5246a' }, // pink
+  { bg: 'rgba(22, 163, 74, 0.14)', color: '#15803d' }, // green
+  { bg: 'rgba(99, 102, 241, 0.14)', color: '#4f46e5' }, // indigo
+];
+const namedColorMap = {
+  red: { bg: 'rgba(239, 68, 68, 0.14)', color: '#dc2626' },
+  blue: { bg: 'rgba(37, 99, 235, 0.14)', color: '#1d5bbf' },
+  green: { bg: 'rgba(22, 163, 74, 0.14)', color: '#15803d' },
+  purple: { bg: 'rgba(168, 85, 247, 0.14)', color: '#7c3aed' },
+  orange: { bg: 'rgba(234, 88, 12, 0.14)', color: '#c2410c' },
+  pink: { bg: 'rgba(219, 39, 119, 0.14)', color: '#b5246a' },
+  yellow: { bg: 'rgba(202, 138, 4, 0.14)', color: '#92700c' },
+  teal: { bg: 'rgba(14, 165, 133, 0.14)', color: '#0d7d65' },
+  indigo: { bg: 'rgba(99, 102, 241, 0.14)', color: '#4f46e5' },
+  cyan: { bg: 'rgba(6, 182, 212, 0.14)', color: '#0891b2' },
+};
+const ownerColorCache = {};
+const teamColorMap = {};
+function isInternalTask(task) {
+  return task.metadata && task.metadata._internal === true;
+}
+
+function resolveNamedColor(colorName) {
+  if (!colorName) return null;
+  return namedColorMap[colorName.toLowerCase()] || null;
+}
+
+function updateTeamColors(agents, colors) {
+  if (colors) Object.assign(teamColorMap, colors);
+  for (const a of agents) {
+    const name = a.type || a.name;
+    if (name && a.color) teamColorMap[name] = a.color;
+  }
+}
+
+function getOwnerColor(name) {
+  if (ownerColorCache[name]) return ownerColorCache[name];
+  if (teamColorMap[name]) {
+    const c = resolveNamedColor(teamColorMap[name]);
+    if (c) {
+      ownerColorCache[name] = c;
+      return c;
+    }
+  }
+  let hash = 5381;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash * 33) ^ name.charCodeAt(i)) | 0;
+  }
+  const c = ownerColors[Math.abs(hash) % ownerColors.length];
+  ownerColorCache[name] = c;
+  return c;
+}
+
+//#endregion
+
+//#region FILTERS
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function filterBySessions(value) {
+  sessionFilter = value;
+  updateUrl();
+  renderSessions();
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function changeSessionLimit(value) {
+  sessionLimit = value;
+  updateUrl();
+  fetchSessions();
+}
+
+function matchesProjectFilter(project) {
+  if (!filterProject) return true;
+  if (filterProject === '__recent__') return recentProjects.has(project);
+  return project === filterProject;
+}
+
+//#endregion
+
+//#region EVENT_DELEGATION
+document.addEventListener('click', (e) => {
+  const pathToggle = e.target.closest('[data-group-action="toggle-path"]');
+  if (pathToggle) {
+    e.stopPropagation();
+    const header = pathToggle.closest('.project-group-header');
+    let el = header?.nextElementSibling;
+    while (el && !el.classList.contains('project-group-breadcrumb')) el = el.nextElementSibling;
+    if (el) el.classList.toggle('expanded');
+    return;
+  }
+
+  const breadcrumb = e.target.closest('.project-group-breadcrumb');
+  if (breadcrumb) {
+    e.stopPropagation();
+    const path = breadcrumb.dataset.fullPath;
+    if (path) navigator.clipboard.writeText(path).catch(() => {});
+    return;
+  }
+
+  const projectBtn = e.target.closest('.project-view-btn');
+  if (projectBtn) {
+    e.stopPropagation();
+    const projectPath = projectBtn.dataset.projectPath;
+    if (projectPath) fetchProjectView(projectPath);
+    return;
+  }
+
+  if (e.target.closest('.pinned-ungroup-btn')) {
+    e.stopPropagation();
+    localStorage.setItem('groupPinnedSessions', 'false');
+    renderSessions();
+    return;
+  }
+
+  if (e.target.closest('.pinned-regroup-banner')) {
+    localStorage.setItem('groupPinnedSessions', 'true');
+    renderSessions();
+    return;
+  }
+
+  const pinnedSubHeader = e.target.closest('.pinned-sub-header');
+  if (pinnedSubHeader) {
+    setGroupCollapsed(pinnedSubHeader, !collapsedProjectGroups.has(pinnedSubHeader.dataset.groupPath));
+    return;
+  }
+
+  const header = e.target.closest('.project-group-header');
+  if (header) {
+    setGroupCollapsed(header, !collapsedProjectGroups.has(header.dataset.groupPath));
+  }
+});
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function filterByProject(project) {
+  filterProject = project || null;
+  updateUrl();
+  fetchSessions(false);
+  showAllTasks();
+}
+
+let projectsCache = null;
+
+async function updateProjectDropdown() {
+  const dropdown = document.getElementById('project-filter');
+
+  if (!projectsCacheDirty && projectsCache) {
+    renderProjectDropdown(dropdown, projectsCache);
+    return;
+  }
+
+  let projects;
+  try {
+    const res = await fetch('/api/projects');
+    projects = await res.json();
+  } catch (_e) {
+    projects = [...new Set(sessions.map((s) => s.project).filter(Boolean))]
+      .sort()
+      .map((p) => ({ path: p, modifiedAt: null }));
+  }
+
+  projectsCache = projects;
+  projectsCacheDirty = false;
+
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const prevRecent = recentProjects;
+  recentProjects = new Set(
+    projects.filter((p) => p.modifiedAt && new Date(p.modifiedAt).getTime() > cutoff).map((p) => p.path),
+  );
+
+  renderProjectDropdown(dropdown, projects);
+
+  // recentProjects was empty before — sidebar rendered with __recent__ filter
+  // dropping every session. Re-render now that we know which projects qualify.
+  if (filterProject === '__recent__' && prevRecent.size === 0 && recentProjects.size > 0) {
+    renderSessions();
+  }
+}
+
+function renderProjectDropdown(dropdown, projects) {
+  const recentSelected = filterProject === '__recent__' ? ' selected' : '';
+  dropdown.innerHTML =
+    '<option value="">All Projects</option>' +
+    `<option value="__recent__"${recentSelected}>Recent (24h)</option>` +
+    projects
+      .map((p) => {
+        const name = p.path.split(/[/\\]/).pop();
+        const selected = p.path === filterProject ? ' selected' : '';
+        return `<option value="${escapeHtml(p.path)}"${selected} title="${escapeHtml(p.path)}">${escapeHtml(name)}</option>`;
+      })
+      .join('');
+}
+
+function updateThemeColor(isLight) {
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => {
+    m.setAttribute('content', isLight ? '#e8e6e3' : '#101114');
+  });
+}
+
+//#endregion
+
+//#region THEME
+function toggleTheme() {
+  const isCurrentlyLight = document.body.classList.contains('light');
+  if (isCurrentlyLight) {
+    document.body.classList.remove('light');
+    document.body.classList.add('dark-forced');
+    localStorage.setItem('theme', 'dark');
+  } else {
+    document.body.classList.add('light');
+    document.body.classList.remove('dark-forced');
+    localStorage.setItem('theme', 'light');
+  }
+  updateThemeIcon();
+  updateThemeColor(!isCurrentlyLight);
+  syncHljsTheme();
+  reinitMermaidTheme();
+}
+
+function syncHljsTheme() {
+  const light = isLightTheme();
+  const dark$ = document.getElementById('hljs-theme-dark');
+  const light$ = document.getElementById('hljs-theme-light');
+  if (dark$) dark$.disabled = light;
+  if (light$) light$.disabled = !light;
+}
+
+function updateThemeIcon() {
+  const light = isLightTheme();
+  document.getElementById('theme-icon-dark').style.display = light ? 'none' : 'block';
+  document.getElementById('theme-icon-light').style.display = light ? 'block' : 'none';
+}
+
+function loadTheme() {
+  const saved = localStorage.getItem('theme');
+  if (saved === 'light') {
+    document.body.classList.add('light');
+    document.body.classList.remove('dark-forced');
+  } else if (saved === 'dark') {
+    document.body.classList.remove('light');
+    document.body.classList.add('dark-forced');
+  }
+  // If no saved preference, system prefers-color-scheme CSS handles it
+  updateThemeIcon();
+  updateThemeColor(document.body.classList.contains('light'));
+  syncHljsTheme();
+}
+
+//#endregion
+
+//#region SIDEBAR_LAYOUT
+function toggleSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  const collapsed = sidebar.classList.toggle('collapsed');
+  localStorage.setItem('sidebar-collapsed', collapsed);
+  if (collapsed) {
+    sidebar.style.width = '';
+    if (focusZone === 'sidebar') setFocusZone('board');
+  } else {
+    const w = getComputedStyle(sidebar).getPropertyValue('--sidebar-width');
+    if (w) sidebar.style.width = w;
+  }
+}
+
+function loadSidebarState() {
+  const sidebar = document.querySelector('.sidebar');
+  if (localStorage.getItem('sidebar-collapsed') === 'true') {
+    sidebar.classList.add('collapsed');
+  }
+  const w = localStorage.getItem('sidebar-width');
+  if (w) {
+    sidebar.style.setProperty('--sidebar-width', w);
+  }
+}
+
+function initSidebarResize() {
+  const sidebar = document.querySelector('.sidebar');
+  const handle = document.getElementById('sidebar-resize');
+  let startX, startWidth;
+
+  handle.addEventListener('mousedown', (e) => {
+    if (sidebar.classList.contains('collapsed')) return;
+    startX = e.clientX;
+    startWidth = sidebar.offsetWidth;
+    sidebar.classList.add('resizing');
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+
+  function onMove(e) {
+    const w = Math.min(600, Math.max(200, startWidth + e.clientX - startX));
+    sidebar.style.setProperty('--sidebar-width', `${w}px`);
+    sidebar.style.width = `${w}px`;
+  }
+
+  function onUp() {
+    sidebar.classList.remove('resizing');
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    localStorage.setItem('sidebar-width', sidebar.style.getPropertyValue('--sidebar-width'));
+  }
+}
+
+function initPanelResize(panelId, handleId, cssVar, storageKey) {
+  const panel = document.getElementById(panelId);
+  const handle = document.getElementById(handleId);
+  let startX, startWidth;
+
+  handle.addEventListener('mousedown', (e) => {
+    startX = e.clientX;
+    startWidth = panel.offsetWidth;
+    panel.classList.add('resizing');
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+
+  function onMove(e) {
+    const w = Math.min(900, Math.max(320, startWidth - (e.clientX - startX)));
+    panel.style.setProperty(cssVar, `${w}px`);
+  }
+
+  function onUp() {
+    panel.classList.remove('resizing');
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    localStorage.setItem(storageKey, panel.style.getPropertyValue(cssVar));
+  }
+}
+
+function loadPanelWidths() {
+  [
+    ['detail-panel', '--detail-panel-width'],
+    ['message-panel', '--message-panel-width'],
+  ].forEach(([id, cssVar]) => {
+    const w = localStorage.getItem(`${id}-width`);
+    if (w) document.getElementById(id).style.setProperty(cssVar, w);
+  });
+}
+
+//#endregion
+
+//#region PREFERENCES
+function loadPreferences() {
+  document.getElementById('session-filter').value = sessionFilter;
+  document.getElementById('session-limit').value = sessionLimit;
+}
+
+//#endregion
+
+//#region SESSION_INFO
+async function showSessionInfoModal(sessionId) {
+  const session = sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+
+  // Open modal immediately with session metadata (cwd / path / branch are
+  // already in-memory). Plan / team / tasks are fetched in the background
+  // and re-rendered when they arrive, so the modal doesn't block on network.
+  _planSessionId = sessionId;
+  const cachedTasks = currentSessionId === sessionId ? currentTasks : [];
+  showInfoModal(session, null, cachedTasks, null);
+
+  const rerender = (teamConfig, tasks, planContent) => {
+    if (_planSessionId !== sessionId) return; // user opened a different modal
+    const modal = document.getElementById('team-modal');
+    if (!modal?.classList.contains('visible')) return; // user closed modal — don't reopen
+    showInfoModal(session, teamConfig, tasks, planContent);
+  };
+
+  const teamPromise = session.isTeam
+    ? fetch(`/api/teams/${session.teamName || sessionId}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+    : Promise.resolve(null);
+
+  const planPromise = fetch(`/api/sessions/${sessionId}/plan`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)
+    .then((data) => data?.content || null);
+
+  const tasksPromise =
+    cachedTasks.length > 0
+      ? Promise.resolve(cachedTasks)
+      : fetch(`/api/sessions/${sessionId}`)
+          .then((r) => (r.ok ? r.json() : []))
+          .catch(() => []);
+
+  const [teamConfig, planContent, tasks] = await Promise.all([teamPromise, planPromise, tasksPromise]);
+  rerender(teamConfig, tasks, planContent);
+}
+
+let _infoModalSessionId = null;
+let _pendingPlanContent = null;
+
+function updateStickyBtnState() {
+  const stickyBtn = document.getElementById('session-info-sticky-btn');
+  if (!stickyBtn || !_infoModalSessionId) return;
+  const isSticky = stickySessionIds.has(_infoModalSessionId);
+  stickyBtn.style.display = '';
+  stickyBtn.classList.toggle('active', isSticky);
+  stickyBtn.title = isSticky ? 'Remove sticky pin' : 'Sticky pin — always show at top';
+  const svg = stickyBtn.querySelector('svg');
+  if (svg) svg.setAttribute('fill', isSticky ? 'currentColor' : 'none');
+}
+
+function showInfoModal(session, teamConfig, tasks, planContent) {
+  const modal = document.getElementById('team-modal');
+  const titleEl = document.getElementById('team-modal-title');
+  const bodyEl = document.getElementById('team-modal-body');
+
+  const titleText = teamConfig
+    ? `Team: ${teamConfig.team_name || teamConfig.name || 'Unknown'}`
+    : session.name || session.slug || session.id;
+  titleEl.innerHTML =
+    escapeHtml(titleText) +
+    (session.modifiedAt
+      ? `<div style="font-size: 12px; font-weight: 400; color: var(--text-tertiary); margin-top: 2px;">${formatDate(session.modifiedAt)} (${new Date(session.modifiedAt).toLocaleString()})</div>`
+      : '');
+
+  let html = '';
+
+  // Session & project details as compact key-value rows
+  // Each row: [label, displayValue, { openPath?, copyValue? }]
+  const infoRows = [];
+  infoRows.push(['Session', session.id, { openClaudeDir: true, openFile: session.jsonlPath }]);
+  if (session.slug && session.hasPlan) {
+    infoRows.push(['Slug', session.slug, { openClaudeDir: true, openFile: session.planPath }]);
+  }
+  if (session.project) {
+    const projectName = session.project.split(/[/\\]/).pop();
+    infoRows.push(['Project', projectName, { openPath: session.projectDir }]);
+    infoRows.push(['Path', session.project, { openPath: session.project }]);
+    if (session.cwd) {
+      infoRows.push(['CWD', session.cwd, { openPath: session.cwd }]);
+    }
+    if (session.gitBranch) {
+      infoRows.push(['Branch', session.gitBranch]);
+    }
+    if (session.description) {
+      infoRows.push(['Description', session.description]);
+    }
+  }
+  if (session.tasksDir) {
+    infoRows.push(['Tasks Dir', session.tasksDir, { openPath: session.tasksDir }]);
+  }
+  if (session.sharedTaskList) {
+    infoRows.push(['Shared Tasks', session.sharedTaskList]);
+  }
+  if (teamConfig?.configPath) {
+    const configDir = teamConfig.configPath.replace(/[/\\][^/\\]+$/, '');
+    infoRows.push(['Team Config', teamConfig.configPath, { openPath: configDir, openFile: teamConfig.configPath }]);
+  }
+  const clickableStyle =
+    "font-family: 'IBM Plex Mono', monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--accent-text); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;";
+  const plainStyle =
+    "font-family: 'IBM Plex Mono', monospace; font-size: 12px; user-select: all; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;";
+  html += `<div class="team-modal-meta" style="margin-bottom: 16px; display: grid; grid-template-columns: auto 1fr auto; gap: 6px 12px; align-items: center;">`;
+  infoRows.forEach(([label, value, opts]) => {
+    const copyVal = escapeHtml(value).replace(/"/g, '&quot;');
+    html += `<span style="font-weight: 500; color: var(--text-secondary); font-size: 12px; white-space: nowrap;">${label}</span>`;
+    if (opts?.openClaudeDir || opts?.openPath) {
+      const folder = opts.openClaudeDir ? '' : escapeHtml(opts.openPath).replace(/"/g, '&quot;');
+      const file = opts.openFile ? escapeHtml(opts.openFile).replace(/"/g, '&quot;') : '';
+      html += `<span data-folder="${folder}" data-file="${file}" data-claude-dir="${opts.openClaudeDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.claudeDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" style="${clickableStyle}" title="Open in editor">${escapeHtml(value)}</span>`;
+    } else {
+      html += `<span style="${plainStyle}" title="${copyVal}">${escapeHtml(value)}</span>`;
+    }
+    const jsCopyVal = _escapeForJsAttr(copyVal);
+    html += `<button onclick="navigator.clipboard.writeText('${jsCopyVal}'); this.textContent='✓'; setTimeout(() => this.textContent='Copy', 1000)" style="padding: 2px 8px; font-size: 11px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 4px; color: var(--text-secondary); cursor: pointer; white-space: nowrap;">Copy</button>`;
+  });
+  html += `</div>`;
+
+  if (session.contextStatus) {
+    html += `<hr style="border: none; border-top: 1px solid var(--border); margin: 12px 0;">`;
+    html += renderContextDetail(session.contextStatus);
+  }
+
+  if (planContent) {
+    _pendingPlanContent = planContent;
+    const titleMatch = planContent.match(/^#\s+(.+)$/m);
+    const planTitle = titleMatch ? titleMatch[1].trim() : null;
+    html += `<div data-plan-card="1" onclick="openPlanModal()" style="margin-bottom: 16px; padding: 10px 14px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; display: flex; align-items: center; gap: 10px; transition: all 0.15s ease;" onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg-hover)'" onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg-elevated)'">
+          <span style="font-size: 14px;">📋</span>
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-size: 11px; font-weight: 500; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Plan</div>
+            ${planTitle ? `<div style="font-size: 13px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(planTitle)}</div>` : ''}
+          </div>
+          <svg viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" style="width: 16px; height: 16px; flex-shrink: 0;"><path d="M9 18l6-6-6-6"/></svg>
+        </div>`;
+  }
+
+  html += renderLinkedDocsHtml(session.id);
+
+  // Team info section
+  if (teamConfig) {
+    const ownerCounts = {};
+    const memberDescriptions = {};
+    tasks.forEach((t) => {
+      if (isInternalTask(t) && t.subject) {
+        memberDescriptions[t.subject] = t.description;
+      } else if (t.owner) {
+        ownerCounts[t.owner] = (ownerCounts[t.owner] || 0) + 1;
+      }
+    });
+
+    const members = teamConfig.members || [];
+    const description = teamConfig.description || '';
+    const lead = members.find((m) => m.agentType === 'team-lead' || m.name === 'team-lead');
+
+    if (description) {
+      html += `<div class="team-modal-desc">"${escapeHtml(description)}"</div>`;
+    }
+
+    html += `<div style="font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-bottom: 10px;">Members (${members.length})</div>`;
+
+    members.forEach((member) => {
+      const taskCount = ownerCounts[member.name] || 0;
+      const memberDesc = memberDescriptions[member.name];
+      const mc = resolveNamedColor(member.color);
+      const borderStyle = mc ? ` style="border-left:3px solid ${mc.color}"` : '';
+      const nameStyle = mc ? ` style="color:${mc.color}"` : '';
+      html += `
+            <div class="team-member-card"${borderStyle}>
+              <div class="member-name"${nameStyle}>${escapeHtml(member.name)}</div>
+              ${member.model ? `<div class="member-detail">Model: ${escapeHtml(member.model)}</div>` : ''}
+              ${memberDesc ? `<div class="member-detail" style="margin-top: 4px; font-style: italic; color: var(--text-secondary);">${escapeHtml(memberDesc.split('\n')[0])}</div>` : ''}
+              <div class="member-tasks">Tasks: ${taskCount} assigned</div>
+            </div>
+          `;
+    });
+
+    const metaParts = [];
+    if (teamConfig.created_at) {
+      metaParts.push(`Created: ${new Date(teamConfig.created_at).toLocaleString()}`);
+    }
+    if (lead) {
+      metaParts.push(`Lead: ${lead.name}`);
+    }
+    if (teamConfig.working_dir) {
+      metaParts.push(`Working dir: ${teamConfig.working_dir}`);
+    }
+    if (metaParts.length > 0) {
+      html += `<div class="team-modal-meta">${metaParts.map((p) => escapeHtml(p)).join('<br>')}</div>`;
+    }
+  }
+
+  bodyEl.innerHTML = html;
+  bindLinkedDocsHandlers(bodyEl, session.id);
+  const alreadyVisible = modal.classList.contains('visible');
+  _infoModalSessionId = session.id;
+  updateStickyBtnState();
+  updateDismissBtnState();
+  const costBtn = document.getElementById('session-info-cost-btn');
+  if (costBtn) costBtn.style.display = window.__HUB__?.enabled || appConfig.costUrl ? '' : 'none';
+  modal.classList.add('visible');
+
+  if (alreadyVisible) return; // re-render during deferred hydration — key handler already attached
+
+  const keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      if (document.getElementById('plan-modal').classList.contains('visible')) return;
+      e.preventDefault();
+      closeTeamModal();
+      document.removeEventListener('keydown', keyHandler);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+}
+
+function closeTeamModal() {
+  document.getElementById('team-modal').classList.remove('visible');
+  _planSessionId = null;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleDismissSession(sessionId) {
+  if (dismissedSessionIds.has(sessionId)) {
+    dismissedSessionIds.delete(sessionId);
+  } else {
+    dismissedSessionIds.add(sessionId);
+  }
+  updateDismissBtnState();
+  renderSessions();
+}
+
+function updateDismissBtnState() {
+  const btn = document.getElementById('session-info-dismiss-btn');
+  if (!btn || !_infoModalSessionId) return;
+  const isDismissed = dismissedSessionIds.has(_infoModalSessionId);
+  btn.textContent = isDismissed ? 'Restore' : 'Dismiss';
+  btn.title = isDismissed ? 'Restore — show in active list again' : 'Dismiss — hide from active list';
+}
+
+let _planSessionId = null;
+
+//#endregion
+
+//#region PLAN
+function refreshOpenPlan() {
+  if (!_planSessionId || !document.getElementById('plan-modal').classList.contains('visible')) return;
+  fetch(`/api/sessions/${_planSessionId}/plan`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((data) => {
+      if (data?.content) {
+        _pendingPlanContent = data.content;
+        const body = document.getElementById('plan-modal-body');
+        body.innerHTML = renderMarkdown(_pendingPlanContent);
+      }
+    })
+    .catch(() => {});
+}
+
+function openPlanForSession(sid) {
+  fetch(`/api/sessions/${sid}/plan`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)
+    .then((data) => {
+      if (data?.content) {
+        _pendingPlanContent = data.content;
+        _planSessionId = sid;
+        openPlanModal();
+      }
+    });
+}
+
+function openPlanModal() {
+  if (!_pendingPlanContent) return;
+  const body = document.getElementById('plan-modal-body');
+  body.innerHTML = renderMarkdown(_pendingPlanContent);
+  document.getElementById('plan-modal').classList.add('visible');
+  const keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closePlanModal();
+      document.removeEventListener('keydown', keyHandler, true);
+    }
+  };
+  document.addEventListener('keydown', keyHandler, true);
+}
+
+function closePlanModal() {
+  resetModalFullscreen('plan-modal');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openPlanInEditor() {
+  if (!_planSessionId) return;
+  postAndToast(`/api/sessions/${_planSessionId}/plan/open`, {}, 'in editor');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openFolderInEditor(folder, file) {
+  const body = {};
+  if (folder) body.folder = folder;
+  if (file) body.file = file;
+  postAndToast('/api/open-folder', body, 'folder');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openCost(sessionId) {
+  if (window.__HUB__?.enabled) {
+    hubNavigate('cost', `?view=detail&session=${encodeURIComponent(sessionId)}`);
+  } else if (appConfig.costUrl) {
+    window.open(`${appConfig.costUrl}?view=detail&session=${encodeURIComponent(sessionId)}`, '_blank');
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openMarketplace(projectPath) {
+  const params = new URLSearchParams({ project: projectPath });
+  if (window.__HUB__?.enabled) {
+    hubNavigate('marketplace', `?${params}`);
+  } else if (appConfig.marketplaceUrl) {
+    const url = new URL(appConfig.marketplaceUrl);
+    url.search = params.toString();
+    window.open(url.toString(), '_blank');
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openMemory(projectPath) {
+  const params = new URLSearchParams({ project: projectPath });
+  if (window.__HUB__?.enabled) {
+    hubNavigate('memory', `?${params}`);
+  } else if (appConfig.memoryUrl) {
+    const url = new URL(appConfig.memoryUrl);
+    url.search = params.toString();
+    window.open(url.toString(), '_blank');
+  }
+}
+
+//#endregion
+
+//#region OWNER_FILTER
+function updateOwnerFilter() {
+  const bar = document.getElementById('owner-filter-bar');
+  const select = document.getElementById('owner-filter');
+
+  const session = sessions.find((s) => s.id === currentSessionId);
+  if (!session?.isTeam) {
+    bar.classList.remove('visible');
+    return;
+  }
+
+  bar.classList.add('visible');
+  const owners = [
+    ...new Set(
+      currentTasks
+        .filter((t) => !isInternalTask(t))
+        .map((t) => t.owner)
+        .filter(Boolean),
+    ),
+  ].sort();
+  select.innerHTML =
+    '<option value="">All Members</option>' +
+    owners
+      .map((o) => {
+        const c = getOwnerColor(o);
+        return `<option value="${escapeHtml(o)}" style="color:${c.color};background:${c.bg}"${o === ownerFilter ? ' selected' : ''}>${escapeHtml(o)}</option>`;
+      })
+      .join('');
+  const current = ownerFilter ? getOwnerColor(ownerFilter) : null;
+  select.style.color = current ? current.color : '';
+  select.style.backgroundColor = current ? current.bg : '';
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function filterByOwner(value) {
+  ownerFilter = value;
+  const select = document.getElementById('owner-filter');
+  const c = value ? getOwnerColor(value) : null;
+  select.style.color = c ? c.color : '';
+  select.style.backgroundColor = c ? c.bg : '';
+  updateUrl();
+  renderKanban();
+}
+
+//#endregion
+
+//#region LAYOUT_SYNC
+const sidebarHeader = document.querySelector('.sidebar-header');
+const viewHeader = document.querySelector('.view-header');
+new ResizeObserver(() => {
+  sidebarHeader.style.height = `${viewHeader.offsetHeight}px`;
+}).observe(viewHeader);
+
+//#endregion
+
+//#region PWA
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+}
+
+//#endregion
+
+//#region INIT
+loadTheme();
+['live-updates', 'sessions-filters'].forEach((id) => {
+  if (localStorage.getItem(`${id}Collapsed`) === 'true') {
+    document.getElementById(id).classList.add('collapsed');
+    document
+      .getElementById(id === 'live-updates' ? 'live-updates-chevron' : 'sessions-chevron')
+      .classList.add('rotated');
+  }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (typeof marked !== 'undefined' && typeof hljs !== 'undefined') {
+    const renderer = new marked.Renderer();
+    renderer.code = ({ text, lang }) => {
+      if (lang === 'mermaid') {
+        return `<pre class="mermaid" data-original="${escapeHtml(text)}">${escapeHtml(text)}</pre>`;
+      }
+      let highlighted;
+      if (lang && hljs.getLanguage(lang)) {
+        highlighted = hljs.highlight(text, { language: lang }).value;
+      } else {
+        highlighted = hljs.highlightAuto(text).value;
+      }
+      return `<pre><code class="hljs language-${escapeHtml(lang || '')}">${highlighted}</code></pre>`;
+    };
+    marked.use({ renderer });
+  }
+
+  if (typeof mermaid !== 'undefined') {
+    mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+    let mermaidPending = false;
+    const mo = new MutationObserver(() => {
+      if (mermaidPending) return;
+      mermaidPending = true;
+      queueMicrotask(() => {
+        mermaidPending = false;
+        initMermaidBlocks();
+      });
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+  }
+});
+
+loadSidebarState();
+try {
+  const cg = JSON.parse(localStorage.getItem('collapsedGroups') || '[]');
+  // biome-ignore lint/suspicious/useIterableCallbackReturn: forEach side-effect
+  cg.forEach((p) => collapsedProjectGroups.add(p));
+} catch (_) {}
+initSidebarResize();
+loadPanelWidths();
+initPanelResize('detail-panel', 'detail-panel-resize', '--detail-panel-width', 'detail-panel-width');
+initPanelResize('message-panel', 'message-panel-resize', '--message-panel-width', 'message-panel-width');
+
+const msgContentEl = document.getElementById('message-panel-content');
+const jumpLatestBtn = document.createElement('button');
+jumpLatestBtn.id = 'msg-jump-latest';
+jumpLatestBtn.className = 'msg-jump-latest';
+jumpLatestBtn.style.display = 'none';
+jumpLatestBtn.textContent = '\u2193 Latest';
+jumpLatestBtn.onclick = function () {
+  msgContentEl.scrollTop = msgContentEl.scrollHeight;
+  msgUserScrolledUp = false;
+  this.style.display = 'none';
+};
+msgContentEl.parentElement.appendChild(jumpLatestBtn);
+
+let msgScrollThrottled = false;
+msgContentEl.addEventListener('scroll', () => {
+  if (msgScrollThrottled) return;
+  msgScrollThrottled = true;
+  requestAnimationFrame(() => {
+    msgScrollThrottled = false;
+    const el = msgContentEl;
+    if (el.scrollTop === 0 && msgHasMore && !msgLoadingMore) {
+      loadOlderMessages();
+    }
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+    msgUserScrolledUp = !nearBottom;
+    jumpLatestBtn.style.display = msgUserScrolledUp ? '' : 'none';
+  });
+});
+// Load older messages on wheel-up when content doesn't overflow
+msgContentEl.addEventListener('wheel', function (e) {
+  if (e.deltaY < 0 && this.scrollTop === 0 && msgHasMore && !msgLoadingMore) {
+    loadOlderMessages();
+  }
+});
+
+const footerState = { version: null, limitsKey: null, timer: null };
+function formatResetIn(epochSec) {
+  if (!epochSec) return null;
+  const ms = epochSec * 1000 - Date.now();
+  if (ms <= 0) return 'now';
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
+}
+function makeLimitCell(label, bucket) {
+  const pct = bucket?.used_percentage;
+  const cell = document.createElement('span');
+  cell.className = 'footer-limit-cell';
+  const reset = formatResetIn(bucket?.resets_at);
+  if (reset) cell.title = `${label}: resets in ${reset}`;
+  cell.append(document.createTextNode(`${label} `));
+  const strong = document.createElement('strong');
+  strong.textContent = pct == null ? '-%' : `${Math.ceil(pct)}%`;
+  cell.appendChild(strong);
+  return cell;
+}
+function makeLimitSpan(rl) {
+  const span = document.createElement('span');
+  span.className = 'footer-limits';
+  span.append(makeLimitCell('5h', rl?.five_hour), document.createTextNode(' · '), makeLimitCell('7d', rl?.seven_day));
+  return span;
+}
+function renderSidebarFooter(rateLimits) {
+  const el = document.getElementById('sidebar-footer');
+  if (!el) return;
+  const fh = rateLimits?.five_hour?.used_percentage ?? null;
+  const sd = rateLimits?.seven_day?.used_percentage ?? null;
+  const children = [];
+  if (footerState.version) {
+    const v = document.createElement('span');
+    v.textContent = `v${footerState.version}`;
+    children.push(v);
+  }
+  if (fh != null || sd != null) children.push(makeLimitSpan(rateLimits));
+  el.replaceChildren(...children);
+}
+function refreshRateLimits() {
+  if (footerState.timer) return;
+  footerState.timer = setTimeout(() => {
+    footerState.timer = null;
+    fetch('/api/context-status')
+      .then((r) => r.json())
+      .then((all) => {
+        let freshest = null;
+        for (const e of Object.values(all || {})) {
+          if (e?.rate_limits && (!freshest || (e._updatedAt || 0) > (freshest._updatedAt || 0))) freshest = e;
+        }
+        const rl = freshest?.rate_limits || null;
+        const fh = rl?.five_hour?.used_percentage ?? null;
+        const sd = rl?.seven_day?.used_percentage ?? null;
+        const key = `${fh}|${sd}`;
+        if (key === footerState.limitsKey) return;
+        footerState.limitsKey = key;
+        renderSidebarFooter(rl);
+      })
+      .catch(() => {});
+  }, 1500);
+}
+fetch('/api/version')
+  .then((r) => r.json())
+  .then((d) => {
+    footerState.version = d.version;
+    renderSidebarFooter(null);
+    refreshRateLimits();
+  })
+  .catch(() => {});
+
+const urlState = getUrlState();
+sessionFilter = urlState.filter || 'active';
+sessionLimit = urlState.limit || '20';
+filterProject = urlState.project || '__recent__';
+ownerFilter = urlState.owner || '';
+searchQuery = urlState.search || '';
+
+loadPreferences();
+pinnedSessionIds = loadPinnedSessions();
+stickySessionIds = loadStickySessions();
+setupEventSource();
+
+if (urlState.search) {
+  document.getElementById('search-input').value = urlState.search;
+  document.getElementById('search-clear-btn').classList.add('visible');
+}
+
+Promise.all([
+  fetch('/hub-config')
+    .then((r) => r.json())
+    .then((cfg) => {
+      if (!cfg.enabled) return;
+      window.__HUB__ = cfg;
+    })
+    .catch(() => {}),
+  fetch('/api/config')
+    .then((r) => r.json())
+    .then((c) => {
+      appConfig = c;
+    })
+    .catch(() => {}),
+])
+  .then(() => fetchSessions())
+  .then(async () => {
+    if (urlState.projectView) {
+      try {
+        await fetchProjectView(atob(urlState.projectView));
+      } catch (_) {
+        showAllTasks();
+      }
+    } else if (urlState.session) {
+      await fetchTasks(urlState.session);
+    } else if (urlState.view === 'all') {
+      showAllTasks();
+    } else {
+      const last = loadLastView();
+      if (last?.view === 'project' && last.projectPath && sessions.some((s) => s.project === last.projectPath)) {
+        try {
+          await fetchProjectView(last.projectPath);
+        } catch (_) {
+          showAllTasks();
+        }
+      } else if (last?.view === 'session' && last.session && sessions.some((s) => s.id === last.session)) {
+        await fetchTasks(last.session);
+      } else {
+        showAllTasks();
+      }
+    }
+    if (urlState.messages && currentSessionId) {
+      toggleMessagePanel();
+      // Re-render after panel layout settles so scroll dimensions are correct
+      requestAnimationFrame(() => {
+        if (currentMessages.length) renderMessages(currentMessages);
+      });
+    }
+  });
+
+window.addEventListener('popstate', () => {
+  const s = getUrlState();
+  sessionFilter = s.filter || 'active';
+  sessionLimit = s.limit || '20';
+  filterProject = s.project || '__recent__';
+  ownerFilter = s.owner || '';
+  searchQuery = s.search || '';
+  loadPreferences();
+  if (s.projectView) {
+    try {
+      fetchProjectView(atob(s.projectView));
+    } catch (_) {
+      showAllTasks();
+    }
+  } else if (s.session) fetchTasks(s.session);
+  else showAllTasks();
+  if (s.messages !== messagePanelOpen) toggleMessagePanel();
+});
+//#endregion
+
+// #region HUB_INTEGRATION
+document.addEventListener('keydown', (e) => {
+  if (!window.__HUB__?.enabled) return;
+  if (e.ctrlKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    window.parent?.postMessage({ type: 'hub:keydown', key: e.key }, '*');
+  }
+  if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
+    e.preventDefault();
+    window.parent?.postMessage({ type: 'hub:keydown', key: e.key }, '*');
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!window.__HUB__?.enabled) return;
+  const a = e.target.closest?.('a[href]');
+  if (!a) return;
+  const href = a.getAttribute('href');
+  if (!href) return;
+  let url;
+  try {
+    url = new URL(href, window.location.href);
+  } catch (_) {
+    return;
+  }
+  if (url.origin === window.location.origin) return;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+  e.preventDefault();
+  e.stopPropagation();
+  window.parent?.postMessage({ type: 'hub:openExternal', url: url.href }, '*');
+});
+
+window.hubNavigate = function hubNavigate(app, url) {
+  if (!window.__HUB__?.enabled) return;
+  window.parent?.postMessage({ type: 'hub:navigate', app, url }, '*');
+};
+
+(function initHubTheme() {
+  const getTheme = () => (document.body.classList.contains('light') ? 'light' : 'dark');
+  const hubOrigin = () => (window.__HUB__?.url ? new URL(window.__HUB__.url).origin : null);
+  let lastTheme = getTheme();
+  window.addEventListener('message', (e) => {
+    if (e.source !== window.parent || e.origin !== hubOrigin()) return;
+    if (e.data?.type !== 'hub:theme') return;
+    if (getTheme() === e.data.theme) return;
+    window.toggleTheme();
+    lastTheme = getTheme();
+  });
+  new MutationObserver(() => {
+    const t = getTheme();
+    if (t === lastTheme) return;
+    lastTheme = t;
+    const origin = hubOrigin();
+    if (origin) window.parent.postMessage({ type: 'hub:theme', theme: t }, origin);
+  }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+})();
+// #endregion HUB_INTEGRATION

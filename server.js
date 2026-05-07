@@ -1,0 +1,297 @@
+#!/usr/bin/env node
+const express = require('express');
+const path = require('node:path');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
+const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
+const chokidar = require('chokidar');
+const open = require('open').default || require('open');
+const parsers = require('./lib/pi-parsers');
+
+const PORT = Number(process.env.PORT) || 3460;
+const args = process.argv.slice(2);
+const shouldOpen = args.includes('--open');
+
+const app = express();
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+const empty = (_req, res) => res.json([]);
+const emptyObj = (_req, res) => res.json({});
+
+app.get('/api/version', (_req, res) => res.json({ version: '0.1.0', name: 'pi-kanban' }));
+app.get('/api/config', (_req, res) => res.json({}));
+
+app.get('/api/sessions', async (req, res) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 50;
+    const all = await parsers.listSessions();
+    res.json(all.slice(0, limit));
+  } catch (err) {
+    console.error('listSessions error', err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/sessions/:id', async (req, res) => {
+  const meta = await parsers.findSessionFileById(req.params.id);
+  if (!meta) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await parsers.listTasksForSession(meta));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/sessions/:id/summary', async (req, res) => {
+  const meta = await parsers.findSessionFileById(req.params.id);
+  if (!meta) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await parsers.buildSessionSummary(meta));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/sessions/:id/messages', async (req, res) => {
+  const meta = await parsers.findSessionFileById(req.params.id);
+  if (!meta) return res.status(404).json({ messages: [], error: 'not found' });
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 50;
+    const out = await parsers.buildMessages(meta.file, limit);
+    out.sessionId = req.params.id;
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ messages: [], error: String(err) });
+  }
+});
+
+app.get('/api/sessions/:id/agents', async (req, res) => {
+  const meta = await parsers.findSessionFileById(req.params.id);
+  if (!meta) return res.status(404).json({ agents: [], error: 'not found' });
+  try {
+    const agents = await parsers.listAgentsForSession(meta);
+    res.json({ agents, waitingForUser: null, teamColors: {} });
+  } catch (err) {
+    res.status(500).json({ agents: [], error: String(err) });
+  }
+});
+
+app.get('/api/sessions/:id/agents/:agentId/messages', async (req, res) => {
+  const meta = await parsers.findSessionFileById(req.params.id);
+  if (!meta) return res.status(404).json({ messages: [], error: 'not found' });
+  try {
+    const rec = await parsers.findAgentRecord(meta, req.params.agentId);
+    if (!rec || !rec._sessionFile) {
+      return res.json({ messages: [], agentId: req.params.agentId });
+    }
+    const limit = req.query.limit ? Number(req.query.limit) : 50;
+    const out = await parsers.buildMessages(rec._sessionFile, limit);
+    out.agentId = req.params.agentId;
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ messages: [], error: String(err) });
+  }
+});
+
+// Stubbed endpoints (later phases may fill these).
+app.get('/api/sessions/:id/plan', emptyObj);
+app.get('/api/tasks/all', async (_req, res) => {
+  try { res.json(await parsers.listAllTasks()); }
+  catch (err) { res.status(500).json({ error: String(err) }); }
+});
+app.get('/api/projects', async (_req, res) => {
+  try {
+    const sessions = await parsers.listSessions();
+    const byCwd = new Map();
+    for (const s of sessions) {
+      const mt = new Date(s.modifiedAt);
+      const cur = byCwd.get(s.cwd);
+      if (!cur || mt > cur) byCwd.set(s.cwd, mt);
+    }
+    const out = [...byCwd.entries()].map(([p, mt]) => ({ path: p, modifiedAt: mt.toISOString() }));
+    out.sort((a, b) => (a.modifiedAt < b.modifiedAt ? 1 : -1));
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+app.get('/api/projects/:name/tasks', async (req, res) => {
+  try {
+    const all = await parsers.listAllTasks();
+    let decoded;
+    try { decoded = Buffer.from(req.params.name, 'base64').toString('utf8'); }
+    catch { decoded = parsers.decodeProjectDir(req.params.name); }
+    res.json(all.filter((t) => t.project === decoded));
+  } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+app.get('/api/teams/:name', emptyObj);
+app.get('/api/context-status', emptyObj);
+
+async function readMarkdownFile(absPath) {
+  const ext = path.extname(absPath).toLowerCase();
+  if (ext !== '.md' && ext !== '.markdown') {
+    const e = new Error('Only .md/.markdown files are allowed'); e.status = 400; throw e;
+  }
+  try { return await fsp.readFile(absPath, 'utf8'); }
+  catch (e) {
+    if (e.code === 'ENOENT') { const err = new Error('File not found'); err.status = 404; throw err; }
+    if (e.code === 'EISDIR') { const err = new Error('Not a file'); err.status = 400; throw err; }
+    throw e;
+  }
+}
+
+function resolvePreviewPath(filePath, base) {
+  if (!filePath || typeof filePath !== 'string') return null;
+  if (path.isAbsolute(filePath)) return filePath;
+  if (base && typeof base === 'string' && path.isAbsolute(base)) {
+    let baseDir = base;
+    try { if (fs.statSync(base).isFile()) baseDir = path.dirname(base); }
+    catch { if (path.extname(base)) baseDir = path.dirname(base); }
+    return path.resolve(baseDir, filePath);
+  }
+  return path.resolve(filePath);
+}
+
+app.get('/api/preview', async (req, res) => {
+  try {
+    const abs = resolvePreviewPath(req.query.path, req.query.base);
+    if (!abs) return res.status(400).json({ error: 'path is required' });
+    const content = await readMarkdownFile(abs);
+    res.json({ path: abs, content });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Preview failed' });
+  }
+});
+
+app.post('/api/preview', async (req, res) => {
+  try {
+    const { path: filePath, sessionId, base, link } = req.body || {};
+    const abs = resolvePreviewPath(filePath, base);
+    if (!abs) return res.status(400).json({ error: 'path is required' });
+    const content = await readMarkdownFile(abs);
+    sseSend({ type: 'preview:open', path: abs, content, sessionId: sessionId || null, link: !!link });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Preview failed' });
+  }
+});
+
+app.post('/api/session/pin', (req, res) => {
+  const { id, state } = req.body || {};
+  if (!id) return res.status(400).json({ error: 'id required' });
+  sseSend({ type: 'session:pin', id, state: state || 'pinned' });
+  res.json({ ok: true });
+});
+
+app.post('/api/session/open', (req, res) => {
+  const { id } = req.body || {};
+  if (!id) return res.status(400).json({ error: 'id required' });
+  sseSend({ type: 'session:open', id });
+  res.json({ ok: true });
+});
+
+function openInEditor(...targets) {
+  const editor = process.env.EDITOR || 'code';
+  spawn(editor, ['-n', ...targets], { shell: true, stdio: 'ignore', detached: true }).unref();
+}
+
+app.post('/api/open-in-editor', (req, res) => {
+  try {
+    const { content, title, file } = req.body || {};
+    if (file) { openInEditor(file); return res.json({ success: true, path: file }); }
+    if (!content) return res.status(400).json({ error: 'No content provided' });
+    const safeName = (title || 'message').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
+    const hash = crypto.createHash('md5').update(content).digest('hex').slice(0, 8);
+    const tmp = path.join(os.tmpdir(), `pi-kanban-${safeName}-${hash}.md`);
+    fs.writeFileSync(tmp, content, 'utf8');
+    openInEditor(tmp);
+    res.json({ success: true, path: tmp });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+app.post('/api/sessions/:id/agents/:agentId/stop', (_req, res) => res.json({ ok: true }));
+
+// SSE — broadcast file changes as session-changed events.
+const sseClients = new Set();
+function sseSend(data) {
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  for (const r of sseClients) {
+    try { r.write(payload); } catch {}
+  }
+}
+
+function sessionIdFromFile(f) {
+  const base = path.basename(f, '.jsonl');
+  const i = base.indexOf('_');
+  return i >= 0 ? base.slice(i + 1) : base;
+}
+
+app.get('/api/events', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+  sseClients.add(res);
+  const ka = setInterval(() => res.write(': ka\n\n'), 30000);
+  req.on('close', () => { clearInterval(ka); sseClients.delete(res); });
+});
+
+app.get('/api/sessions/:id/agents/:agentId/messages/stream', async (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+
+  let watcherRef = null;
+  const ka = setInterval(() => { try { res.write(': ka\n\n'); } catch {} }, 30000);
+  req.on('close', () => {
+    clearInterval(ka);
+    if (watcherRef) { try { watcherRef.close(); } catch {} }
+  });
+
+  let meta;
+  try { meta = await parsers.findSessionFileById(req.params.id); } catch { meta = null; }
+  const rec = meta ? await parsers.findAgentRecord(meta, req.params.agentId).catch(() => null) : null;
+  if (!rec || !rec._sessionFile) return;
+
+  const send = async () => {
+    try {
+      const out = await parsers.buildMessages(rec._sessionFile, 50);
+      out.agentId = req.params.agentId;
+      res.write(`event: agent-log-update\ndata: ${JSON.stringify(out)}\n\n`);
+    } catch {}
+  };
+  await send();
+  watcherRef = chokidar.watch(rec._sessionFile, {
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
+  });
+  watcherRef.on('change', send).on('add', send);
+});
+
+const watcher = chokidar.watch(path.join(parsers.getSessionsDir(), '**/*.jsonl'), {
+  ignoreInitial: true,
+  awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 },
+});
+watcher.on('add', (f) => sseSend({ type: 'update', sessionId: sessionIdFromFile(f) }));
+watcher.on('change', (f) => sseSend({ type: 'update', sessionId: sessionIdFromFile(f) }));
+watcher.on('unlink', (f) => sseSend({ type: 'update', sessionId: sessionIdFromFile(f) }));
+
+const http = require('node:http');
+const httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, app);
+const server = httpServer.listen(PORT, () => {
+  const url = `http://localhost:${PORT}`;
+  console.log(`pi-kanban listening at ${url}`);
+  console.log(`watching ${parsers.getSessionsDir()}`);
+  if (shouldOpen) open(url).catch(() => {});
+});
+
+process.on('SIGINT', () => { watcher.close(); server.close(() => process.exit(0)); });
