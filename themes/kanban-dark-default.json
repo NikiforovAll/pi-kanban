@@ -1,0 +1,22 @@
+{
+  "name": "kanban-dark-default",
+  "displayName": "Kanban Default (Dark)",
+  "mode": "dark",
+  "colors": {
+    "bgDeep": "#101114",
+    "bgSurface": "#16181c",
+    "bgElevated": "#1e2025",
+    "bgHover": "#282a30",
+    "border": "#363840",
+    "textPrimary": "#f0f1f3",
+    "textSecondary": "#c2c4c9",
+    "textTertiary": "#9a9da5",
+    "textMuted": "#7d808a",
+    "accent": "#e86f33",
+    "accentText": "#f0a070",
+    "success": "#3ecf8e",
+    "warning": "#f0b429",
+    "team": "#60a5fa",
+    "plan": "#86a886"
+  }
+}

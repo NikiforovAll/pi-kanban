@@ -1,12 +1,49 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 let child: ChildProcess | null = null;
 let lastStderr = "";
 const port = 3460;
+
+const KANBAN_DIR = joinPath(homedir(), ".pi", "agent", "kanban");
+const SETTINGS_PATH = joinPath(KANBAN_DIR, "settings.json");
+const DEFAULT_THEME_DIR = joinPath(KANBAN_DIR, "themes");
+
+type KanbanSettings = {
+	themes?: {
+		light?: string;
+		dark?: string;
+		dir?: string;
+	};
+};
+
+function readSettings(): KanbanSettings {
+	try {
+		return JSON.parse(readFileSync(SETTINGS_PATH, "utf8")) as KanbanSettings;
+	} catch (e: any) {
+		if (e?.code !== "ENOENT") console.warn(`pi-kanban: cannot read ${SETTINGS_PATH}: ${e.message}`);
+		return {};
+	}
+}
+
+function buildServerEnv(): NodeJS.ProcessEnv {
+	const settings = readSettings();
+	const t = settings.themes ?? {};
+	const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(port) };
+	env.KANBAN_THEME_DIR = process.env.KANBAN_THEME_DIR ?? t.dir ?? DEFAULT_THEME_DIR;
+	if (process.env.KANBAN_LIGHT_THEME ?? t.light) {
+		env.KANBAN_LIGHT_THEME = process.env.KANBAN_LIGHT_THEME ?? t.light;
+	}
+	if (process.env.KANBAN_DARK_THEME ?? t.dark) {
+		env.KANBAN_DARK_THEME = process.env.KANBAN_DARK_THEME ?? t.dark;
+	}
+	return env;
+}
 
 const SUBCOMMANDS = [
 	"start",
@@ -127,7 +164,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 				}
 				lastStderr = "";
 				child = spawn(process.execPath, [serverPath], {
-					env: { ...process.env, PORT: String(port) },
+					env: buildServerEnv(),
 					stdio: ["ignore", "ignore", "pipe"],
 					detached: false,
 				});
@@ -202,14 +239,16 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					notify(`Usage: /kanban ${sub} <session-id> (no current session to default to)`, "error");
 					return;
 				}
-				const state = sub === "sticky-pin" ? "sticky" : sub === "unpin" ? "none" : "pinned";
+				const PIN_STATE = { "sticky-pin": "sticky", "unpin": "none", "pin": "pinned" } as const;
+				const state = PIN_STATE[sub];
 				const res = await postPin(id, state);
 				if (!res.ok) {
 					notify(`${sub} failed (${res.status}): ${await res.text()}`, "error");
 					return;
 				}
 				const usedCurrent = !rest[0];
-				notify(`${sub === "unpin" ? "unpinned" : state}: ${id}${usedCurrent ? " (current)" : ""}`);
+				const verb = sub === "unpin" ? "unpinned" : state;
+				notify(`${verb}: ${id}${usedCurrent ? " (current)" : ""}`);
 				return;
 			}
 

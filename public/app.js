@@ -1334,13 +1334,15 @@ function offloadSessionPin(sessionId) {
   }).catch(() => {});
 }
 
-function toggleSessionPin(sessionId) {
-  if (pinnedSessionIds.has(sessionId)) {
+function setSessionPinState(sessionId, sticky) {
+  const isOn = sticky ? stickySessionIds.has(sessionId) : pinnedSessionIds.has(sessionId);
+  if (isOn) {
     pinnedSessionIds.delete(sessionId);
     stickySessionIds.delete(sessionId);
     deferredPinPlacement.delete(sessionId);
   } else {
     pinnedSessionIds.add(sessionId);
+    if (sticky) stickySessionIds.add(sessionId);
     if (sessionId === currentSessionId) deferredPinPlacement.add(sessionId);
   }
   savePinnedSessions();
@@ -1348,20 +1350,8 @@ function toggleSessionPin(sessionId) {
   renderSessions();
 }
 
-function toggleSessionSticky(sessionId) {
-  if (stickySessionIds.has(sessionId)) {
-    stickySessionIds.delete(sessionId);
-    pinnedSessionIds.delete(sessionId);
-    deferredPinPlacement.delete(sessionId);
-  } else {
-    pinnedSessionIds.add(sessionId);
-    stickySessionIds.add(sessionId);
-    if (sessionId === currentSessionId) deferredPinPlacement.add(sessionId);
-  }
-  savePinnedSessions();
-  offloadSessionPin(sessionId);
-  renderSessions();
-}
+function toggleSessionPin(sessionId) { setSessionPinState(sessionId, false); }
+function toggleSessionSticky(sessionId) { setSessionPinState(sessionId, true); }
 
 function isPlacedPinned(id) {
   return pinnedSessionIds.has(id) && !deferredPinPlacement.has(id);
@@ -5000,6 +4990,62 @@ function updateThemeColor(isLight) {
 //#endregion
 
 //#region THEME
+const THEME_COLOR_TO_VAR = {
+  bgDeep: '--bg-deep', bgSurface: '--bg-surface', bgElevated: '--bg-elevated', bgHover: '--bg-hover',
+  border: '--border',
+  textPrimary: '--text-primary', textSecondary: '--text-secondary',
+  textTertiary: '--text-tertiary', textMuted: '--text-muted',
+  accent: '--accent', accentText: '--accent-text',
+  success: '--success', warning: '--warning', team: '--team', plan: '--plan',
+};
+
+let _themeCache = { light: null, dark: null };
+
+function _hexToRgb(hex) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || '');
+  if (!m) return null;
+  return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
+}
+
+function _rgba(hex, a) {
+  const rgb = _hexToRgb(hex);
+  return rgb ? `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${a})` : null;
+}
+
+function applyTheme(theme) {
+  if (!theme || !theme.colors) return;
+  const root = document.documentElement.style;
+  for (const [k, cssVar] of Object.entries(THEME_COLOR_TO_VAR)) {
+    if (theme.colors[k]) root.setProperty(cssVar, theme.colors[k]);
+  }
+  const c = theme.colors;
+  const dimAlpha = theme.mode === 'light' ? 0.15 : 0.18;
+  const accentDimAlpha = theme.mode === 'light' ? 0.18 : 0.22;
+  const accentGlowAlpha = theme.mode === 'light' ? 0.5 : 0.55;
+  const set = (name, val) => val && root.setProperty(name, val);
+  set('--accent-dim', _rgba(c.accent, accentDimAlpha));
+  set('--accent-glow', _rgba(c.accent, accentGlowAlpha));
+  set('--success-dim', _rgba(c.success, dimAlpha));
+  set('--warning-dim', _rgba(c.warning, dimAlpha));
+  set('--team-dim', _rgba(c.team, dimAlpha));
+  set('--plan-dim', _rgba(c.plan, dimAlpha));
+}
+
+async function loadActiveThemes() {
+  try {
+    const res = await fetch('/api/themes');
+    if (res.ok) {
+      const data = await res.json();
+      _themeCache = { light: data.light, dark: data.dark };
+    }
+  } catch {}
+}
+
+function applyCurrentThemeColors() {
+  const t = isLightTheme() ? _themeCache.light : _themeCache.dark;
+  if (t) applyTheme(t);
+}
+
 function toggleTheme() {
   const isCurrentlyLight = document.body.classList.contains('light');
   if (isCurrentlyLight) {
@@ -5011,6 +5057,7 @@ function toggleTheme() {
     document.body.classList.remove('dark-forced');
     localStorage.setItem('theme', 'light');
   }
+  applyCurrentThemeColors();
   updateThemeIcon();
   updateThemeColor(!isCurrentlyLight);
   syncHljsTheme();
@@ -5044,6 +5091,7 @@ function loadTheme() {
   updateThemeIcon();
   updateThemeColor(document.body.classList.contains('light'));
   syncHljsTheme();
+  loadActiveThemes().then(applyCurrentThemeColors);
 }
 
 //#endregion

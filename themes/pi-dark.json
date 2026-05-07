@@ -1,0 +1,22 @@
+{
+  "name": "pi-dark",
+  "displayName": "pi.dev Dark",
+  "mode": "dark",
+  "colors": {
+    "bgDeep": "#0d1116",
+    "bgSurface": "#161d27",
+    "bgElevated": "#212730",
+    "bgHover": "#252f3d",
+    "border": "#495059",
+    "textPrimary": "#ebe7e4",
+    "textSecondary": "#d5d8db",
+    "textTertiary": "#9fa4ab",
+    "textMuted": "#757d89",
+    "accent": "#6a9fcc",
+    "accentText": "#8fb6d8",
+    "success": "#4ade80",
+    "warning": "#fbbf24",
+    "team": "#60a5fa",
+    "plan": "#c084fc"
+  }
+}

@@ -14,6 +14,64 @@ const PORT = Number(process.env.PORT) || 3460;
 const args = process.argv.slice(2);
 const shouldOpen = args.includes('--open');
 
+const BUILTIN_THEME_DIR = path.join(__dirname, 'themes');
+const USER_THEME_DIR = process.env.KANBAN_THEME_DIR
+  || path.join(os.homedir(), '.pi', 'agent', 'kanban', 'themes');
+const LIGHT_THEME_ID = process.env.KANBAN_LIGHT_THEME || 'pi-light';
+const DARK_THEME_ID = process.env.KANBAN_DARK_THEME || 'pi-dark';
+
+const REQUIRED_COLOR_KEYS = [
+  'bgDeep', 'bgSurface', 'bgElevated', 'bgHover',
+  'border',
+  'textPrimary', 'textSecondary', 'textTertiary', 'textMuted',
+  'accent', 'accentText',
+  'success', 'warning', 'team', 'plan',
+];
+
+const themes = new Map();
+
+async function loadThemesFromDir(dir, builtin) {
+  let entries;
+  try { entries = await fsp.readdir(dir); }
+  catch (e) {
+    if (e.code !== 'ENOENT') console.warn(`themes: cannot read ${dir}: ${e.message}`);
+    return;
+  }
+  const jsons = entries.filter((f) => f.toLowerCase().endsWith('.json'));
+  await Promise.all(jsons.map(async (f) => {
+    const full = path.join(dir, f);
+    const id = f.replace(/\.json$/i, '');
+    try {
+      const raw = await fsp.readFile(full, 'utf8');
+      const obj = JSON.parse(raw);
+      if (obj.mode !== 'light' && obj.mode !== 'dark') {
+        console.warn(`themes: skip ${full}: invalid mode`); return;
+      }
+      const colors = obj.colors || {};
+      const missing = REQUIRED_COLOR_KEYS.filter((k) => typeof colors[k] !== 'string');
+      if (missing.length) {
+        console.warn(`themes: skip ${full}: missing colors ${missing.join(',')}`); return;
+      }
+      themes.set(id, {
+        id,
+        name: obj.name || id,
+        displayName: obj.displayName || obj.name || id,
+        mode: obj.mode,
+        colors,
+        builtin,
+      });
+    } catch (e) {
+      console.warn(`themes: skip ${full}: ${e.message}`);
+    }
+  }));
+}
+
+async function loadAllThemes() {
+  themes.clear();
+  await loadThemesFromDir(BUILTIN_THEME_DIR, true);
+  await loadThemesFromDir(USER_THEME_DIR, false);
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -23,6 +81,25 @@ const emptyObj = (_req, res) => res.json({});
 
 app.get('/api/version', (_req, res) => res.json({ version: '0.1.0', name: 'pi-kanban' }));
 app.get('/api/config', (_req, res) => res.json({}));
+
+function resolveActiveTheme(mode) {
+  const requestedId = mode === 'light' ? LIGHT_THEME_ID : DARK_THEME_ID;
+  const fallbackId = mode === 'light' ? 'pi-light' : 'pi-dark';
+  let t = themes.get(requestedId);
+  if (t && t.mode !== mode) {
+    console.warn(`themes: ${requestedId} mode=${t.mode}, expected ${mode}; using fallback`);
+    t = null;
+  }
+  return t || themes.get(fallbackId) || null;
+}
+
+app.get('/api/themes', (_req, res) => {
+  res.json({
+    light: resolveActiveTheme('light'),
+    dark: resolveActiveTheme('dark'),
+    config: { lightId: LIGHT_THEME_ID, darkId: DARK_THEME_ID, themeDir: USER_THEME_DIR },
+  });
+});
 
 app.get('/api/sessions', async (req, res) => {
   try {
@@ -224,12 +301,6 @@ function sseSend(data) {
   }
 }
 
-function sessionIdFromFile(f) {
-  const base = path.basename(f, '.jsonl');
-  const i = base.indexOf('_');
-  return i >= 0 ? base.slice(i + 1) : base;
-}
-
 app.get('/api/events', (req, res) => {
   res.set({
     'Content-Type': 'text/event-stream',
@@ -281,16 +352,18 @@ const watcher = chokidar.watch(path.join(parsers.getSessionsDir(), '**/*.jsonl')
   ignoreInitial: true,
   awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 },
 });
-watcher.on('add', (f) => sseSend({ type: 'update', sessionId: sessionIdFromFile(f) }));
-watcher.on('change', (f) => sseSend({ type: 'update', sessionId: sessionIdFromFile(f) }));
-watcher.on('unlink', (f) => sseSend({ type: 'update', sessionId: sessionIdFromFile(f) }));
+watcher.on('add', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
+watcher.on('change', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
+watcher.on('unlink', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
 
 const http = require('node:http');
 const httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, app);
-const server = httpServer.listen(PORT, () => {
+const server = httpServer.listen(PORT, async () => {
   const url = `http://localhost:${PORT}`;
   console.log(`pi-kanban listening at ${url}`);
   console.log(`watching ${parsers.getSessionsDir()}`);
+  await loadAllThemes();
+  console.log(`themes loaded: ${themes.size} (user dir: ${USER_THEME_DIR})`);
   if (shouldOpen) open(url).catch(() => {});
 });
 

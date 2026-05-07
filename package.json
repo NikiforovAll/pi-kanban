@@ -10,8 +10,30 @@
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
-  "keywords": ["pi", "pi-package", "pi-agent", "kanban", "dashboard"],
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-agent",
+    "pi-coding-agent",
+    "pi-extension",
+    "kanban",
+    "dashboard",
+    "sessions",
+    "todos",
+    "subagents",
+    "observability",
+    "web-ui"
+  ],
   "license": "MIT",
+  "author": "nikiforovall",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NikiforovAll/pi-kanban.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NikiforovAll/pi-kanban/issues"
+  },
+  "homepage": "https://github.com/NikiforovAll/pi-kanban#readme",
   "dependencies": {
     "chokidar": "^3.5.3",
     "express": "^4.18.2",
@@ -21,7 +43,9 @@
     "@mariozechner/pi-coding-agent": "*"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./extensions"],
+    "video": "https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-demo.mp4",
+    "image": "https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster.png"
   },
   "engines": {
     "node": ">=20.0.0"
