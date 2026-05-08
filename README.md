@@ -1,5 +1,7 @@
 # pi-kanban
 
+[![npm version](https://img.shields.io/npm/v/pi-kanban.svg)](https://www.npmjs.com/package/pi-kanban)
+
 Web dashboard for the [pi coding agent](https://pi.dev) — sessions, todos, subagents, observability.
 
 ![pi-kanban dashboard](assets/pi-kanban-poster.png)
