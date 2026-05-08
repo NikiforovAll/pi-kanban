@@ -8,7 +8,9 @@
   },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "build:demo": "node scripts/build-demo.js",
+    "preview:demo": "npm run build:demo && npx --yes http-server dist -p 8765 -c-1"
   },
   "keywords": [
     "pi-package",

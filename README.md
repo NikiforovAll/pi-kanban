@@ -4,6 +4,14 @@ Web dashboard for the [pi coding agent](https://pi.dev) — sessions, todos, sub
 
 ![pi-kanban dashboard](assets/pi-kanban-poster.png)
 
+## Try it now
+
+**[→ Open the live demo](https://nikiforovall.blog/pi-kanban/)**
+
+Click around a fully interactive dashboard with synthesized sessions, tasks, and subagents — no install. Toggle the theme, browse projects, expand a subagent's review, open the storage manager. Everything works in-browser.
+
+When you're ready to run it on your own pi sessions, install below.
+
 ## Installation
 
 ```sh
