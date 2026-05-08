@@ -169,7 +169,8 @@ app.get('/api/sessions/:id/messages', async (req, res) => {
   if (!meta) return res.status(404).json({ messages: [], error: 'not found' });
   try {
     const limit = req.query.limit ? Number(req.query.limit) : 50;
-    const out = await parsers.buildMessages(meta.file, limit);
+    const before = req.query.before ? String(req.query.before) : null;
+    const out = await parsers.buildMessages(meta.file, limit, before);
     out.sessionId = req.params.id;
     res.json(out);
   } catch (err) {
