@@ -4,7 +4,7 @@
 
 Web dashboard for the [pi coding agent](https://pi.dev) — sessions, todos, subagents, observability.
 
-![pi-kanban dashboard](assets/pi-kanban-poster.png)
+![pi-kanban dashboard](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster.png)
 
 ## Try it now
 
@@ -42,5 +42,5 @@ pi install npm:@juicesharp/rpiv-todo
 
 ## Documentation
 
-- [User guide](docs/user-guide.md) — slash commands, layout, sessions, subagents, storage manager, keyboard shortcuts.
-- [Theming](docs/theming.md) — built-in themes, configuration, custom theme authoring.
+- [User guide](https://github.com/NikiforovAll/pi-kanban/blob/main/docs/user-guide.md) — slash commands, layout, sessions, subagents, storage manager, keyboard shortcuts.
+- [Theming](https://github.com/NikiforovAll/pi-kanban/blob/main/docs/theming.md) — built-in themes, configuration, custom theme authoring.
