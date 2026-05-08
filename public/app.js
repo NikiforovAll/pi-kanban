@@ -730,7 +730,7 @@ async function viewAgentLog(agentId) {
     agentLogSSE.close();
     agentLogSSE = null;
   }
-  agentLogSSE = new EventSource(`/api/sessions/${agentLogMode.sessionId}/agents/${resolvedId}/messages/stream`);
+  agentLogSSE = new EventSource(`/api/sessions/${encodeURIComponent(agentLogMode.sessionId)}/agents/${encodeURIComponent(resolvedId)}/messages/stream`);
   agentLogSSE.addEventListener('agent-log-update', (e) => {
     if (!agentLogMode || agentLogMode.agentId !== resolvedId) return;
     try {
@@ -764,7 +764,7 @@ async function fetchAgentMessages() {
   if (!agentLogMode) return;
   const { sessionId, agentId } = agentLogMode;
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/agents/${agentId}/messages?limit=100`);
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}/messages?limit=100`);
     if (!res.ok || !agentLogMode || agentLogMode.agentId !== agentId) return;
     const data = await res.json();
     if (!agentLogMode || agentLogMode.agentId !== agentId) return;
@@ -1996,35 +1996,9 @@ function renderAgentFooter() {
   const label = document.getElementById('agent-footer-label');
   const now = Date.now();
 
-  const agents = currentAgents;
-  // Filter shutdown ghosts: for same-type agents, keep if they overlapped (parallel)
-  // or started >30s after previous stopped (legitimate re-spawn). Filter the rest.
-  const byType = {};
-  for (const a of agents) {
-    const groupKey = a.agentName || a.type;
-    if (!byType[groupKey]) byType[groupKey] = [];
-    byType[groupKey].push(a);
-  }
-  const filtered = [];
-  for (const group of Object.values(byType)) {
-    group.sort((a, b) => new Date(a.startedAt || 0) - new Date(b.startedAt || 0));
-    filtered.push(group[0]);
-    let maxStop = group[0].stoppedAt ? new Date(group[0].stoppedAt).getTime() : Infinity;
-    for (let i = 1; i < group.length; i++) {
-      const cur = group[i];
-      const hasContent = cur.prompt || cur.lastMessage;
-      const curStart = new Date(cur.startedAt || 0).getTime();
-      const overlapped = curStart < maxStop;
-      const reSpawn = curStart - maxStop > 30000;
-      const isActive = cur.status === 'active' || cur.status === 'idle';
-      if (overlapped || reSpawn || isActive || hasContent) filtered.push(cur);
-      const curStop = cur.stoppedAt ? new Date(cur.stoppedAt).getTime() : Infinity;
-      if (curStop > maxStop) maxStop = curStop;
-    }
-  }
-  // Sort: active/idle first, then by updatedAt desc
   const statusOrder = { active: 0, idle: 1, stopped: 2 };
-  const visible = filtered
+  const visible = currentAgents
+    .slice()
     .sort(
       (a, b) =>
         (statusOrder[a.status] ?? 2) - (statusOrder[b.status] ?? 2) ||
@@ -2156,7 +2130,7 @@ async function dismissAgent(agentId) {
   currentWaiting = null;
   lastAgentsHash = '';
   try {
-    await fetch(`/api/sessions/${currentSessionId}/agents/${agentId}/stop`, { method: 'POST' });
+    await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/agents/${encodeURIComponent(agentId)}/stop`, { method: 'POST' });
   } catch (e) {
     console.error('[dismissAgent]', e);
   }
