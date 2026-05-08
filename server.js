@@ -206,8 +206,37 @@ app.get('/api/sessions/:id/agents/:agentId/messages', async (req, res) => {
   }
 });
 
+// Plan binding is browser-state: server only validates, broadcasts, and serves
+// file content on demand. The browser is the source of truth for which plan
+// is bound to which session (kept in localStorage), so this server has no
+// in-memory store and no JSONL persistence path here.
+app.get('/api/sessions/:id/plan', async (req, res) => {
+  const planPath = typeof req.query.path === 'string' ? req.query.path : '';
+  if (!planPath) return res.json({});
+  try {
+    const stat = await fsp.stat(planPath);
+    if (!stat.isFile()) return res.status(400).json({ error: 'not a file' });
+    const content = await fsp.readFile(planPath, 'utf8');
+    res.json({ content, path: planPath });
+  } catch (err) {
+    res.status(404).json({ error: `plan file not readable: ${planPath}` });
+  }
+});
+
+app.post('/api/session/plan', async (req, res) => {
+  const { id, path: planPath, title } = req.body || {};
+  if (!id || !planPath) return res.status(400).json({ error: 'id and path required' });
+  try {
+    const stat = await fsp.stat(planPath);
+    if (!stat.isFile()) return res.status(400).json({ error: 'not a file' });
+  } catch {
+    return res.status(404).json({ error: `plan file not found: ${planPath}` });
+  }
+  sseSend({ type: 'session:plan', id, path: planPath, title: title || null });
+  res.json({ ok: true });
+});
+
 // Stubbed endpoints (later phases may fill these).
-app.get('/api/sessions/:id/plan', emptyObj);
 app.get('/api/tasks/all', async (_req, res) => {
   try { res.json(await allStoredTasks()); }
   catch (err) { res.status(500).json({ error: String(err) }); }
@@ -344,6 +373,20 @@ app.post('/api/open-in-editor', (req, res) => {
     res.status(500).json({ error: String(err) });
   }
 });
+app.post('/api/open-folder', (req, res) => {
+  try {
+    const { folder, file } = req.body || {};
+    const targets = [];
+    if (folder) targets.push(folder);
+    if (file) targets.push(file);
+    if (!targets.length) return res.status(400).json({ error: 'folder or file required' });
+    openInEditor(...targets);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.post('/api/sessions/:id/agents/:agentId/stop', (_req, res) => res.json({ ok: true }));
 
 // SSE — broadcast file changes as session-changed events.

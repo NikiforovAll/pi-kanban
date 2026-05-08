@@ -181,7 +181,7 @@ async function fetchSessions(includeTasks = true) {
     }
     lastSessionsHash = sessionsHash;
 
-    sessions = newSessions;
+    sessions = newSessions.map(applyStoredPlan);
     renderSessions();
   } catch (error) {
     console.error('Failed to fetch sessions:', error);
@@ -914,7 +914,7 @@ function renderToolItem(m, i, compact) {
   const toolDetail = getToolDetail(m.tool, m.params, m.detail);
   const agentLink =
     m.tool === 'Agent' && m.agentId
-      ? ` <span class="msg-agent-link" title="View agent" onclick="event.stopPropagation();showAgentModal('${escapeHtml(m.agentId)}')">⇗</span>`
+      ? `<span class="msg-agent-link" title="View agent" onclick="event.stopPropagation();showAgentModal('${escapeHtml(m.agentId)}')">⇗</span>`
       : '';
   const agentLogBtn = resolveAgentLogBtn(m);
   const borderStyle = '';
@@ -927,7 +927,7 @@ function renderToolItem(m, i, compact) {
   const pinBtn = renderMsgPinBtn(m, i);
   return `<div class="msg-item msg-tool${compactClass}${getTodoStatusClass(m)}" ${itemClickAttr}>
       ${getToolIcon(m.tool)}
-      <div class="msg-body"><div class="msg-text">${escapeHtml(m.tool)}${toolDetail}${agentLink}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
+      <div class="msg-body"><div class="msg-text">${agentLink}${escapeHtml(m.tool)}${toolDetail}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
     </div>`;
 }
 
@@ -1952,16 +1952,13 @@ function renderAgentFooter() {
     permHtml +
     visible
       .map((a) => {
+        const isTerminal = a.status === 'stopped' || a.status === 'cancelled';
         const elapsed =
-          a.status === 'stopped' && a.stoppedAt
+          isTerminal && a.stoppedAt
             ? new Date(a.stoppedAt).getTime() - new Date(a.startedAt || a.stoppedAt).getTime()
             : now - new Date(a.startedAt || a.updatedAt).getTime();
-        const statusText =
-          a.status === 'stopped'
-            ? `stopped · ${formatDuration(elapsed)}`
-            : a.status === 'idle'
-              ? `idle · ${formatDuration(elapsed)}`
-              : `active · ${formatDuration(elapsed)}`;
+        const statusLabel = ['stopped', 'cancelled', 'idle'].includes(a.status) ? a.status : 'active';
+        const statusText = `${statusLabel} · ${formatDuration(elapsed)}`;
         const descText = a.description || '';
         const promptTrimmed = stripAnsi((a.prompt || '').trim()).replace(/[\r\n]+/g, ' ');
         const displayText = descText || promptTrimmed;
@@ -2190,7 +2187,7 @@ async function showAllTasks() {
 function renderAllTasks() {
   noSession.style.display = 'none';
   sessionView.classList.add('visible');
-  const visibleTasks = currentTasks.filter((t) => !isInternalTask(t));
+  const visibleTasks = currentTasks.filter((t) => !isInternalTask(t) && isLiveTask(t));
   const totalTasks = visibleTasks.length;
   const completed = visibleTasks.filter((t) => t.status === 'completed').length;
   const percent = totalTasks > 0 ? Math.round((completed / totalTasks) * 100) : 0;
@@ -2569,7 +2566,7 @@ function renderSession() {
 
   // Build meta text with project path and description
   const projectName = session.project ? session.project.split('/').pop() : null;
-  const metaParts = [`${currentTasks.length} tasks`];
+  const metaParts = [`${currentTasks.filter(isLiveTask).length} tasks`];
   if (projectName) {
     metaParts.push(projectName);
   }
@@ -2579,12 +2576,13 @@ function renderSession() {
   metaParts.push(formatDate(session.modifiedAt));
   sessionMeta.textContent = metaParts.join(' · ');
 
-  const completed = currentTasks.filter((t) => t.status === 'completed').length;
-  const percent = currentTasks.length > 0 ? Math.round((completed / currentTasks.length) * 100) : 0;
+  const liveTasks = currentTasks.filter(isLiveTask);
+  const completed = liveTasks.filter((t) => t.status === 'completed').length;
+  const percent = liveTasks.length > 0 ? Math.round((completed / liveTasks.length) * 100) : 0;
 
   progressPercent.textContent = `${percent}%`;
   progressBar.style.width = `${percent}%`;
-  const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
+  const hasInProgress = liveTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
   renderKanban();
@@ -2598,16 +2596,17 @@ function renderProjectView() {
   const folderName = currentProjectPath ? currentProjectPath.split(/[/\\]/).pop() : 'Project';
   sessionTitle.textContent = folderName;
 
-  const metaParts = [`${currentProjectSessionIds.length} sessions`, `${currentTasks.length} tasks`];
+  const liveTasks = currentTasks.filter(isLiveTask);
+  const metaParts = [`${currentProjectSessionIds.length} sessions`, `${liveTasks.length} tasks`];
   if (currentProjectPath) metaParts.push(currentProjectPath);
   sessionMeta.textContent = metaParts.join(' · ');
 
-  const completed = currentTasks.filter((t) => t.status === 'completed').length;
-  const percent = currentTasks.length > 0 ? Math.round((completed / currentTasks.length) * 100) : 0;
+  const completed = liveTasks.filter((t) => t.status === 'completed').length;
+  const percent = liveTasks.length > 0 ? Math.round((completed / liveTasks.length) * 100) : 0;
 
   progressPercent.textContent = `${percent}%`;
   progressBar.style.width = `${percent}%`;
-  const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
+  const hasInProgress = liveTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
   renderKanban();
@@ -4404,6 +4403,10 @@ function setupEventSource() {
         handleSessionPinEvent(data);
       }
 
+      if (data.type === 'session:plan') {
+        handleSessionPlanEvent(data);
+      }
+
       if (data.type === 'branch:resolved') {
         let changed = false;
         for (const s of sessions) {
@@ -4774,6 +4777,10 @@ const ownerColorCache = {};
 const teamColorMap = {};
 function isInternalTask(task) {
   return task.metadata && task.metadata._internal === true;
+}
+
+function isLiveTask(task) {
+  return task.status !== 'deleted';
 }
 
 function resolveNamedColor(colorName) {
@@ -5183,10 +5190,7 @@ async function showSessionInfoModal(sessionId) {
     showInfoModal(session, tasks, planContent);
   };
 
-  const planPromise = fetch(`/api/sessions/${sessionId}/plan`)
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null)
-    .then((data) => data?.content || null);
+  const planPromise = fetchPlanContent(sessionId).then((data) => data?.content || null);
 
   const tasksPromise =
     cachedTasks.length > 0
@@ -5375,32 +5379,88 @@ let _planSessionId = null;
 
 //#endregion
 
+// Plan binding lives in localStorage (key: `kanban:plan:<sessionId>` → {path, title}).
+// Server is stateless for plan bindings — it only validates + broadcasts via SSE
+// and serves file content via GET ?path=. The browser is the source of truth.
+const PLAN_STORAGE_PREFIX = 'kanban:plan:';
+
+function getStoredPlan(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const raw = localStorage.getItem(PLAN_STORAGE_PREFIX + sessionId);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setStoredPlan(sessionId, plan) {
+  if (!sessionId) return;
+  try {
+    if (plan && plan.path) {
+      localStorage.setItem(PLAN_STORAGE_PREFIX + sessionId, JSON.stringify({ path: plan.path, title: plan.title || null }));
+    } else {
+      localStorage.removeItem(PLAN_STORAGE_PREFIX + sessionId);
+    }
+  } catch (e) {
+    console.warn('plan storage write failed:', e);
+  }
+}
+
+function applyStoredPlan(session) {
+  if (!session) return session;
+  const stored = getStoredPlan(session.id);
+  if (stored?.path) {
+    session.hasPlan = true;
+    session.planPath = stored.path;
+    session.planTitle = stored.title || session.planTitle || null;
+  }
+  return session;
+}
+
+function fetchPlanContent(sessionId) {
+  const stored = getStoredPlan(sessionId);
+  if (!stored?.path) return Promise.resolve(null);
+  const qs = `?path=${encodeURIComponent(stored.path)}`;
+  return fetch(`/api/sessions/${encodeURIComponent(sessionId)}/plan${qs}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+}
+
+function handleSessionPlanEvent(data) {
+  if (!data?.id) return;
+  setStoredPlan(data.id, { path: data.path, title: data.title });
+  for (const s of sessions) {
+    if (s.id === data.id) applyStoredPlan(s);
+  }
+  renderSessions();
+  if (_planSessionId === data.id) refreshOpenPlan();
+  if (_infoModalSessionId === data.id) {
+    // Re-run the entry point to pull fresh plan content into the info modal.
+    showSessionInfoModal(data.id).catch(() => {});
+  }
+}
+
 //#region PLAN
 function refreshOpenPlan() {
   if (!_planSessionId || !document.getElementById('plan-modal').classList.contains('visible')) return;
-  fetch(`/api/sessions/${_planSessionId}/plan`)
-    .then((r) => (r.ok ? r.json() : null))
-    .then((data) => {
-      if (data?.content) {
-        _pendingPlanContent = data.content;
-        const body = document.getElementById('plan-modal-body');
-        body.innerHTML = renderMarkdown(_pendingPlanContent);
-      }
-    })
-    .catch(() => {});
+  fetchPlanContent(_planSessionId).then((data) => {
+    if (data?.content) {
+      _pendingPlanContent = data.content;
+      const body = document.getElementById('plan-modal-body');
+      body.innerHTML = renderMarkdown(_pendingPlanContent);
+    }
+  });
 }
 
 function openPlanForSession(sid) {
-  fetch(`/api/sessions/${sid}/plan`)
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null)
-    .then((data) => {
-      if (data?.content) {
-        _pendingPlanContent = data.content;
-        _planSessionId = sid;
-        openPlanModal();
-      }
-    });
+  fetchPlanContent(sid).then((data) => {
+    if (data?.content) {
+      _pendingPlanContent = data.content;
+      _planSessionId = sid;
+      openPlanModal();
+    }
+  });
 }
 
 function openPlanModal() {

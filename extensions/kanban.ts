@@ -1,10 +1,11 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const extDir = fileURLToPath(new URL(".", import.meta.url));
@@ -121,6 +122,21 @@ async function postPreview(filePath: string, sessionId: string | null, link = fa
 	});
 }
 
+async function postPlan(id: string, planPath: string, title: string | null): Promise<Response> {
+	return api("/api/session/plan", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ id, path: planPath, title }),
+	});
+}
+
+const PLAN_MAX_BYTES = 256 * 1024;
+
+function extractFirstHeading(markdown: string): string | null {
+	const m = markdown.match(/^#\s+(.+?)\s*$/m);
+	return m ? m[1].trim() : null;
+}
+
 function splitArgs(args: string): string[] {
 	return args.trim().split(/\s+/).filter(Boolean);
 }
@@ -193,6 +209,73 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			} catch (e: any) { console.warn(`pi-kanban: backfill failed: ${e?.message ?? e}`); }
 			return;
 		}
+	});
+
+	pi.registerTool({
+		name: "bind_plan",
+		label: "Bind Plan",
+		description:
+			"Attach a markdown plan file (e.g. plan.md) to the current session so the dashboard can render it.",
+		promptSnippet:
+			"Bind a markdown plan file to the current session — call after writing plan file",
+		promptGuidelines: [
+			"Use bind_plan once a planning markdown file exists so it surfaces in pi-kanban.",
+		],
+		parameters: Type.Object({
+			path: Type.String({
+				description: "Path to the plan markdown file. Absolute, or relative to the session cwd.",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const sessionId = ctx?.sessionManager?.getSessionId?.() ?? null;
+			const cwd = ctx?.sessionManager?.getCwd?.() ?? process.cwd();
+			const inputPath = String(params.path ?? "").trim();
+			if (!inputPath) {
+				return { content: [{ type: "text", text: "Error: path is required." }], isError: true };
+			}
+			const absPath = isAbsolute(inputPath) ? inputPath : resolvePath(cwd, inputPath);
+
+			let title: string | null = null;
+			try {
+				const stat = statSync(absPath);
+				if (!stat.isFile()) {
+					return { content: [{ type: "text", text: `Error: ${absPath} is not a file.` }], isError: true };
+				}
+				const buf = readFileSync(absPath, { encoding: "utf8" });
+				const head = buf.slice(0, PLAN_MAX_BYTES);
+				title = extractFirstHeading(head);
+			} catch (e: any) {
+				return {
+					content: [{ type: "text", text: `Error reading ${absPath}: ${e?.message ?? e}` }],
+					isError: true,
+				};
+			}
+
+			if (!sessionId) {
+				return {
+					content: [{ type: "text", text: "Error: no active session id; cannot bind plan." }],
+					isError: true,
+				};
+			}
+			try {
+				const res = await postPlan(sessionId, absPath, title);
+				if (!res.ok) {
+					const msg = `pi-kanban server rejected bind_plan: HTTP ${res.status}. Is /kanban running?`;
+					console.warn(msg);
+					return { content: [{ type: "text", text: msg }], isError: true };
+				}
+			} catch (e: any) {
+				const msg = `pi-kanban: bind_plan POST failed (server may be stopped): ${e?.message ?? e}`;
+				console.warn(msg);
+				return { content: [{ type: "text", text: msg }], isError: true };
+			}
+
+			const summary = title ? `Bound plan "${title}" → ${absPath}` : `Bound plan → ${absPath}`;
+			return {
+				content: [{ type: "text", text: summary }],
+				details: { path: absPath, title, sessionId },
+			};
+		},
 	});
 
 	type Notify = (m: string, l?: "info" | "error") => void;
