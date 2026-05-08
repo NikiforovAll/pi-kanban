@@ -64,19 +64,6 @@
         </button>
       </header>
 
-      <!-- Live Updates -->
-      <div class="sidebar-section">
-        <div class="section-header" onclick="toggleLiveUpdates()" style="cursor: pointer;">
-          <span>Live Updates</span>
-          <svg id="live-updates-chevron" class="collapse-chevron" viewBox="0 0 24 24">
-            <path d="M6 9l6 6 6-6"/>
-          </svg>
-        </div>
-        <div id="live-updates" class="live-updates">
-          <div class="live-empty">No active tasks</div>
-        </div>
-      </div>
-
       <!-- Tasks -->
       <div class="sidebar-section flex-1">
         <div class="section-header" onclick="toggleSection('sessions-filters', 'sessions-chevron')" style="cursor: pointer;">
@@ -449,6 +436,10 @@
                 <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">J/K</kbd></td>
                 <td style="padding: 4px 0; color: var(--text-primary);">Navigate messages in detail modal</td>
               </tr>
+              <tr>
+                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Ctrl+D</kbd></td>
+                <td style="padding: 4px 0; color: var(--text-primary);">Dismiss current session</td>
+              </tr>
             </table>
           </div>
         </div>
@@ -541,7 +532,7 @@
       </div>
       <div id="session-info-modal-body" class="modal-body"></div>
       <div class="modal-footer">
-        <button id="session-info-dismiss-btn" class="btn btn-secondary" onclick="toggleDismissSession(_infoModalSessionId); closeSessionInfoModal()">Dismiss</button>
+        <button id="session-info-dismiss-btn" class="btn btn-secondary" onclick="dismissAndAdvance(_infoModalSessionId); closeSessionInfoModal()">Dismiss</button>
         <button class="btn btn-primary" onclick="closeSessionInfoModal()">Close</button>
       </div>
     </div>

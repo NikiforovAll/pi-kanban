@@ -368,7 +368,7 @@ body::before {
 
 /* #endregion */
 
-/* #region LIVE_UPDATES */
+/* #region SIDEBAR_SECTIONS */
 .collapse-chevron {
   width: 14px;
   height: 14px;
@@ -397,80 +397,6 @@ body::before {
   padding-bottom: 0;
   opacity: 0;
   overflow: hidden;
-}
-
-.live-updates {
-  padding: 0 16px 8px;
-  max-height: 140px;
-  overflow-y: auto;
-  transition:
-    max-height 0.2s ease,
-    padding 0.2s ease,
-    opacity 0.2s ease;
-}
-
-.live-updates.collapsed {
-  max-height: 0;
-  padding: 0 16px;
-  overflow: hidden;
-  opacity: 0;
-}
-
-.live-empty {
-  padding: 8px;
-  text-align: center;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.live-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--bg-deep);
-  border: 1px solid transparent;
-  border-radius: 6px;
-  margin-bottom: 3px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.live-item:hover {
-  background: var(--bg-hover);
-}
-
-.live-item .pulse {
-  width: 6px;
-  height: 6px;
-  margin-top: 4px;
-  background: var(--accent);
-  border-radius: 50%;
-  flex-shrink: 0;
-  animation: pulse 2s ease-in-out infinite;
-  box-shadow: 0 0 8px var(--accent-glow);
-}
-
-.live-item-content {
-  flex: 1;
-  min-width: 0;
-}
-
-.live-item-action {
-  font-size: 11px;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.live-item-session {
-  font-size: 10px;
-  color: var(--text-tertiary);
-  margin-top: 1px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* #endregion */
@@ -1136,8 +1062,9 @@ body::before {
   margin-bottom: 6px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
+
 
 .task-badge {
   font-size: 10px;
@@ -1838,6 +1765,10 @@ body::before {
   margin-top: 2px;
   opacity: 0.9;
 }
+.msg-item.todo-completed .msg-icon,
+.msg-item.todo-completed .msg-text > span { color: var(--success, #2da44e); opacity: 1; }
+.msg-item.todo-in-progress .msg-icon,
+.msg-item.todo-in-progress .msg-text > span { color: var(--info); opacity: 1; }
 .msg-body {
   flex: 1;
   min-width: 0;

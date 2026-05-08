@@ -21,7 +21,7 @@ pi stores sessions as JSONL files under `~/.pi/agent/sessions/<encoded-cwd>/<tim
 - All state lives in module-scope `let`s in `app.js`; localStorage persists user prefs (`theme`, `sidebar-collapsed`, `sidebar-width`, etc.).
 - `app.js` is organized by `//#region NAME` / `//#endregion` blocks (folded by VS Code). When editing, place new code in the matching region; when adding new functionality that doesn't fit any existing region, add a new region rather than appending to the bottom. Grep `^//#region` to list them.
 
-  Current regions, in order: `STATE`, `DOM`, `DATA_FETCHING`, `BULK_DELETE`, `LIVE_UPDATES`, `MESSAGE_PANEL`, `PINNING`, `MODALS`, `TOAST`, `TOOL_RENDERING`, `AGENTS`, `RENDERING`, `KANBAN`, `DRAG_DROP`, `KEYBOARD_NAV`, `TASK_DETAIL`, `HELP`, `SCRATCHPAD`, `STORAGE_MANAGER`, `KEYBOARD_SHORTCUTS`, `MARKDOWN_PREVIEW`, `SSE`, `CONTEXT_WINDOW`, `UTILS`, `FILTERS`, `EVENT_DELEGATION`, `THEME`, `SIDEBAR_LAYOUT`, `PREFERENCES`, `SESSION_INFO`, `PLAN`, `LAYOUT_SYNC`, `PWA`, `INIT`.
+  Current regions, in order: `STATE`, `DOM`, `DATA_FETCHING`, `BULK_DELETE`, `SIDEBAR_SECTIONS`, `MESSAGE_PANEL`, `PINNING`, `MODALS`, `TOAST`, `TOOL_RENDERING`, `AGENTS`, `RENDERING`, `KANBAN`, `DRAG_DROP`, `KEYBOARD_NAV`, `TASK_DETAIL`, `HELP`, `SCRATCHPAD`, `STORAGE_MANAGER`, `KEYBOARD_SHORTCUTS`, `MARKDOWN_PREVIEW`, `SSE`, `CONTEXT_WINDOW`, `UTILS`, `FILTERS`, `EVENT_DELEGATION`, `THEME`, `SIDEBAR_LAYOUT`, `PREFERENCES`, `SESSION_INFO`, `PLAN`, `LAYOUT_SYNC`, `PWA`, `INIT`.
 
 ### Adding endpoints
 

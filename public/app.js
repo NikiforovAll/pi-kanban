@@ -183,7 +183,6 @@ async function fetchSessions(includeTasks = true) {
 
     sessions = newSessions;
     renderSessions();
-    renderLiveUpdatesFromCache();
   } catch (error) {
     console.error('Failed to fetch sessions:', error);
   }
@@ -409,55 +408,13 @@ function fuzzyMatch(text, query) {
 
 //#endregion
 
-//#region LIVE_UPDATES
-function renderLiveUpdatesFromCache() {
-  let activeTasks = allTasksCache.filter((t) => t.status === 'in_progress' && !isInternalTask(t));
-  if (filterProject) {
-    activeTasks = activeTasks.filter((t) => matchesProjectFilter(t.project));
-  }
-  renderLiveUpdates(activeTasks);
-}
-
+//#region SIDEBAR_SECTIONS
 function toggleSection(containerId, chevronId) {
   const container = document.getElementById(containerId);
   const chevron = document.getElementById(chevronId);
   const collapsed = container.classList.toggle('collapsed');
   chevron.classList.toggle('rotated', collapsed);
   localStorage.setItem(`${containerId}Collapsed`, collapsed);
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function toggleLiveUpdates() {
-  toggleSection('live-updates', 'live-updates-chevron');
-}
-
-function renderLiveUpdates(activeTasks) {
-  const container = document.getElementById('live-updates');
-
-  if (activeTasks.length === 0) {
-    container.innerHTML = '<div class="live-empty">No active tasks</div>';
-    return;
-  }
-
-  container.innerHTML = activeTasks
-    .map(
-      (task) => `
-        <div class="live-item" onclick="openLiveTask('${task.sessionId}', '${task.id}')">
-          <span class="pulse"></span>
-          <div class="live-item-content">
-            <div class="live-item-action" title="${escapeHtml(task.activeForm || task.subject)}">${escapeHtml(task.activeForm || task.subject)}</div>
-            <div class="live-item-session" title="${escapeHtml(task.sessionName || task.sessionId)}">${escapeHtml(task.sessionName || task.sessionId)}</div>
-          </div>
-        </div>
-      `,
-    )
-    .join('');
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-async function openLiveTask(sessionId, taskId) {
-  await fetchTasks(sessionId);
-  showTaskDetail(taskId, sessionId);
 }
 
 let lastCurrentTasksHash = '';
@@ -908,7 +865,7 @@ function renderPinnedSection() {
       } else if (p.type === 'tool_use') {
         const toolDetail = getToolDetail(p.tool, p.params, p.detail);
         const pinnedAgentLogBtn = resolveAgentLogBtn(p);
-        return `<div class="msg-item msg-tool" ${click}>
+        return `<div class="msg-item msg-tool${getTodoStatusClass(p)}" ${click}>
             ${getToolIcon(p.tool)}
             <div class="msg-body"><div class="msg-text">${escapeHtml(p.tool || '')}${toolDetail}</div><div class="msg-time">${formatDate(p.timestamp)}</div></div>${pinnedAgentLogBtn}${unpin}
           </div>`;
@@ -968,7 +925,7 @@ function renderToolItem(m, i, compact) {
       ? `onclick="showAgentModal('${escapeHtml(m.agentId)}')" ${combinedStyle}`
       : `onclick="msgDetailFollowLatest=false;showMsgDetail(${i})" ${combinedStyle}`;
   const pinBtn = renderMsgPinBtn(m, i);
-  return `<div class="msg-item msg-tool${compactClass}" ${itemClickAttr}>
+  return `<div class="msg-item msg-tool${compactClass}${getTodoStatusClass(m)}" ${itemClickAttr}>
       ${getToolIcon(m.tool)}
       <div class="msg-body"><div class="msg-text">${escapeHtml(m.tool)}${toolDetail}${agentLink}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
     </div>`;
@@ -995,7 +952,7 @@ function renderMessageList(messages) {
         const grpAgentLogBtn = resolveAgentLogBtn(first);
         const grpPinBtn = renderMsgPinBtn(first, i);
         parts.push(`<div class="msg-tool-group">
-            <div class="msg-item msg-tool msg-tool-group-header" onclick="toggleToolGroup('${gid}')" style="cursor:pointer">
+            <div class="msg-item msg-tool msg-tool-group-header${getTodoStatusClass(first)}" onclick="toggleToolGroup('${gid}')" style="cursor:pointer">
               ${getToolIcon(first.tool)}
               <div class="msg-body"><div class="msg-text">${escapeHtml(first.tool)}${toolDetail}<span class="tool-count-badge">×${count}</span></div><div class="msg-time">${timeRange}</div></div>${grpAgentLogBtn}${grpPinBtn}
             </div>
@@ -1108,6 +1065,8 @@ const TOOL_ICONS = {
   TaskUpdate: ICON_TASK,
   TaskGet: ICON_TASK,
   TaskList: ICON_TASK,
+  TodoWrite:
+    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="8 14 10.5 16.5 15 12"/></svg>',
   ToolSearch:
     '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
   AskUserQuestion:
@@ -1123,6 +1082,7 @@ const TOOL_ICONS = {
 function getToolIcon(toolName) {
   return TOOL_ICONS[toolName] || MSG_ICON_TOOL;
 }
+
 const AGENT_LOG_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
 function agentLogButton(agentId) {
@@ -1637,7 +1597,18 @@ function formatTaskToolDetail(params) {
   if (params.subject) parts.push(`<span style="color:var(--text-secondary)">${escapeHtml(params.subject)}</span>`);
   return parts.length ? ` ${parts.join(' ')}` : '';
 }
+function getTodoStatusClass(m) {
+  if (!m || m.tool !== 'TodoWrite' || !m.params) return '';
+  const s = m.params.status;
+  if (s === 'completed') return ' todo-completed';
+  if (s === 'in_progress') return ' todo-in-progress';
+  return '';
+}
+
 function getToolDetail(tool, params, detail) {
+  if (tool === 'TodoWrite' && params && typeof params.status === 'string') {
+    return ` <span style="color:var(--text-secondary)">${escapeHtml(params.status)}</span>`;
+  }
   if (TASK_TOOLS.has(tool)) return formatTaskToolDetail(params);
   if (!detail) return '';
   let extra = '';
@@ -2211,7 +2182,6 @@ async function showAllTasks() {
     updateUrl();
     renderAllTasks();
     renderSessions();
-    renderLiveUpdatesFromCache();
   } catch (error) {
     console.error('Failed to fetch all tasks:', error);
   }
@@ -3251,7 +3221,6 @@ async function refreshCurrentView() {
     await showAllTasks();
   } else if (currentSessionId) {
     await fetchTasks(currentSessionId);
-    renderLiveUpdatesFromCache();
   } else {
     await fetchSessions();
   }
@@ -3798,6 +3767,16 @@ const MODAL_CLOSERS = {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+    return;
+  }
+
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.code === 'KeyD' || e.key === 'd' || e.key === 'D')) {
+    if (!currentSessionId) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const sid = currentSessionId;
+    dismissAndAdvance(sid);
+    if (_infoModalSessionId === sid) closeSessionInfoModal();
     return;
   }
 
@@ -4361,7 +4340,6 @@ function setupEventSource() {
           if (viewMode === 'all') {
             currentTasks = filterProject ? allTasksCache.filter((t) => matchesProjectFilter(t.project)) : allTasksCache;
             renderAllTasks();
-            renderLiveUpdatesFromCache();
           } else if (viewMode === 'project' && currentProjectPath) {
             const hasUpdate = currentProjectSessionIds.some((id) => pendingTaskSessionIds.has(id));
             if (hasUpdate) fetchProjectView(currentProjectPath);
@@ -5344,6 +5322,37 @@ function closeSessionInfoModal() {
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function dismissAndAdvance(sessionId) {
+  if (!sessionId) return;
+  if (dismissedSessionIds.has(sessionId)) {
+    dismissedSessionIds.delete(sessionId);
+    updateDismissBtnState();
+    renderSessions();
+    return;
+  }
+
+  const items = Array.from(sessionsList.querySelectorAll('.session-item'));
+  const idx = items.findIndex((el) => el.dataset.sessionId === sessionId);
+  const nextEl = idx >= 0 ? items[idx + 1] || items[idx - 1] || null : null;
+  const nextId = nextEl ? nextEl.dataset.sessionId : null;
+
+  dismissedSessionIds.add(sessionId);
+  updateDismissBtnState();
+  renderSessions();
+
+  if (sessionId !== currentSessionId) return;
+  if (nextId) {
+    const newEl = sessionsList.querySelector(`.session-item[data-session-id="${CSS.escape(nextId)}"]`);
+    if (newEl) newEl.click();
+  } else {
+    currentSessionId = null;
+    currentTasks = [];
+    renderSession();
+    updateUrl();
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function toggleDismissSession(sessionId) {
   if (dismissedSessionIds.has(sessionId)) {
     dismissedSessionIds.delete(sessionId);
@@ -5448,14 +5457,10 @@ if ('serviceWorker' in navigator) {
 
 //#region INIT
 loadTheme();
-['live-updates', 'sessions-filters'].forEach((id) => {
-  if (localStorage.getItem(`${id}Collapsed`) === 'true') {
-    document.getElementById(id).classList.add('collapsed');
-    document
-      .getElementById(id === 'live-updates' ? 'live-updates-chevron' : 'sessions-chevron')
-      .classList.add('rotated');
-  }
-});
+if (localStorage.getItem('sessions-filtersCollapsed') === 'true') {
+  document.getElementById('sessions-filters').classList.add('collapsed');
+  document.getElementById('sessions-chevron').classList.add('rotated');
+}
 
 document.addEventListener('DOMContentLoaded', () => {
   if (typeof marked !== 'undefined' && typeof hljs !== 'undefined') {
