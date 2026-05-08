@@ -1,7 +1,7 @@
 {
   "name": "pi-kanban",
-  "version": "0.1.1",
-  "description": "Web dashboard for the pi coding agent (sessions, todos, subagents)",
+  "version": "0.1.3",
+  "description": "Workspace for the pi coding agent — sessions, todos, subagents, and more.",
   "main": "server.js",
   "bin": {
     "pi-kanban": "./server.js"
