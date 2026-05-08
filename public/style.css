@@ -1046,6 +1046,43 @@ body::before {
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+.task-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.task-card:hover .task-actions,
+.task-card:focus-within .task-actions {
+  opacity: 1;
+}
+.task-action-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.task-action-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.task-action-delete:hover {
+  background: var(--bg-hover);
+  color: #c44;
 }
 
 .task-card:hover {

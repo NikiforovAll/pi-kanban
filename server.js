@@ -9,6 +9,39 @@ const { spawn } = require('node:child_process');
 const chokidar = require('chokidar');
 const open = require('open').default || require('open');
 const parsers = require('./lib/pi-parsers');
+const taskStore = require('./lib/task-store');
+
+function enrichTask(t, sessionId, project) {
+  return {
+    id: String(t.id),
+    subject: t.subject || '',
+    status: t.status || 'pending',
+    description: t.description ?? null,
+    sessionId,
+    project,
+  };
+}
+
+async function tasksForSession(sessionId, project) {
+  const tasks = taskStore.listTasks(sessionId);
+  return tasks.map((t) => enrichTask(t, sessionId, project));
+}
+
+async function allStoredTasks() {
+  const out = [];
+  for (const sid of taskStore.listSessionIds()) {
+    const tasks = taskStore.listTasks(sid);
+    if (!tasks.length) continue;
+    let project = null;
+    try {
+      const meta = await parsers.findSessionFileById(sid);
+      if (meta) project = meta.cwd;
+    } catch {}
+    for (const t of tasks) out.push(enrichTask(t, sid, project));
+  }
+  return out;
+}
+
 
 const PORT = Number(process.env.PORT) || 3460;
 const args = process.argv.slice(2);
@@ -116,7 +149,7 @@ app.get('/api/sessions/:id', async (req, res) => {
   const meta = await parsers.findSessionFileById(req.params.id);
   if (!meta) return res.status(404).json({ error: 'not found' });
   try {
-    res.json(await parsers.listTasksForSession(meta));
+    res.json(await tasksForSession(req.params.id, meta.cwd));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -176,7 +209,7 @@ app.get('/api/sessions/:id/agents/:agentId/messages', async (req, res) => {
 // Stubbed endpoints (later phases may fill these).
 app.get('/api/sessions/:id/plan', emptyObj);
 app.get('/api/tasks/all', async (_req, res) => {
-  try { res.json(await parsers.listAllTasks()); }
+  try { res.json(await allStoredTasks()); }
   catch (err) { res.status(500).json({ error: String(err) }); }
 });
 app.get('/api/projects', async (_req, res) => {
@@ -197,13 +230,32 @@ app.get('/api/projects', async (_req, res) => {
 });
 app.get('/api/projects/:name/tasks', async (req, res) => {
   try {
-    const all = await parsers.listAllTasks();
+    const all = await allStoredTasks();
     let decoded;
     try { decoded = Buffer.from(req.params.name, 'base64').toString('utf8'); }
     catch { decoded = parsers.decodeProjectDir(req.params.name); }
     res.json(all.filter((t) => t.project === decoded));
   } catch (err) { res.status(500).json({ error: String(err) }); }
 });
+
+app.delete('/api/sessions/:id/tasks/:taskId', (req, res) => {
+  const { id, taskId } = req.params;
+  const existing = taskStore.readTask(id, taskId);
+  if (!existing) return res.status(404).json({ error: 'task not found' });
+  const all = taskStore.listTasks(id);
+  const blockedTasks = all
+    .filter((t) => Array.isArray(t.blockedBy) && t.blockedBy.map(String).includes(String(taskId)))
+    .map((t) => t.id);
+  if (blockedTasks.length) {
+    return res.status(400).json({ error: 'task blocks others', blockedTasks });
+  }
+  try {
+    taskStore.deleteTask(id, taskId);
+    sseSend({ type: 'task:update', sessionId: id });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
 app.get('/api/teams/:name', emptyObj);
 app.get('/api/context-status', emptyObj);
 
@@ -352,9 +404,33 @@ const watcher = chokidar.watch(path.join(parsers.getSessionsDir(), '**/*.jsonl')
   ignoreInitial: true,
   awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 },
 });
+parsers.setOnBranchResolved((cwd, branch) => {
+  sseSend({ type: 'branch:resolved', cwd, branch });
+});
+
 watcher.on('add', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
 watcher.on('change', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
 watcher.on('unlink', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
+
+const taskWatcher = chokidar.watch(taskStore.getTasksDir(), {
+  ignoreInitial: true,
+  depth: 2,
+  awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
+});
+const tasksRoot = path.basename(taskStore.getTasksDir());
+const pendingTaskSse = new Map();
+function queueTaskUpdate(sid) {
+  if (pendingTaskSse.has(sid)) return;
+  pendingTaskSse.set(sid, setTimeout(() => {
+    pendingTaskSse.delete(sid);
+    sseSend({ type: 'task:update', sessionId: sid });
+  }, 75));
+}
+taskWatcher.on('all', (_evt, file) => {
+  if (!file || !file.endsWith('.json')) return;
+  const sid = path.basename(path.dirname(file));
+  if (sid && sid !== tasksRoot) queueTaskUpdate(sid);
+});
 
 const http = require('node:http');
 const httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, app);
@@ -367,4 +443,4 @@ const server = httpServer.listen(PORT, async () => {
   if (shouldOpen) open(url).catch(() => {});
 });
 
-process.on('SIGINT', () => { watcher.close(); server.close(() => process.exit(0)); });
+process.on('SIGINT', () => { watcher.close(); taskWatcher.close(); server.close(() => process.exit(0)); });

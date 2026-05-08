@@ -521,6 +521,26 @@ async function fetchTasks(sessionId) {
   }
 }
 
+async function deleteTaskById(sessionId, taskId) {
+  if (!sessionId || !taskId) return;
+  if (!confirm(`Delete task #${taskId}?`)) return;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (err.blockedTasks) {
+        alert(`Cannot delete: blocks task(s) #${err.blockedTasks.join(', #')}`);
+      } else {
+        alert(`Delete failed: ${err.error || res.status}`);
+      }
+    }
+  } catch (e) { alert(`Delete error: ${e}`); }
+}
+
+window.deleteTaskById = deleteTaskById;
+
 const _AGENT_COOLDOWN_MS = 3 * 60 * 1000;
 const _AGENT_STALE_MS = 5 * 60 * 1000; // kept for reference; no longer used for force-stopping
 const WAITING_TTL_MS = 30 * 60 * 1000;
@@ -1446,8 +1466,8 @@ function showMsgDetail(idx) {
     if (m.tool === 'Agent' && m.agentId) {
       const agentRespText = m.agentLastMessage ? stripAnsi(m.agentLastMessage.trim()) : null;
       const agentPromptText = m.agentPrompt || null;
-      const respHtml = agentRespText ? renderMarkdown(agentRespText) : null;
-      const promptHtml = agentPromptText ? renderMarkdown(agentPromptText) : null;
+      const respHtml = renderJsonOrMarkdown(agentRespText);
+      const promptHtml = renderJsonOrMarkdown(agentPromptText);
       agentExtraHtml += renderAgentTabs(promptHtml, respHtml, agentPromptText, agentRespText);
       agentBtn.style.display = '';
       agentBtn.dataset.agentId = m.agentId;
@@ -1455,7 +1475,7 @@ function showMsgDetail(idx) {
       agentBtn.style.display = 'none';
     }
     const sendProto = m.tool === 'SendMessage' && m.params?.protocol;
-    const toolParamsHtml = renderToolParamsHtml(
+    let toolParamsHtml = renderToolParamsHtml(
       sendProto ? Object.fromEntries(Object.entries(m.params).filter(([k]) => k !== 'protocol')) : m.params,
     );
     const hideResult = m.tool === 'SendMessage' || TASK_TOOLS.has(m.tool);
@@ -1474,9 +1494,15 @@ function showMsgDetail(idx) {
     } else if (taskResultHtml) {
       mainHtml = '';
     } else if (fullText) {
-      const detailEscaped = escapeHtml(fullText);
-      const detailRendered = m.tool === 'Bash' ? highlightBash(detailEscaped) : detailEscaped;
-      mainHtml = `${descHtml}<pre class="${TINTED_PRE_CLASS}">${detailRendered}</pre>`;
+      const jsonHtml = m.tool !== 'Bash' ? renderJsonInputHtml(fullText) : null;
+      if (jsonHtml) {
+        mainHtml = `${descHtml}${jsonHtml}`;
+        toolParamsHtml = '';
+      } else {
+        const detailEscaped = escapeHtml(fullText);
+        const detailRendered = m.tool === 'Bash' ? highlightBash(detailEscaped) : detailEscaped;
+        mainHtml = `${descHtml}<pre class="${TINTED_PRE_CLASS}">${detailRendered}</pre>`;
+      }
     } else {
       mainHtml = TASK_TOOLS.has(m.tool) ? '' : '<em>No details</em>';
     }
@@ -1574,6 +1600,7 @@ function updateFullscreenBtnIcon(btnId, isFullscreen) {
 
 let _toastTimer = null;
 let _manualRefreshing = false;
+let _branchRenderQueued = false;
 //#endregion
 
 //#region TOAST
@@ -1702,9 +1729,21 @@ function renderToolParamsHtml(params) {
   if (!params) return '';
   const BLOCK_KEYS = new Set(['old_string', 'new_string', 'content', 'plan', 'edits']);
   const badges = [],
-    blocks = [];
+    blocks = [],
+    jsonBlocks = [];
   for (const [k, v] of Object.entries(params)) {
     if (BLOCK_KEYS.has(k)) continue;
+    if (v !== null && typeof v === 'object') {
+      jsonBlocks.push({ k, obj: v });
+      continue;
+    }
+    if (typeof v === 'string') {
+      const parsed = tryParseJsonObject(v);
+      if (parsed) {
+        jsonBlocks.push({ k, obj: parsed });
+        continue;
+      }
+    }
     const display = typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v);
     if (display.length > 60) {
       blocks.push({ k, display });
@@ -1718,6 +1757,9 @@ function renderToolParamsHtml(params) {
   if (badges.length) html += `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">${badges.join('')}</div>`;
   for (const { k, display } of blocks) {
     html += `<div style="margin-top:6px;font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> <span style="word-break:break-all">${escapeHtml(display)}</span></div>`;
+  }
+  for (const { k, obj } of jsonBlocks) {
+    html += `<div style="margin-top:8px;font-size:0.75rem"><div style="color:var(--text-muted);margin-bottom:2px">${escapeHtml(k)}</div>${renderJsonPre(obj, 300)}</div>`;
   }
   if (params.old_string || params.new_string) {
     html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">`;
@@ -2183,8 +2225,8 @@ function showAgentModal(agentId) {
   const responseText = rawResponse ? stripAnsi(rawResponse.trim()) : null;
   _agentModalPromptText = promptText;
   _agentModalResponseText = responseText;
-  const promptHtml = promptText ? renderMarkdown(promptText) : null;
-  const responseHtml = responseText ? renderMarkdown(responseText) : null;
+  const promptHtml = renderJsonOrMarkdown(promptText);
+  const responseHtml = renderJsonOrMarkdown(responseText);
   html += renderAgentTabs(promptHtml, responseHtml, promptText, responseText);
 
   body.innerHTML = html;
@@ -2707,6 +2749,9 @@ function renderTaskCard(task) {
           onclick="showTaskDetail('${task.id}', '${actualSessionId}')"
           class="task-card ${statusClass} ${isBlocked ? 'blocked' : ''}"
           aria-label="${escapeHtml(task.subject)} — ${task.status.replace('_', ' ')}">
+          <div class="task-actions">
+            <button class="task-action-btn task-action-delete" title="Delete task" onclick="event.stopPropagation();deleteTaskById('${actualSessionId}','${task.id}')">×</button>
+          </div>
           <div class="task-id">
             <span>#${taskId}</span>
             ${isBlocked ? '<span class="task-badge blocked">Blocked</span>' : ''}
@@ -4068,8 +4113,12 @@ document.addEventListener('keydown', (e) => {
     _manualRefreshing = true;
     lastSessionsHash = '';
     lastTasksHash = '';
+    lastMessagesHash = '';
     const refreshes = [fetchSessions()];
     if (currentSessionId) refreshes.push(fetchTasks(currentSessionId));
+    if (currentSessionId && messagePanelOpen && !agentLogMode) {
+      refreshes.push(fetchMessages(currentSessionId));
+    }
     refreshRateLimits();
     Promise.all(refreshes)
       .then(() => showToast('Data refreshed', 'success'))
@@ -4427,6 +4476,17 @@ function setupEventSource() {
           } else if (currentSessionId && pendingTaskSessionIds.has(currentSessionId)) {
             fetchTasks(currentSessionId);
           }
+          if (
+            currentSessionId &&
+            pendingTaskSessionIds.has(currentSessionId) &&
+            messagePanelOpen &&
+            !agentLogMode
+          ) {
+            fetchMessages(currentSessionId);
+          }
+          if (currentSessionId && pendingTaskSessionIds.has(currentSessionId)) {
+            fetchAgents(currentSessionId);
+          }
           pendingTaskSessionIds.clear();
         }, 500);
       }
@@ -4472,6 +4532,27 @@ function setupEventSource() {
 
       if (data.type === 'session:pin') {
         handleSessionPinEvent(data);
+      }
+
+      if (data.type === 'branch:resolved') {
+        let changed = false;
+        for (const s of sessions) {
+          if (s.cwd === data.cwd && s.gitBranch !== data.branch) {
+            s.gitBranch = data.branch;
+            changed = true;
+          }
+        }
+        if (changed && !_branchRenderQueued) {
+          _branchRenderQueued = true;
+          requestAnimationFrame(() => {
+            _branchRenderQueued = false;
+            renderSessions();
+          });
+        }
+      }
+
+      if (data.type === 'task:update' && data.sessionId === currentSessionId) {
+        fetchTasks(currentSessionId).catch(() => {});
       }
 
       if (data.type === 'team-update') {
@@ -4706,6 +4787,33 @@ function renderMarkdown(text) {
     return DOMPurify.sanitize(marked.parse(text));
   }
   return `<pre style="white-space:pre-wrap;margin:0;">${escapeHtml(text)}</pre>`;
+}
+
+function tryParseJsonObject(text) {
+  if (typeof text !== 'string') return null;
+  const t = text.trim();
+  if (t.length < 2) return null;
+  const first = t[0];
+  const last = t[t.length - 1];
+  if (!((first === '{' && last === '}') || (first === '[' && last === ']'))) return null;
+  try {
+    const parsed = JSON.parse(t);
+    return parsed !== null && typeof parsed === 'object' ? parsed : null;
+  } catch { return null; }
+}
+
+function renderJsonPre(obj, maxHeight = 500) {
+  return `<pre class="${TINTED_PRE_CLASS}" style="max-height:${maxHeight}px;overflow:auto">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
+}
+
+function renderJsonInputHtml(text) {
+  const parsed = tryParseJsonObject(text);
+  return parsed ? renderJsonPre(parsed) : null;
+}
+
+function renderJsonOrMarkdown(text) {
+  if (!text) return null;
+  return renderJsonInputHtml(text) || renderMarkdown(text);
 }
 
 function isLightTheme() {

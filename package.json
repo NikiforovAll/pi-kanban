@@ -11,18 +11,20 @@
     "dev": "node --watch server.js"
   },
   "keywords": [
-    "pi",
     "pi-package",
-    "pi-agent",
-    "pi-coding-agent",
-    "pi-extension",
     "kanban",
     "dashboard",
-    "sessions",
-    "todos",
-    "subagents",
     "observability",
-    "web-ui"
+    "sessions",
+    "subagents"
+  ],
+  "files": [
+    "server.js",
+    "lib/",
+    "public/",
+    "extensions/",
+    "themes/",
+    "README.md"
   ],
   "license": "MIT",
   "author": "nikiforovall",

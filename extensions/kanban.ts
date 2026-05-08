@@ -1,10 +1,19 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+const extDir = fileURLToPath(new URL(".", import.meta.url));
+const taskStore = createRequire(import.meta.url)(
+	resolvePath(extDir, "..", "lib", "task-store.js"),
+) as {
+	reconcileFromSnapshot: (sessionId: string, snapshot: unknown[]) => void;
+	cleanupIfAllCompleted: (sessionId: string) => boolean;
+};
 
 let child: ChildProcess | null = null;
 let lastStderr = "";
@@ -48,8 +57,10 @@ function buildServerEnv(): NodeJS.ProcessEnv {
 const SUBCOMMANDS = [
 	"start",
 	"stop",
+	"restart",
 	"status",
 	"open",
+	"web",
 	"app",
 	"pin",
 	"sticky-pin",
@@ -91,6 +102,14 @@ async function postPin(id: string, state: "pinned" | "sticky" | "none"): Promise
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ id, state }),
+	});
+}
+
+async function postSessionOpen(id: string): Promise<Response> {
+	return api("/api/session/open", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ id }),
 	});
 }
 
@@ -142,13 +161,107 @@ async function ensureRunning(notify: (msg: string, level: "info" | "error") => v
 }
 
 export default function kanbanExtension(pi: ExtensionAPI) {
-	const here = fileURLToPath(new URL(".", import.meta.url));
-	const serverPath = resolvePath(here, "..", "server.js");
+	const serverPath = resolvePath(extDir, "..", "server.js");
 	const url = `http://localhost:${port}`;
+
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.toolName !== "todo") return;
+		const sessionId = ctx.sessionManager.getSessionId();
+		const tasks = (event.details as any)?.tasks;
+		if (sessionId && Array.isArray(tasks)) {
+			try {
+				taskStore.reconcileFromSnapshot(sessionId, tasks);
+				taskStore.cleanupIfAllCompleted(sessionId);
+			} catch (e: any) { console.warn(`pi-kanban: reconcile failed: ${e?.message ?? e}`); }
+		}
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (!sessionId) return;
+		const branch = ctx.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type !== "message") continue;
+			const msg: any = (entry as any).message;
+			if (msg?.role !== "toolResult" || msg?.toolName !== "todo") continue;
+			const tasks = msg?.details?.tasks;
+			if (!Array.isArray(tasks)) continue;
+			try {
+				taskStore.reconcileFromSnapshot(sessionId, tasks);
+				taskStore.cleanupIfAllCompleted(sessionId);
+			} catch (e: any) { console.warn(`pi-kanban: backfill failed: ${e?.message ?? e}`); }
+			return;
+		}
+	});
+
+	type Notify = (m: string, l?: "info" | "error") => void;
+
+	async function startServer(notify: Notify, opts: { silentSuccess?: boolean } = {}): Promise<boolean> {
+		if (await probePort(port)) {
+			notify(`pi-kanban already listening on ${url} — run /kanban open or /kanban web`);
+			return true;
+		}
+		lastStderr = "";
+		child = spawn(process.execPath, [serverPath], {
+			env: buildServerEnv(),
+			stdio: ["ignore", "ignore", "pipe"],
+			detached: true,
+			windowsHide: true,
+		});
+		child.stderr?.on("data", (b) => {
+			lastStderr += b.toString();
+		});
+		child.on("exit", () => {
+			child = null;
+		});
+
+		if (!(await waitForPort(port))) {
+			notify(
+				`pi-kanban failed to start.\n${lastStderr.slice(-500) || "(no stderr)"}`,
+				"error",
+			);
+			return false;
+		}
+		// Detach: stop holding the child to the parent's lifetime so /kanban survives
+		// when the pi process that ran /kanban start exits.
+		child.stderr?.removeAllListeners("data");
+		child.stderr?.resume();
+		child.unref();
+		if (!opts.silentSuccess) {
+			notify(`pi-kanban started → ${url} — run /kanban open or /kanban web to launch it`);
+		}
+		return true;
+	}
+
+	async function stopServer(notify: Notify, opts: { silentSuccess?: boolean } = {}): Promise<boolean> {
+		if (child) child.kill("SIGINT");
+		child = null;
+
+		if (await probePort(port)) {
+			const pids = findPidsOnPort(port);
+			for (const pid of pids) killPid(pid);
+			await new Promise((r) => setTimeout(r, 300));
+			const stillUp = await probePort(port);
+			if (stillUp) {
+				notify(
+					`port ${port} still in use after killing pids ${pids.join(",") || "?"}`,
+					"error",
+				);
+				return false;
+			}
+			if (!opts.silentSuccess) {
+				notify(`pi-kanban stopped (killed orphan pid${pids.length > 1 ? "s" : ""} ${pids.join(",")})`);
+			}
+			return true;
+		}
+		if (!opts.silentSuccess) notify("pi-kanban stopped");
+		return true;
+	}
 
 	pi.registerCommand("kanban", {
 		description:
-			"pi-kanban dashboard: start | stop | status | open | app | pin | sticky-pin | unpin | preview | link",
+			"pi-kanban dashboard: start | stop | restart | status | open | web | app | pin | sticky-pin | unpin | preview | link",
 		getArgumentCompletions: (prefix) =>
 			SUBCOMMANDS.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
@@ -158,52 +271,19 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			const notify = (m: string, l: "info" | "error" = "info") => ctx.ui.notify(m, l);
 
 			if (sub === "start") {
-				if (await probePort(port)) {
-					notify(`pi-kanban already listening on ${url} — run /kanban open or /kanban app`);
-					return;
-				}
-				lastStderr = "";
-				child = spawn(process.execPath, [serverPath], {
-					env: buildServerEnv(),
-					stdio: ["ignore", "ignore", "pipe"],
-					detached: false,
-				});
-				child.stderr?.on("data", (b) => {
-					lastStderr += b.toString();
-				});
-				child.on("exit", () => {
-					child = null;
-				});
-
-				if (!(await waitForPort(port))) {
-					notify(
-						`pi-kanban failed to start.\n${lastStderr.slice(-500) || "(no stderr)"}`,
-						"error",
-					);
-					return;
-				}
-				notify(`pi-kanban started → ${url} — run /kanban open or /kanban app to launch it`);
+				await startServer(notify);
 				return;
 			}
 
 			if (sub === "stop") {
-				if (child) child.kill("SIGINT");
-				child = null;
+				await stopServer(notify);
+				return;
+			}
 
-				if (await probePort(port)) {
-					const pids = findPidsOnPort(port);
-					for (const pid of pids) killPid(pid);
-					await new Promise((r) => setTimeout(r, 300));
-					const stillUp = await probePort(port);
-					notify(
-						stillUp
-							? `port ${port} still in use after killing pids ${pids.join(",") || "?"}`
-							: `pi-kanban stopped (killed orphan pid${pids.length > 1 ? "s" : ""} ${pids.join(",")})`,
-						stillUp ? "error" : "info",
-					);
-					return;
-				}
-				notify("pi-kanban stopped");
+			if (sub === "restart") {
+				if (!(await stopServer(notify, { silentSuccess: true }))) return;
+				if (!(await startServer(notify, { silentSuccess: true }))) return;
+				notify(`pi-kanban restarted → ${url}`);
 				return;
 			}
 
@@ -215,6 +295,23 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			}
 
 			if (sub === "open") {
+				if (!(await ensureRunning(notify))) return;
+				const id = rest[0] ?? ctx.sessionManager.getSessionId() ?? null;
+				if (!id) {
+					notify("Usage: /kanban open <session-id> (no current session to default to)", "error");
+					return;
+				}
+				const res = await postSessionOpen(id);
+				if (!res.ok) {
+					notify(`open failed (${res.status}): ${await res.text()}`, "error");
+					return;
+				}
+				const usedCurrent = !rest[0];
+				notify(`opened: ${id}${usedCurrent ? " (current)" : ""}`);
+				return;
+			}
+
+			if (sub === "web") {
 				const { default: open } = await import("open");
 				await open(url);
 				return;
