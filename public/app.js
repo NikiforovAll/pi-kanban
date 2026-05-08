@@ -13,7 +13,6 @@ let stableGroupOrder = []; // cached project path order to prevent jumping
 let searchQuery = ''; // Search query for fuzzy search
 let allTasksCache = []; // Cache all tasks for search
 let bulkDeleteSessionId = null; // Track session for bulk delete
-let ownerFilter = '';
 let currentAgents = [];
 let currentWaiting = null;
 let lastAgentsHash = '';
@@ -25,7 +24,6 @@ let agentPollInterval = null;
 let selectedTaskId = null;
 let selectedSessionId = null;
 let focusZone = 'board'; // 'board' | 'sidebar'
-let appConfig = { marketplaceUrl: null, costUrl: null, memoryUrl: null };
 let selectedSessionIdx = -1;
 let selectedSessionKbId = null;
 let sessionJustSelected = false;
@@ -75,7 +73,6 @@ function updateUrl() {
   if (sessionFilter !== 'active') params.set('filter', sessionFilter);
   if (sessionLimit !== '20') params.set('limit', sessionLimit);
   if (filterProject && filterProject !== '__recent__') params.set('project', filterProject);
-  if (ownerFilter) params.set('owner', ownerFilter);
   if (searchQuery) params.set('search', searchQuery);
   if (messagePanelOpen) params.set('messages', '1');
   const qs = params.toString();
@@ -112,7 +109,6 @@ function resetState() {
   sessionFilter = 'active';
   sessionLimit = '20';
   filterProject = '__recent__';
-  ownerFilter = '';
   searchQuery = '';
   viewMode = 'all';
   if (agentLogMode) exitAgentLogMode();
@@ -500,8 +496,7 @@ async function fetchTasks(sessionId) {
     if (currentSessionId && currentSessionId !== sessionId) deferredPinPlacement.delete(currentSessionId);
     currentSessionId = sessionId;
     currentPins = loadPins(sessionId);
-    ownerFilter = '';
-    resetMessageScrollState();
+      resetMessageScrollState();
     for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
     for (const k of Object.keys(teamColorMap)) delete teamColorMap[k];
     sessionJustSelected = true;
@@ -564,11 +559,11 @@ async function fetchAgents(sessionId) {
     const rawAgents = Array.isArray(data) ? data : data.agents || [];
     const agents = rawAgents.filter((a) => !dismissedAgentIds.has(a.agentId));
     currentWaiting = data.waitingForUser || null;
-    const hash = JSON.stringify({ agents, waitingForUser: currentWaiting, teamColors: data.teamColors });
+    const hash = JSON.stringify({ agents, waitingForUser: currentWaiting });
     if (hash === lastAgentsHash) return;
     lastAgentsHash = hash;
     currentAgents = agents;
-    updateTeamColors(agents, data.teamColors);
+    updateTeamColors(agents);
     for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
     renderAgentFooter();
     if (currentSessionId === sessionId) renderKanban();
@@ -612,7 +607,6 @@ async function fetchProjectView(projectPath) {
   currentTasks = tasksResult;
   const seen = new Set();
   currentAgents = [];
-  const mergedColors = {};
   let mergedWaiting = null;
   for (let i = 0; i < agentResults.length; i++) {
     const r = agentResults[i];
@@ -625,11 +619,10 @@ async function fetchProjectView(projectPath) {
         currentAgents.push(a);
       }
     }
-    if (r.teamColors) Object.assign(mergedColors, r.teamColors);
     if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
   }
   currentWaiting = mergedWaiting;
-  Object.assign(teamColorMap, mergedColors);
+  updateTeamColors(currentAgents);
 
   renderProjectView();
   renderAgentFooter();
@@ -662,10 +655,10 @@ async function refreshProjectAgents() {
         currentAgents.push(a);
       }
     }
-    if (r.teamColors) Object.assign(teamColorMap, r.teamColors);
     if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
   }
   currentWaiting = mergedWaiting;
+  updateTeamColors(currentAgents);
   const hash = JSON.stringify({ agents: currentAgents, waiting: currentWaiting });
   if (hash === lastAgentsHash) return;
   lastAgentsHash = hash;
@@ -923,7 +916,7 @@ function renderPinnedSection() {
         const agentLogBtn = agentLogButton(p.agentId);
         const msgTrunc = p.lastMessage
           ? escapeHtml(
-              stripAnsi(stripTeammateWrapper(p.lastMessage.trim()))
+              stripAnsi(p.lastMessage.trim())
                 .replace(/[\r\n]+/g, ' ')
                 .slice(0, 60),
             )
@@ -967,8 +960,7 @@ function renderToolItem(m, i, compact) {
       ? ` <span class="msg-agent-link" title="View agent" onclick="event.stopPropagation();showAgentModal('${escapeHtml(m.agentId)}')">⇗</span>`
       : '';
   const agentLogBtn = resolveAgentLogBtn(m);
-  const recipientColor = m.tool === 'SendMessage' && m.params?.to ? resolveNamedColor(teamColorMap[m.params.to]) : null;
-  const borderStyle = recipientColor ? `border-left:3px solid ${recipientColor.color};` : '';
+  const borderStyle = '';
   const compactClass = compact ? ' msg-tool-grouped' : '';
   const combinedStyle = `style="${borderStyle}cursor:pointer"`;
   const itemClickAttr =
@@ -1040,34 +1032,6 @@ function renderMessageList(messages) {
           ${MSG_ICON_ASSISTANT}
           <div class="msg-body"><div class="msg-text">${escapeHtml(cleanMessageText(m.text))}</div><div class="msg-time">${m.model ? `${escapeHtml(m.model)} · ` : ''}${formatDate(m.timestamp)}</div></div>${pinBtn}
         </div>`);
-    } else if (m.type === 'teammate') {
-      if (m.teammateId && m.color && !teamColorMap[m.teammateId]) teamColorMap[m.teammateId] = m.color;
-      const tmColor = m.color ? resolveNamedColor(m.color)?.color || m.color : '';
-      const nameSpan = `<span class="teammate-name" style="${tmColor ? `color:${escapeHtml(tmColor)}` : ''}">${escapeHtml(m.teammateId || 'teammate')}</span>`;
-      let tmLookupName = m.teammateId;
-      if (m.teammateId === 'system' && m.protocolType === 'teammate_terminated' && m.protocolData?.message) {
-        const shutMatch = m.protocolData.message.match(/^(.+?) has shut down/);
-        if (shutMatch) tmLookupName = shutMatch[1];
-      }
-      const tmAgent = tmLookupName ? currentAgents.find((a) => (a.type || a.name) === tmLookupName) : null;
-      const tmLogBtn = tmAgent ? agentLogButton(tmAgent.agentId) : '';
-      if (m.isIdle) {
-        parts.push(`<div class="msg-item msg-teammate msg-idle" ${clickable}>
-            ${MSG_ICON_IDLE}
-            <div class="msg-body"><div class="msg-text">${nameSpan} <span class="idle-label">${escapeHtml(m.protocolLabel || 'idle')}</span></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}
-          </div>`);
-      } else if (m.isProtocol) {
-        parts.push(`<div class="msg-item msg-teammate msg-protocol" ${clickable}>
-            ${MSG_ICON_TEAMMATE}
-            <div class="msg-body"><div class="msg-text">${nameSpan} <span class="protocol-label">${escapeHtml(m.protocolLabel || m.protocolType)}</span></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}
-          </div>`);
-      } else {
-        const summaryText = m.summary ? escapeHtml(m.summary) : escapeHtml((m.text || '').slice(0, 80));
-        parts.push(`<div class="msg-item msg-teammate" ${clickable}>
-            ${MSG_ICON_TEAMMATE}
-            <div class="msg-body"><div class="msg-text">${nameSpan} ${summaryText}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}${pinBtn}
-          </div>`);
-      }
     }
     i++;
   }
@@ -1121,7 +1085,7 @@ const MSG_ICON_TOOL =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
 const MSG_ICON_SYSTEM =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
-const MSG_ICON_TEAMMATE =
+const MSG_ICON_AGENT =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
 const MSG_ICON_IDLE =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6"/></svg>';
@@ -1137,7 +1101,7 @@ const TOOL_ICONS = {
   Edit: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
   Glob: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><circle cx="14" cy="14" r="3"/><line x1="16.5" y1="16.5" x2="19" y2="19"/></svg>',
   Grep: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
-  Agent: MSG_ICON_TEAMMATE,
+  Agent: MSG_ICON_AGENT,
   SendMessage:
     '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
   TaskCreate: ICON_TASK,
@@ -1437,10 +1401,6 @@ function _renderPinToDetail(pin) {
 }
 
 const SESSION_PIN_SVG = PIN_SVG.replace('width="14" height="14"', 'width="12" height="12"');
-const MARKETPLACE_SVG =
-  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 01-8 0"/></svg>';
-const MEMORY_SVG =
-  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>';
 const LINK_SVG_PATHS =
   '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>';
 const linkSvg = (size) =>
@@ -1507,17 +1467,6 @@ function showMsgDetail(idx) {
       mainHtml = TASK_TOOLS.has(m.tool) ? '' : '<em>No details</em>';
     }
     body.innerHTML = mainHtml + toolParamsHtml + taskResultHtml + (hasAgentTabs ? '' : toolResultHtml) + agentExtraHtml;
-  } else if (m.type === 'teammate') {
-    document.getElementById('msg-detail-title').textContent = m.teammateId || 'Teammate';
-    document.getElementById('msg-detail-agent-btn').style.display = 'none';
-    if (m.isProtocol) {
-      body.innerHTML = m.protocolData
-        ? renderProtocolDetail(m.protocolData)
-        : `<div class="teammate-idle-detail"><span class="protocol-label">${escapeHtml(m.protocolLabel || m.protocolType)}</span></div>`;
-    } else {
-      const text = stripAnsi(m.fullText || m.text || '');
-      body.innerHTML = renderMarkdown(text);
-    }
   } else {
     const rawText = stripAnsi(m.fullText || m.text);
     const cmd = m.type === 'user' ? parseCommandMessage(rawText) : null;
@@ -2043,7 +1992,7 @@ function renderAgentFooter() {
               ? `idle · ${formatDuration(elapsed)}`
               : `active · ${formatDuration(elapsed)}`;
         const descText = a.description || '';
-        const promptTrimmed = stripAnsi(stripTeammateWrapper((a.prompt || '').trim())).replace(/[\r\n]+/g, ' ');
+        const promptTrimmed = stripAnsi((a.prompt || '').trim()).replace(/[\r\n]+/g, ' ');
         const displayText = descText || promptTrimmed;
         const displayTrunc = displayText.length > 60 ? `${displayText.substring(0, 60)}…` : displayText;
         const msgHtml = displayTrunc
@@ -2194,7 +2143,7 @@ function showAgentModal(agentId) {
 
   let html = `<div class="agent-chips">${chips.join('')}</div>`;
 
-  const promptText = stripTeammateWrapper(agentMsg?.agentPrompt || agent.prompt || null);
+  const promptText = agentMsg?.agentPrompt || agent.prompt || null;
   const rawResponse = agent.lastMessage || agentMsg?.agentLastMessage || null;
   const responseText = rawResponse ? stripAnsi(rawResponse.trim()) : null;
   _agentModalPromptText = promptText;
@@ -2251,8 +2200,7 @@ async function showAllTasks() {
     viewMode = 'all';
     if (agentLogMode) exitAgentLogMode();
     currentSessionId = null;
-    ownerFilter = '';
-    resetAgentState();
+      resetAgentState();
     const res = await fetch('/api/tasks/all');
     allTasksCache = await res.json();
     let tasks = allTasksCache;
@@ -2272,8 +2220,6 @@ async function showAllTasks() {
 function renderAllTasks() {
   noSession.style.display = 'none';
   sessionView.classList.add('visible');
-  document.getElementById('owner-filter-bar').classList.remove('visible');
-
   const visibleTasks = currentTasks.filter((t) => !isInternalTask(t));
   const totalTasks = visibleTasks.length;
   const completed = visibleTasks.filter((t) => t.status === 'completed').length;
@@ -2422,9 +2368,6 @@ function renderSessions() {
         ? `Created ${createdDisplay} · Modified ${modifiedDisplay}`
         : modifiedDisplay;
     const tooltip = [session.id, timeDisplay, gitBranch ? `Branch: ${gitBranch}` : ''].filter(Boolean).join(' | ');
-    const isTeam = session.isTeam;
-    const memberCount = session.memberCount || 0;
-
     const pinState = getSessionPinState(session.id);
     const pinClass = pinState === 'sticky' ? ' sticky' : pinState === 'pinned' ? ' pinned' : '';
     const pinTitle =
@@ -2442,17 +2385,14 @@ function renderSessions() {
             ${session.planTitle ? `<div class="session-plan">${escapeHtml(session.planTitle)}</div>` : ''}
             <div class="session-progress">
               <span class="session-indicators">
-                ${isTeam ? `<span class="team-badge" title="${memberCount} team members"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>${memberCount}</span>` : ''}
                 ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
-                ${isTeam || session.project || showCtx ? `<span class="team-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${session.id}')" title="View session info">ℹ</span>` : ''}
+                ${session.project || showCtx ? `<span class="session-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${session.id}')" title="View session info">ℹ</span>` : ''}
                 ${session.hasPlan ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${session.id}')" title="View plan"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
                 ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${session.id}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
                 ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${session.id}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>${bookmarksCount}</span>` : ''}
                 ${session.hasRunningAgents ? '<span class="agent-badge" title="Active agents">🤖</span>' : ''}
                 ${session.planSourceSessionId ? `<span class="plan-indicator" title="Implements plan — click to reveal plan session" onclick="event.stopPropagation(); revealPlanSession('${escapeHtml(session.planSourceSessionId)}')">📋</span>` : ''}
                 ${session.hasWaitingForUser ? '<span class="agent-badge" title="Waiting for user">❓</span>' : ''}
-                ${(window.__HUB__?.enabled || appConfig.marketplaceUrl) && session.project ? `<span class="marketplace-btn" data-project-path="${escapeHtml(session.project)}" onclick="event.stopPropagation(); openMarketplace(this.dataset.projectPath)" title="Open in Marketplace">${MARKETPLACE_SVG}</span>` : ''}
-                ${(window.__HUB__?.enabled || appConfig.memoryUrl) && session.project ? `<span class="marketplace-btn" data-project-path="${escapeHtml(session.project)}" onclick="event.stopPropagation(); openMemory(this.dataset.projectPath)" title="Open in Memory">${MEMORY_SVG}</span>` : ''}
                 ${isLive ? '<span class="pulse"></span>' : ''}
               </span>
               <div class="progress-bar"><div class="progress-fill" style="width: ${percent}%"></div></div>
@@ -2677,7 +2617,6 @@ function renderSession() {
   const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
-  updateOwnerFilter();
   renderKanban();
   renderSessions();
 }
@@ -2701,7 +2640,6 @@ function renderProjectView() {
   const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
-  updateOwnerFilter();
   renderKanban();
   renderSessions();
 }
@@ -2753,10 +2691,7 @@ function renderTaskCard(task) {
 
 //#region KANBAN
 function renderKanban() {
-  let filtered = currentTasks.filter((t) => !isInternalTask(t));
-  if (ownerFilter) {
-    filtered = filtered.filter((t) => t.owner === ownerFilter);
-  }
+  const filtered = currentTasks.filter((t) => !isInternalTask(t));
   const pending = filtered.filter((t) => t.status === 'pending');
   const inProgress = filtered.filter((t) => t.status === 'in_progress');
   const completed = filtered.filter((t) => t.status === 'completed');
@@ -3856,7 +3791,7 @@ const MODAL_CLOSERS = {
     msgDetailFollowLatest = false;
   },
   'plan-modal': () => closePlanModal(),
-  'team-modal': () => closeTeamModal(),
+  'session-info-modal': () => closeSessionInfoModal(),
   'agent-modal': () => closeAgentModal(),
   'help-modal': () => closeHelpModal(),
 };
@@ -4052,23 +3987,6 @@ document.addEventListener('keydown', (e) => {
     toggleScratchpad();
     return;
   }
-  if (e.key === '$' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-    e.preventDefault();
-    hubNavigate('cost', contextSid ? `?view=detail&session=${encodeURIComponent(contextSid)}` : undefined);
-    return;
-  }
-  if (matchKey(e, 'KeyM')) {
-    e.preventDefault();
-    const mSession = contextSid ? sessions.find((s) => s.id === contextSid) : null;
-    hubNavigate('marketplace', mSession?.project ? `?project=${encodeURIComponent(mSession.project)}` : undefined);
-    return;
-  }
-  if (e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.key === 'm') {
-    e.preventDefault();
-    const mSession = contextSid ? sessions.find((s) => s.id === contextSid) : null;
-    hubNavigate('memory', mSession?.project ? `?project=${encodeURIComponent(mSession.project)}` : undefined);
-    return;
-  }
   if (e.code === 'KeyC' && e.shiftKey) {
     e.preventDefault();
     if (!contextSid) {
@@ -4230,7 +4148,7 @@ function togglePreviewSessionLink() {
 }
 
 function refreshInfoModalLinkedDocs() {
-  const bodyEl = document.getElementById('team-modal-body');
+  const bodyEl = document.getElementById('session-info-modal-body');
   if (!bodyEl) return;
   const existing = bodyEl.querySelector('.linked-docs-section');
   const html = renderLinkedDocsHtml(_infoModalSessionId);
@@ -4529,14 +4447,6 @@ function setupEventSource() {
         fetchTasks(currentSessionId).catch(() => {});
       }
 
-      if (data.type === 'team-update') {
-        const teamSession = sessions.find((s) => s.isTeam && s.teamName === data.teamName);
-        if (teamSession) {
-          debouncedRefresh(teamSession.id, false);
-        } else if (currentSessionId) {
-          debouncedRefresh(currentSessionId, false);
-        }
-      }
     };
   }
 
@@ -4732,12 +4642,6 @@ function stripAnsi(text) {
   return typeof text === 'string' ? text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '') : text;
 }
 
-function stripTeammateWrapper(text) {
-  if (typeof text !== 'string') return text;
-  const match = text.match(/^<teammate-message[^>]*>\n?([\s\S]*?)(?:<\/teammate-message>\s*)?$/);
-  return match ? match[1].trim() : text;
-}
-
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
@@ -4899,8 +4803,7 @@ function resolveNamedColor(colorName) {
   return namedColorMap[colorName.toLowerCase()] || null;
 }
 
-function updateTeamColors(agents, colors) {
-  if (colors) Object.assign(teamColorMap, colors);
+function updateTeamColors(agents) {
   for (const a of agents) {
     const name = a.type || a.name;
     if (name && a.color) teamColorMap[name] = a.color;
@@ -5078,7 +4981,7 @@ const THEME_COLOR_TO_VAR = {
   textPrimary: '--text-primary', textSecondary: '--text-secondary',
   textTertiary: '--text-tertiary', textMuted: '--text-muted',
   accent: '--accent', accentText: '--accent-text',
-  success: '--success', warning: '--warning', team: '--team', plan: '--plan',
+  success: '--success', warning: '--warning', plan: '--plan',
 };
 
 let _themeCache = { light: null, dark: null };
@@ -5109,7 +5012,6 @@ function applyTheme(theme) {
   set('--accent-glow', _rgba(c.accent, accentGlowAlpha));
   set('--success-dim', _rgba(c.success, dimAlpha));
   set('--warning-dim', _rgba(c.warning, dimAlpha));
-  set('--team-dim', _rgba(c.team, dimAlpha));
   set('--plan-dim', _rgba(c.plan, dimAlpha));
 }
 
@@ -5292,25 +5194,16 @@ async function showSessionInfoModal(sessionId) {
   const session = sessions.find((s) => s.id === sessionId);
   if (!session) return;
 
-  // Open modal immediately with session metadata (cwd / path / branch are
-  // already in-memory). Plan / team / tasks are fetched in the background
-  // and re-rendered when they arrive, so the modal doesn't block on network.
   _planSessionId = sessionId;
   const cachedTasks = currentSessionId === sessionId ? currentTasks : [];
-  showInfoModal(session, null, cachedTasks, null);
+  showInfoModal(session, cachedTasks, null);
 
-  const rerender = (teamConfig, tasks, planContent) => {
-    if (_planSessionId !== sessionId) return; // user opened a different modal
-    const modal = document.getElementById('team-modal');
-    if (!modal?.classList.contains('visible')) return; // user closed modal — don't reopen
-    showInfoModal(session, teamConfig, tasks, planContent);
+  const rerender = (tasks, planContent) => {
+    if (_planSessionId !== sessionId) return;
+    const modal = document.getElementById('session-info-modal');
+    if (!modal?.classList.contains('visible')) return;
+    showInfoModal(session, tasks, planContent);
   };
-
-  const teamPromise = session.isTeam
-    ? fetch(`/api/teams/${session.teamName || sessionId}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null)
-    : Promise.resolve(null);
 
   const planPromise = fetch(`/api/sessions/${sessionId}/plan`)
     .then((r) => (r.ok ? r.json() : null))
@@ -5324,8 +5217,8 @@ async function showSessionInfoModal(sessionId) {
           .then((r) => (r.ok ? r.json() : []))
           .catch(() => []);
 
-  const [teamConfig, planContent, tasks] = await Promise.all([teamPromise, planPromise, tasksPromise]);
-  rerender(teamConfig, tasks, planContent);
+  const [planContent, tasks] = await Promise.all([planPromise, tasksPromise]);
+  rerender(tasks, planContent);
 }
 
 let _infoModalSessionId = null;
@@ -5342,14 +5235,12 @@ function updateStickyBtnState() {
   if (svg) svg.setAttribute('fill', isSticky ? 'currentColor' : 'none');
 }
 
-function showInfoModal(session, teamConfig, tasks, planContent) {
-  const modal = document.getElementById('team-modal');
-  const titleEl = document.getElementById('team-modal-title');
-  const bodyEl = document.getElementById('team-modal-body');
+function showInfoModal(session, tasks, planContent) {
+  const modal = document.getElementById('session-info-modal');
+  const titleEl = document.getElementById('session-info-modal-title');
+  const bodyEl = document.getElementById('session-info-modal-body');
 
-  const titleText = teamConfig
-    ? `Team: ${teamConfig.team_name || teamConfig.name || 'Unknown'}`
-    : session.name || session.slug || session.id;
+  const titleText = session.name || session.slug || session.id;
   titleEl.innerHTML =
     escapeHtml(titleText) +
     (session.modifiedAt
@@ -5385,15 +5276,11 @@ function showInfoModal(session, teamConfig, tasks, planContent) {
   if (session.sharedTaskList) {
     infoRows.push(['Shared Tasks', session.sharedTaskList]);
   }
-  if (teamConfig?.configPath) {
-    const configDir = teamConfig.configPath.replace(/[/\\][^/\\]+$/, '');
-    infoRows.push(['Team Config', teamConfig.configPath, { openPath: configDir, openFile: teamConfig.configPath }]);
-  }
   const clickableStyle =
     "font-family: 'IBM Plex Mono', monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--accent-text); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;";
   const plainStyle =
     "font-family: 'IBM Plex Mono', monospace; font-size: 12px; user-select: all; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;";
-  html += `<div class="team-modal-meta" style="margin-bottom: 16px; display: grid; grid-template-columns: auto 1fr auto; gap: 6px 12px; align-items: center;">`;
+  html += `<div class="session-info-modal-meta" style="margin-bottom: 16px; display: grid; grid-template-columns: auto 1fr auto; gap: 6px 12px; align-items: center;">`;
   infoRows.forEach(([label, value, opts]) => {
     const copyVal = escapeHtml(value).replace(/"/g, '&quot;');
     html += `<span style="font-weight: 500; color: var(--text-secondary); font-size: 12px; white-space: nowrap;">${label}</span>`;
@@ -5430,67 +5317,12 @@ function showInfoModal(session, teamConfig, tasks, planContent) {
 
   html += renderLinkedDocsHtml(session.id);
 
-  // Team info section
-  if (teamConfig) {
-    const ownerCounts = {};
-    const memberDescriptions = {};
-    tasks.forEach((t) => {
-      if (isInternalTask(t) && t.subject) {
-        memberDescriptions[t.subject] = t.description;
-      } else if (t.owner) {
-        ownerCounts[t.owner] = (ownerCounts[t.owner] || 0) + 1;
-      }
-    });
-
-    const members = teamConfig.members || [];
-    const description = teamConfig.description || '';
-    const lead = members.find((m) => m.agentType === 'team-lead' || m.name === 'team-lead');
-
-    if (description) {
-      html += `<div class="team-modal-desc">"${escapeHtml(description)}"</div>`;
-    }
-
-    html += `<div style="font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-bottom: 10px;">Members (${members.length})</div>`;
-
-    members.forEach((member) => {
-      const taskCount = ownerCounts[member.name] || 0;
-      const memberDesc = memberDescriptions[member.name];
-      const mc = resolveNamedColor(member.color);
-      const borderStyle = mc ? ` style="border-left:3px solid ${mc.color}"` : '';
-      const nameStyle = mc ? ` style="color:${mc.color}"` : '';
-      html += `
-            <div class="team-member-card"${borderStyle}>
-              <div class="member-name"${nameStyle}>${escapeHtml(member.name)}</div>
-              ${member.model ? `<div class="member-detail">Model: ${escapeHtml(member.model)}</div>` : ''}
-              ${memberDesc ? `<div class="member-detail" style="margin-top: 4px; font-style: italic; color: var(--text-secondary);">${escapeHtml(memberDesc.split('\n')[0])}</div>` : ''}
-              <div class="member-tasks">Tasks: ${taskCount} assigned</div>
-            </div>
-          `;
-    });
-
-    const metaParts = [];
-    if (teamConfig.created_at) {
-      metaParts.push(`Created: ${new Date(teamConfig.created_at).toLocaleString()}`);
-    }
-    if (lead) {
-      metaParts.push(`Lead: ${lead.name}`);
-    }
-    if (teamConfig.working_dir) {
-      metaParts.push(`Working dir: ${teamConfig.working_dir}`);
-    }
-    if (metaParts.length > 0) {
-      html += `<div class="team-modal-meta">${metaParts.map((p) => escapeHtml(p)).join('<br>')}</div>`;
-    }
-  }
-
   bodyEl.innerHTML = html;
   bindLinkedDocsHandlers(bodyEl, session.id);
   const alreadyVisible = modal.classList.contains('visible');
   _infoModalSessionId = session.id;
   updateStickyBtnState();
   updateDismissBtnState();
-  const costBtn = document.getElementById('session-info-cost-btn');
-  if (costBtn) costBtn.style.display = window.__HUB__?.enabled || appConfig.costUrl ? '' : 'none';
   modal.classList.add('visible');
 
   if (alreadyVisible) return; // re-render during deferred hydration — key handler already attached
@@ -5499,15 +5331,15 @@ function showInfoModal(session, teamConfig, tasks, planContent) {
     if (e.key === 'Escape') {
       if (document.getElementById('plan-modal').classList.contains('visible')) return;
       e.preventDefault();
-      closeTeamModal();
+      closeSessionInfoModal();
       document.removeEventListener('keydown', keyHandler);
     }
   };
   document.addEventListener('keydown', keyHandler);
 }
 
-function closeTeamModal() {
-  document.getElementById('team-modal').classList.remove('visible');
+function closeSessionInfoModal() {
+  document.getElementById('session-info-modal').classList.remove('visible');
   _planSessionId = null;
 }
 
@@ -5594,85 +5426,6 @@ function openFolderInEditor(folder, file) {
   if (folder) body.folder = folder;
   if (file) body.file = file;
   postAndToast('/api/open-folder', body, 'folder');
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openCost(sessionId) {
-  if (window.__HUB__?.enabled) {
-    hubNavigate('cost', `?view=detail&session=${encodeURIComponent(sessionId)}`);
-  } else if (appConfig.costUrl) {
-    window.open(`${appConfig.costUrl}?view=detail&session=${encodeURIComponent(sessionId)}`, '_blank');
-  }
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openMarketplace(projectPath) {
-  const params = new URLSearchParams({ project: projectPath });
-  if (window.__HUB__?.enabled) {
-    hubNavigate('marketplace', `?${params}`);
-  } else if (appConfig.marketplaceUrl) {
-    const url = new URL(appConfig.marketplaceUrl);
-    url.search = params.toString();
-    window.open(url.toString(), '_blank');
-  }
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openMemory(projectPath) {
-  const params = new URLSearchParams({ project: projectPath });
-  if (window.__HUB__?.enabled) {
-    hubNavigate('memory', `?${params}`);
-  } else if (appConfig.memoryUrl) {
-    const url = new URL(appConfig.memoryUrl);
-    url.search = params.toString();
-    window.open(url.toString(), '_blank');
-  }
-}
-
-//#endregion
-
-//#region OWNER_FILTER
-function updateOwnerFilter() {
-  const bar = document.getElementById('owner-filter-bar');
-  const select = document.getElementById('owner-filter');
-
-  const session = sessions.find((s) => s.id === currentSessionId);
-  if (!session?.isTeam) {
-    bar.classList.remove('visible');
-    return;
-  }
-
-  bar.classList.add('visible');
-  const owners = [
-    ...new Set(
-      currentTasks
-        .filter((t) => !isInternalTask(t))
-        .map((t) => t.owner)
-        .filter(Boolean),
-    ),
-  ].sort();
-  select.innerHTML =
-    '<option value="">All Members</option>' +
-    owners
-      .map((o) => {
-        const c = getOwnerColor(o);
-        return `<option value="${escapeHtml(o)}" style="color:${c.color};background:${c.bg}"${o === ownerFilter ? ' selected' : ''}>${escapeHtml(o)}</option>`;
-      })
-      .join('');
-  const current = ownerFilter ? getOwnerColor(ownerFilter) : null;
-  select.style.color = current ? current.color : '';
-  select.style.backgroundColor = current ? current.bg : '';
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function filterByOwner(value) {
-  ownerFilter = value;
-  const select = document.getElementById('owner-filter');
-  const c = value ? getOwnerColor(value) : null;
-  select.style.color = c ? c.color : '';
-  select.style.backgroundColor = c ? c.bg : '';
-  updateUrl();
-  renderKanban();
 }
 
 //#endregion
@@ -5864,7 +5617,6 @@ const urlState = getUrlState();
 sessionFilter = urlState.filter || 'active';
 sessionLimit = urlState.limit || '20';
 filterProject = urlState.project || '__recent__';
-ownerFilter = urlState.owner || '';
 searchQuery = urlState.search || '';
 
 loadPreferences();
@@ -5877,22 +5629,7 @@ if (urlState.search) {
   document.getElementById('search-clear-btn').classList.add('visible');
 }
 
-Promise.all([
-  fetch('/hub-config')
-    .then((r) => r.json())
-    .then((cfg) => {
-      if (!cfg.enabled) return;
-      window.__HUB__ = cfg;
-    })
-    .catch(() => {}),
-  fetch('/api/config')
-    .then((r) => r.json())
-    .then((c) => {
-      appConfig = c;
-    })
-    .catch(() => {}),
-])
-  .then(() => fetchSessions())
+fetchSessions()
   .then(async () => {
     if (urlState.projectView) {
       try {
@@ -5932,7 +5669,6 @@ window.addEventListener('popstate', () => {
   sessionFilter = s.filter || 'active';
   sessionLimit = s.limit || '20';
   filterProject = s.project || '__recent__';
-  ownerFilter = s.owner || '';
   searchQuery = s.search || '';
   loadPreferences();
   if (s.projectView) {
@@ -5947,60 +5683,3 @@ window.addEventListener('popstate', () => {
 });
 //#endregion
 
-// #region HUB_INTEGRATION
-document.addEventListener('keydown', (e) => {
-  if (!window.__HUB__?.enabled) return;
-  if (e.ctrlKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-    e.preventDefault();
-    window.parent?.postMessage({ type: 'hub:keydown', key: e.key }, '*');
-  }
-  if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
-    e.preventDefault();
-    window.parent?.postMessage({ type: 'hub:keydown', key: e.key }, '*');
-  }
-});
-
-document.addEventListener('click', (e) => {
-  if (!window.__HUB__?.enabled) return;
-  const a = e.target.closest?.('a[href]');
-  if (!a) return;
-  const href = a.getAttribute('href');
-  if (!href) return;
-  let url;
-  try {
-    url = new URL(href, window.location.href);
-  } catch (_) {
-    return;
-  }
-  if (url.origin === window.location.origin) return;
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-  e.preventDefault();
-  e.stopPropagation();
-  window.parent?.postMessage({ type: 'hub:openExternal', url: url.href }, '*');
-});
-
-window.hubNavigate = function hubNavigate(app, url) {
-  if (!window.__HUB__?.enabled) return;
-  window.parent?.postMessage({ type: 'hub:navigate', app, url }, '*');
-};
-
-(function initHubTheme() {
-  const getTheme = () => (document.body.classList.contains('light') ? 'light' : 'dark');
-  const hubOrigin = () => (window.__HUB__?.url ? new URL(window.__HUB__.url).origin : null);
-  let lastTheme = getTheme();
-  window.addEventListener('message', (e) => {
-    if (e.source !== window.parent || e.origin !== hubOrigin()) return;
-    if (e.data?.type !== 'hub:theme') return;
-    if (getTheme() === e.data.theme) return;
-    window.toggleTheme();
-    lastTheme = getTheme();
-  });
-  new MutationObserver(() => {
-    const t = getTheme();
-    if (t === lastTheme) return;
-    lastTheme = t;
-    const origin = hubOrigin();
-    if (origin) window.parent.postMessage({ type: 'hub:theme', theme: t }, origin);
-  }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
-})();
-// #endregion HUB_INTEGRATION

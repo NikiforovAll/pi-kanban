@@ -58,7 +58,7 @@ const REQUIRED_COLOR_KEYS = [
   'border',
   'textPrimary', 'textSecondary', 'textTertiary', 'textMuted',
   'accent', 'accentText',
-  'success', 'warning', 'team', 'plan',
+  'success', 'warning', 'plan',
 ];
 
 const themes = new Map();
@@ -113,7 +113,6 @@ const empty = (_req, res) => res.json([]);
 const emptyObj = (_req, res) => res.json({});
 
 app.get('/api/version', (_req, res) => res.json({ version: '0.1.0', name: 'pi-kanban' }));
-app.get('/api/config', (_req, res) => res.json({}));
 
 function resolveActiveTheme(mode) {
   const requestedId = mode === 'light' ? LIGHT_THEME_ID : DARK_THEME_ID;
@@ -183,7 +182,7 @@ app.get('/api/sessions/:id/agents', async (req, res) => {
   if (!meta) return res.status(404).json({ agents: [], error: 'not found' });
   try {
     const agents = await parsers.listAgentsForSession(meta);
-    res.json({ agents, waitingForUser: null, teamColors: {} });
+    res.json({ agents, waitingForUser: null });
   } catch (err) {
     res.status(500).json({ agents: [], error: String(err) });
   }
@@ -256,7 +255,6 @@ app.delete('/api/sessions/:id/tasks/:taskId', (req, res) => {
   } catch (err) { res.status(500).json({ error: String(err) }); }
 });
 
-app.get('/api/teams/:name', emptyObj);
 app.get('/api/context-status', emptyObj);
 
 async function readMarkdownFile(absPath) {

@@ -91,13 +91,12 @@ Drop a JSON file in `~/.pi/agent/kanban/themes/` (or your configured `themes.dir
     "accentText": "#8fb6d8",
     "success": "#4ade80",
     "warning": "#fbbf24",
-    "team": "#60a5fa",
     "plan": "#c084fc"
   }
 }
 ```
 
-Required fields: `name`, `mode` (`"light"` or `"dark"`), and all 15 `colors.*` keys. Themes failing validation are skipped with a server-side warning.
+Required fields: `name`, `mode` (`"light"` or `"dark"`), and all 14 `colors.*` keys. Themes failing validation are skipped with a server-side warning.
 
 Reference it from `~/.pi/agent/kanban/settings.json`:
 

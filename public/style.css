@@ -22,8 +22,6 @@
   --success-dim: rgba(62, 207, 142, 0.18);
   --warning: #f0b429;
   --warning-dim: rgba(240, 180, 41, 0.18);
-  --team: #60a5fa;
-  --team-dim: rgba(96, 165, 250, 0.18);
   --plan: #86a886;
   --plan-dim: rgba(134, 168, 134, 0.18);
   --mono: 'IBM Plex Mono', monospace;
@@ -1124,11 +1122,11 @@ body::before {
 .task-card.selected,
 .task-card.selected:hover {
   background: var(--bg-elevated);
-  border-color: var(--team);
-  border-left: 2px solid var(--team);
+  border-color: var(--accent);
+  border-left: 2px solid var(--accent);
   box-shadow:
-    0 0 0 1px var(--team-dim),
-    0 0 12px var(--team-dim);
+    0 0 0 1px var(--accent-dim),
+    0 0 12px var(--accent-dim);
   opacity: 1;
 }
 
@@ -1406,9 +1404,9 @@ body::before {
 }
 
 .detail-box.blocks {
-  background: var(--team-dim);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  color: var(--team);
+  background: var(--accent-dim);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
 }
 
 .detail-desc {
@@ -1609,26 +1607,12 @@ body::before {
 
 /* #endregion */
 
-/* #region TEAM_BADGE */
+/* #region SESSION_INDICATORS */
 .session-indicators {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-}
-
-.team-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.team-badge .member-count {
-  font-weight: 600;
 }
 
 .shared-tasklist-badge {
@@ -1638,7 +1622,7 @@ body::before {
   flex-shrink: 0;
 }
 
-.team-info-btn {
+.session-info-btn {
   width: 24px;
   height: 24px;
   display: inline-flex;
@@ -1648,15 +1632,15 @@ body::before {
   background: var(--bg-deep);
   border: 1px solid transparent;
   border-radius: 4px;
-  color: var(--team);
+  color: var(--accent);
   cursor: pointer;
   flex-shrink: 0;
   transition: all 0.15s ease;
 }
 
-.team-info-btn:hover {
-  background: var(--team-dim);
-  border-color: var(--team);
+.session-info-btn:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
 }
 
 .plan-indicator {
@@ -1696,50 +1680,21 @@ body::before {
 
 /* #endregion */
 
-/* #region TEAM_MODAL */
-.team-member-card {
-  padding: 12px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 8px;
-}
-
-.team-member-card .member-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.team-member-card .member-detail {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  margin-top: 4px;
-}
-
-.team-member-card .member-tasks {
-  font-size: 11px;
-  color: var(--accent);
-  margin-top: 4px;
-}
-
-#team-modal .modal {
+/* #region SESSION_INFO_MODAL */
+#session-info-modal .modal {
   max-width: 860px;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
 }
-#team-modal .modal-body,
+#session-info-modal .modal-body,
 #agent-modal .modal-body {
   flex: 1 1 auto;
   overflow-y: auto;
   min-height: 0;
   padding-right: 8px;
 }
-#team-modal .modal-footer {
+#session-info-modal .modal-footer {
   flex-shrink: 0;
 }
 
@@ -1798,47 +1753,12 @@ body::before {
   color: rgb(220, 60, 60);
   border-color: rgba(239, 68, 68, 0.3);
 }
-.team-modal-desc {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-style: italic;
-  margin-bottom: 16px;
-}
-
-.team-modal-meta {
+.session-info-modal-meta {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
-}
-
-/* #endregion */
-
-/* #region OWNER_FILTER */
-.kanban {
-  position: relative;
-}
-
-.owner-filter-bar {
-  display: none;
-  position: absolute;
-  top: 24px;
-  right: 24px;
-  z-index: 2;
-}
-
-.owner-filter-bar.visible {
-  display: flex;
-  align-items: center;
-}
-
-.owner-filter-bar .filter-dropdown {
-  flex: none;
-  width: auto;
-  max-width: 180px;
-  font-size: 13px;
-  padding: 6px 10px;
 }
 
 /* #endregion */
@@ -1906,7 +1826,7 @@ body::before {
   border-left: 3px solid var(--accent);
 }
 .msg-item.msg-tool {
-  border-left: 3px solid var(--team);
+  border-left: 3px solid var(--text-muted);
   font-size: 11px;
   padding: 5px 10px;
   color: var(--text-secondary);
@@ -2299,36 +2219,6 @@ body::before {
   background: none;
   padding: 0;
   font-size: 11px;
-}
-.msg-item.msg-teammate {
-  border-left: 3px solid var(--team);
-}
-.msg-item.msg-protocol {
-  border-left: 3px solid var(--border);
-  opacity: 0.7;
-}
-.msg-item.msg-idle {
-  border-left: 3px solid var(--border);
-  opacity: 0.75;
-}
-.msg-item.msg-idle .msg-icon {
-  width: 12px;
-  height: 12px;
-}
-.teammate-name {
-  font-weight: 600;
-  font-size: 11px;
-}
-.idle-label,
-.protocol-label {
-  font-size: 10px;
-  color: var(--text-muted);
-  font-style: italic;
-}
-.teammate-idle-detail {
-  padding: 12px;
-  text-align: center;
-  color: var(--text-muted);
 }
 .msg-time {
   font-size: 10px;
@@ -3574,22 +3464,6 @@ pre.mermaid svg {
   color: var(--accent);
 }
 
-.marketplace-btn {
-  color: #888;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  transition:
-    color 0.15s,
-    filter 0.15s;
-  border-radius: 3px;
-}
-
-.marketplace-btn:hover {
-  color: var(--accent);
-  filter: drop-shadow(0 0 3px var(--accent));
-}
-
 .project-group-header .group-count {
   font-weight: 400;
   color: var(--text-muted);
@@ -3758,8 +3632,8 @@ pre.mermaid svg {
 .session-item.kb-selected:hover,
 .session-item.active.kb-selected {
   background: var(--bg-elevated);
-  border-color: var(--team);
-  box-shadow: 0 0 0 1px var(--team-dim);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-dim);
 }
 
 .session-item.kb-selected::before {
