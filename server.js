@@ -274,6 +274,9 @@ async function readMarkdownFile(absPath) {
 
 function resolvePreviewPath(filePath, base) {
   if (!filePath || typeof filePath !== 'string') return null;
+  if (filePath === '~' || filePath.startsWith('~/') || filePath.startsWith('~\\')) {
+    filePath = path.join(os.homedir(), filePath.slice(1));
+  }
   if (path.isAbsolute(filePath)) return filePath;
   if (base && typeof base === 'string' && path.isAbsolute(base)) {
     let baseDir = base;

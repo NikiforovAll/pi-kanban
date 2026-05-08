@@ -361,7 +361,11 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					notify("Usage: /kanban link <file.md> <session-id> (no current session to default to)", "error");
 					return;
 				}
-				const abs = isAbsolute(file) ? file : resolvePath(process.cwd(), file);
+				const expanded =
+					file === "~" || file.startsWith("~/") || file.startsWith("~\\")
+						? joinPath(homedir(), file.slice(1))
+						: file;
+				const abs = isAbsolute(expanded) ? expanded : resolvePath(process.cwd(), expanded);
 				const res = await postPreview(abs, sessionId, sub === "link");
 				if (!res.ok) {
 					notify(`${sub} failed (${res.status}): ${await res.text()}`, "error");
