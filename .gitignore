@@ -15,10 +15,7 @@ pnpm-debug.log*
 tmp/
 
 # Benchmark fixture snapshot (large; regenerated locally), result history, and goldens (tied to local snapshot)
-bench/.pi/
-bench/results/
-bench/golden/
-
+bench
 # Env / secrets
 .env
 .env.*
@@ -35,3 +32,7 @@ Thumbs.db
 dist/
 build/
 coverage/
+
+# VitePress
+docs/.vitepress/dist/
+docs/.vitepress/cache/

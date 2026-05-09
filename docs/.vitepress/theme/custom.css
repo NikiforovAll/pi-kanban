@@ -1,0 +1,58 @@
+/* pi-dark theme palette mapped to VitePress design tokens */
+:root {
+  --vp-c-brand-1: #8fb6d8;
+  --vp-c-brand-2: #6a9fcc;
+  --vp-c-brand-3: #6a9fcc;
+  --vp-c-brand-soft: rgba(106, 159, 204, 0.16);
+}
+
+.dark {
+  --vp-c-bg: #0d1116;
+  --vp-c-bg-alt: #161d27;
+  --vp-c-bg-elv: #212730;
+  --vp-c-bg-soft: #161d27;
+
+  --vp-c-text-1: #ebe7e4;
+  --vp-c-text-2: #d5d8db;
+  --vp-c-text-3: #9fa4ab;
+
+  --vp-c-divider: #495059;
+  --vp-c-gutter: #0d1116;
+  --vp-c-border: #495059;
+
+  --vp-c-default-1: #252f3d;
+  --vp-c-default-2: #212730;
+  --vp-c-default-3: #161d27;
+  --vp-c-default-soft: rgba(73, 80, 89, 0.3);
+
+  --vp-c-brand-1: #8fb6d8;
+  --vp-c-brand-2: #6a9fcc;
+  --vp-c-brand-3: #6a9fcc;
+  --vp-c-brand-soft: rgba(106, 159, 204, 0.16);
+
+  --vp-c-tip-1: #8fb6d8;
+  --vp-c-tip-2: #6a9fcc;
+  --vp-c-tip-3: #6a9fcc;
+  --vp-c-tip-soft: rgba(106, 159, 204, 0.16);
+
+  --vp-c-warning-1: #fbbf24;
+  --vp-c-warning-2: #fbbf24;
+  --vp-c-warning-3: #fbbf24;
+  --vp-c-warning-soft: rgba(251, 191, 36, 0.16);
+
+  --vp-c-note-1: #c084fc;
+  --vp-c-note-2: #c084fc;
+  --vp-c-note-3: #c084fc;
+  --vp-c-note-soft: rgba(192, 132, 252, 0.16);
+
+  --vp-button-brand-bg: #6a9fcc;
+  --vp-button-brand-hover-bg: #8fb6d8;
+  --vp-button-brand-active-bg: #6a9fcc;
+  --vp-button-brand-text: #0d1116;
+  --vp-button-brand-hover-text: #0d1116;
+  --vp-button-brand-active-text: #0d1116;
+
+  --vp-home-hero-name-color: #8fb6d8;
+  --vp-home-hero-image-background-image: linear-gradient(-45deg, #6a9fcc 50%, #c084fc 50%);
+  --vp-home-hero-image-filter: blur(48px);
+}

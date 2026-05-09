@@ -1,6 +1,8 @@
-name: Deploy demo to GitHub Pages
+name: Deploy demo and docs to GitHub Pages
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -20,7 +22,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm run build:demo
+      - run: npm install
+      - name: Build demo
+        run: npm run build:demo
+      - name: Build docs
+        run: npm run docs:build
+      - name: Merge docs into dist
+        run: |
+          mkdir -p dist/docs
+          cp -r docs/.vitepress/dist/. dist/docs/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -6,6 +6,12 @@ Web dashboard for the [pi coding agent](https://pi.dev) — sessions, todos, sub
 
 ![pi-kanban dashboard](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster.png)
 
+## Documentation
+
+**[→ nikiforovall.github.io/pi-kanban/docs/](https://nikiforovall.github.io/pi-kanban/docs/)**
+
+- [User guide](https://nikiforovall.github.io/pi-kanban/docs/user-guide) — slash commands, layout, sessions, subagents, storage manager, keyboard shortcuts.
+
 ## Try it now
 
 **[→ Open the live demo](https://nikiforovall.blog/pi-kanban/)**
@@ -45,8 +51,3 @@ pi install npm:@juicesharp/rpiv-todo
 
 
 ![pi-kanban demo](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-demo.gif)
-
-## Documentation
-
-- [User guide](https://github.com/NikiforovAll/pi-kanban/blob/main/docs/user-guide.md) — slash commands, layout, sessions, subagents, storage manager, keyboard shortcuts.
-- [Theming](https://github.com/NikiforovAll/pi-kanban/blob/main/docs/theming.md) — built-in themes, configuration, custom theme authoring.

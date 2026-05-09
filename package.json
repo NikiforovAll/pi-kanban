@@ -10,7 +10,13 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "build:demo": "node scripts/build-demo.js",
-    "preview:demo": "npm run build:demo && npx --yes http-server dist -p 8765 -c-1"
+    "preview:demo": "npm run build:demo && npx --yes http-server dist -p 8765 -c-1",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
   },
   "keywords": [
     "pi-package",
