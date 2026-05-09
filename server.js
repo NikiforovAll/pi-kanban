@@ -178,12 +178,38 @@ app.get('/api/sessions/:id/messages', async (req, res) => {
   }
 });
 
+app.get('/api/sessions/:id/tool-result/:toolUseId', async (req, res) => {
+  const meta = await parsers.findSessionFileById(req.params.id);
+  if (!meta) return res.status(404).json({ error: 'not found' });
+  try {
+    const entries = await parsers.readSessionEntries(meta.file);
+    const toolUseId = req.params.toolUseId;
+    for (const e of entries) {
+      if (e.type !== 'message') continue;
+      const m = e.message;
+      if (m && m.role === 'toolResult' && m.toolCallId === toolUseId) {
+        const content = parsers.flattenContentToText(m.content);
+        return res.json({ content });
+      }
+    }
+    res.status(404).json({ error: 'tool result not found' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+
 app.get('/api/sessions/:id/agents', async (req, res) => {
   const meta = await parsers.findSessionFileById(req.params.id);
   if (!meta) return res.status(404).json({ agents: [], error: 'not found' });
   try {
-    const agents = await parsers.listAgentsForSession(meta);
-    res.json({ agents, waitingForUser: null });
+    const entries = await parsers.readSessionEntries(meta.file);
+    const s = parsers.summarize(entries);
+    const agents = await parsers.listAgentsForSession(meta, s);
+    const waitingForUser = s.pendingAskUser
+      ? { kind: 'question', toolName: 'AskUserQuestion', timestamp: s.pendingAskUser.timestamp }
+      : null;
+    res.json({ agents, waitingForUser });
   } catch (err) {
     res.status(500).json({ agents: [], error: String(err) });
   }
