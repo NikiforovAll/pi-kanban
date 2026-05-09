@@ -4482,7 +4482,12 @@ function setupEventSource() {
       }
 
       if (data.type === 'plan-update') {
-        refreshOpenPlan();
+        if (!data.path) {
+          refreshOpenPlan();
+        } else {
+          const stored = _planSessionId ? getStoredPlan(_planSessionId) : null;
+          if (stored?.path === data.path) refreshOpenPlan();
+        }
       }
 
       if (data.type === 'agent-update') {

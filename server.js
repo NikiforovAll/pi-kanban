@@ -556,6 +556,38 @@ taskWatcher.on('all', (_evt, file) => {
   if (sid && sid !== tasksRoot) queueTaskUpdate(sid);
 });
 
+// Plan file watcher — watches _plans/**/*.md under each known project CWD.
+// Bindings live in the browser's localStorage, so the server discovers watched
+// paths by scanning all known session CWDs rather than tracking bindings itself.
+// NOTE: listSessions() reads JSONL content for accurate CWDs; listSessionFiles()
+// decodes folder names which is lossy for dirs that contain hyphens.
+const planWatcher = chokidar.watch([], {
+  ignoreInitial: true,
+  awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
+});
+planWatcher.on('change', (f) => sseSend({ type: 'plan-update', path: f }));
+
+const watchedPlanDirs = new Set();
+function addPlanWatchDir(cwd) {
+  if (!cwd || watchedPlanDirs.has(cwd)) return;
+  watchedPlanDirs.add(cwd);
+  // chokidar glob patterns require forward slashes on Windows
+  planWatcher.add(path.join(cwd, '_plans', '**', '*.md').replace(/\\/g, '/'));
+}
+async function updatePlanWatchDirs() {
+  const sessions = await parsers.listSessions().catch(() => []);
+  for (const { cwd } of sessions) addPlanWatchDir(cwd);
+}
+updatePlanWatchDirs();
+// When a new session JSONL appears, read its header to get the real CWD.
+watcher.on('add', async (file) => {
+  try {
+    const entries = await parsers.readSessionEntries(file);
+    const entry = entries.find((e) => e.type === 'session');
+    if (entry?.cwd) addPlanWatchDir(entry.cwd);
+  } catch {}
+});
+
 const http = require('node:http');
 const httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, app);
 const server = httpServer.listen(PORT, async () => {
@@ -567,4 +599,4 @@ const server = httpServer.listen(PORT, async () => {
   if (shouldOpen) open(url).catch(() => {});
 });
 
-process.on('SIGINT', () => { watcher.close(); taskWatcher.close(); server.close(() => process.exit(0)); });
+process.on('SIGINT', () => { watcher.close(); taskWatcher.close(); planWatcher.close(); server.close(() => process.exit(0)); });
