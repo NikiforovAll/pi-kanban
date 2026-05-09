@@ -12,6 +12,15 @@ const parsers = require('./lib/pi-parsers');
 const taskStore = require('./lib/task-store');
 const pkg = require('./package.json');
 
+function sendWithETag(req, res, data) {
+  const body = typeof data === 'string' ? data : JSON.stringify(data);
+  const etag = `"${crypto.createHash('md5').update(body).digest('hex').slice(0, 16)}"`;
+  res.set('ETag', etag);
+  res.set('Cache-Control', 'no-cache');
+  if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  res.type('application/json').send(body);
+}
+
 function enrichTask(t, sessionId, project) {
   return {
     id: String(t.id),
@@ -24,23 +33,27 @@ function enrichTask(t, sessionId, project) {
 }
 
 async function tasksForSession(sessionId, project) {
-  const tasks = taskStore.listTasks(sessionId);
+  const tasks = await taskStore.listTasksAsync(sessionId);
   return tasks.map((t) => enrichTask(t, sessionId, project));
 }
 
 async function allStoredTasks() {
-  const out = [];
-  for (const sid of taskStore.listSessionIds()) {
-    const tasks = taskStore.listTasks(sid);
-    if (!tasks.length) continue;
-    let project = null;
-    try {
-      const meta = await parsers.findSessionFileById(sid);
-      if (meta) project = meta.cwd;
-    } catch {}
-    for (const t of tasks) out.push(enrichTask(t, sid, project));
+  const [sids, sessionFiles] = await Promise.all([
+    taskStore.listSessionIdsAsync(),
+    parsers.listSessionFiles(),
+  ]);
+  const projectBySid = new Map();
+  for (const meta of sessionFiles) {
+    const slug = parsers.slugFromFile(meta.file);
+    if (!projectBySid.has(slug)) projectBySid.set(slug, meta.cwd);
   }
-  return out;
+  const groups = await Promise.all(sids.map(async (sid) => {
+    const tasks = await taskStore.listTasksAsync(sid);
+    if (!tasks.length) return [];
+    const project = projectBySid.get(sid) || null;
+    return tasks.map((t) => enrichTask(t, sid, project));
+  }));
+  return groups.flat();
 }
 
 
@@ -138,7 +151,7 @@ app.get('/api/sessions', async (req, res) => {
   try {
     const limit = req.query.limit ? Number(req.query.limit) : 50;
     const all = await parsers.listSessions();
-    res.json(all.slice(0, limit));
+    sendWithETag(req, res, all.slice(0, limit));
   } catch (err) {
     console.error('listSessions error', err);
     res.status(500).json({ error: String(err) });
@@ -159,7 +172,7 @@ app.get('/api/sessions/:id/summary', async (req, res) => {
   const meta = await parsers.findSessionFileById(req.params.id);
   if (!meta) return res.status(404).json({ error: 'not found' });
   try {
-    res.json(await parsers.buildSessionSummary(meta));
+    sendWithETag(req, res, await parsers.buildSessionSummary(meta));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -173,7 +186,7 @@ app.get('/api/sessions/:id/messages', async (req, res) => {
     const before = req.query.before ? String(req.query.before) : null;
     const out = await parsers.buildMessages(meta.file, limit, before);
     out.sessionId = req.params.id;
-    res.json(out);
+    sendWithETag(req, res, out);
   } catch (err) {
     res.status(500).json({ messages: [], error: String(err) });
   }
@@ -264,8 +277,8 @@ app.post('/api/session/plan', async (req, res) => {
 });
 
 // Stubbed endpoints (later phases may fill these).
-app.get('/api/tasks/all', async (_req, res) => {
-  try { res.json(await allStoredTasks()); }
+app.get('/api/tasks/all', async (req, res) => {
+  try { sendWithETag(req, res, await allStoredTasks()); }
   catch (err) { res.status(500).json({ error: String(err) }); }
 });
 app.get('/api/projects', async (_req, res) => {
@@ -437,6 +450,49 @@ app.get('/api/events', (req, res) => {
   req.on('close', () => { clearInterval(ka); sseClients.delete(res); });
 });
 
+// First call for a key arms a timer; further calls inside the window are
+// dropped (leading-edge debounce). Used for SSE coalescing.
+function debounceByKey(ms, fn) {
+  const pending = new Map();
+  return (key) => {
+    if (pending.has(key)) return;
+    pending.set(key, setTimeout(() => {
+      pending.delete(key);
+      fn(key);
+    }, ms));
+  };
+}
+
+// Per-file subscriber set. Notified by the global watcher; parses once per
+// change and fans out to all connected clients (replaces per-client chokidar).
+const agentLogStreams = (() => {
+  const byFile = new Map();
+  async function broadcast(file) {
+    const subs = byFile.get(file);
+    if (!subs || !subs.size) return;
+    let payload;
+    try { payload = await parsers.buildMessages(file, 50); } catch { return; }
+    for (const { res, agentId } of subs) {
+      payload.agentId = agentId;
+      try { res.write(`event: agent-log-update\ndata: ${JSON.stringify(payload)}\n\n`); } catch {}
+    }
+  }
+  const flush = debounceByKey(75, broadcast);
+  return {
+    subscribe(file, res, agentId) {
+      let set = byFile.get(file);
+      if (!set) { set = new Set(); byFile.set(file, set); }
+      const sub = { res, agentId };
+      set.add(sub);
+      return () => {
+        set.delete(sub);
+        if (!set.size) byFile.delete(file);
+      };
+    },
+    notify(file) { if (byFile.has(file)) flush(file); },
+  };
+})();
+
 app.get('/api/sessions/:id/agents/:agentId/messages/stream', async (req, res) => {
   res.set({
     'Content-Type': 'text/event-stream',
@@ -445,11 +501,11 @@ app.get('/api/sessions/:id/agents/:agentId/messages/stream', async (req, res) =>
   });
   res.write(': connected\n\n');
 
-  let watcherRef = null;
+  let unsubscribe = null;
   const ka = setInterval(() => { try { res.write(': ka\n\n'); } catch {} }, 30000);
   req.on('close', () => {
     clearInterval(ka);
-    if (watcherRef) { try { watcherRef.close(); } catch {} }
+    if (unsubscribe) unsubscribe();
   });
 
   let meta;
@@ -457,19 +513,16 @@ app.get('/api/sessions/:id/agents/:agentId/messages/stream', async (req, res) =>
   const rec = meta ? await parsers.findAgentRecord(meta, req.params.agentId).catch(() => null) : null;
   if (!rec || !rec._sessionFile) return;
 
-  const send = async () => {
-    try {
-      const out = await parsers.buildMessages(rec._sessionFile, 50);
-      out.agentId = req.params.agentId;
-      res.write(`event: agent-log-update\ndata: ${JSON.stringify(out)}\n\n`);
-    } catch {}
-  };
-  await send();
-  watcherRef = chokidar.watch(rec._sessionFile, {
-    ignoreInitial: true,
-    awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
-  });
-  watcherRef.on('change', send).on('add', send);
+  // Subscribe before sending initial payload: any change during buildMessages
+  // will fire notify -> broadcast and be picked up. Otherwise the gap between
+  // initial send and subscribe could drop events.
+  unsubscribe = agentLogStreams.subscribe(rec._sessionFile, res, req.params.agentId);
+
+  try {
+    const out = await parsers.buildMessages(rec._sessionFile, 50);
+    out.agentId = req.params.agentId;
+    res.write(`event: agent-log-update\ndata: ${JSON.stringify(out)}\n\n`);
+  } catch {}
 });
 
 const watcher = chokidar.watch(path.join(parsers.getSessionsDir(), '**/*.jsonl'), {
@@ -480,9 +533,15 @@ parsers.setOnBranchResolved((cwd, branch) => {
   sseSend({ type: 'branch:resolved', cwd, branch });
 });
 
-watcher.on('add', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
-watcher.on('change', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
-watcher.on('unlink', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
+const queueSessionUpdate = debounceByKey(75, (sid) => sseSend({ type: 'update', sessionId: sid }));
+
+for (const ev of ['add', 'change', 'unlink']) {
+  watcher.on(ev, (f) => {
+    parsers.invalidateSessionCache(f);
+    agentLogStreams.notify(f);
+    queueSessionUpdate(parsers.slugFromFile(f));
+  });
+}
 
 const taskWatcher = chokidar.watch(taskStore.getTasksDir(), {
   ignoreInitial: true,
@@ -490,14 +549,7 @@ const taskWatcher = chokidar.watch(taskStore.getTasksDir(), {
   awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
 });
 const tasksRoot = path.basename(taskStore.getTasksDir());
-const pendingTaskSse = new Map();
-function queueTaskUpdate(sid) {
-  if (pendingTaskSse.has(sid)) return;
-  pendingTaskSse.set(sid, setTimeout(() => {
-    pendingTaskSse.delete(sid);
-    sseSend({ type: 'task:update', sessionId: sid });
-  }, 75));
-}
+const queueTaskUpdate = debounceByKey(75, (sid) => sseSend({ type: 'task:update', sessionId: sid }));
 taskWatcher.on('all', (_evt, file) => {
   if (!file || !file.endsWith('.json')) return;
   const sid = path.basename(path.dirname(file));

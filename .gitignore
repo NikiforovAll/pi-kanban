@@ -14,6 +14,11 @@ pnpm-debug.log*
 .tmp/
 tmp/
 
+# Benchmark fixture snapshot (large; regenerated locally), result history, and goldens (tied to local snapshot)
+bench/.pi/
+bench/results/
+bench/golden/
+
 # Env / secrets
 .env
 .env.*
