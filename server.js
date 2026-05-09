@@ -277,8 +277,8 @@ app.post('/api/session/plan', async (req, res) => {
 });
 
 // Stubbed endpoints (later phases may fill these).
-app.get('/api/tasks/all', async (_req, res) => {
-  try { res.json(await allStoredTasks()); }
+app.get('/api/tasks/all', async (req, res) => {
+  try { sendWithETag(req, res, await allStoredTasks()); }
   catch (err) { res.status(500).json({ error: String(err) }); }
 });
 app.get('/api/projects', async (_req, res) => {

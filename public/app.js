@@ -145,8 +145,8 @@ const connectionStatus = document.getElementById('connection-status');
 const CONTENT_TRUNCATE_MAX = 1500;
 const COLUMNS = [{ el: pendingTasks }, { el: inProgressTasks }, { el: completedTasks }];
 
-let lastSessionsHash = '';
-let lastTasksHash = '';
+let lastSessionsEtag = '';
+let lastTasksEtag = '';
 
 //#endregion
 
@@ -159,9 +159,7 @@ async function fetchSessions(includeTasks) {
     const pinnedParam = allPinnedIds.size > 0 ? `&pinned=${[...allPinnedIds].join(',')}` : '';
     const projectParam =
       filterProject && filterProject !== '__recent__' ? `&project=${encodeURIComponent(filterProject)}` : '';
-    const sessionsPromise = fetch(`/api/sessions?limit=${sessionLimit}${pinnedParam}${projectParam}`).then((r) =>
-      r.json(),
-    );
+    const sessionsPromise = fetch(`/api/sessions?limit=${sessionLimit}${pinnedParam}${projectParam}`);
 
     // Only fetch /api/tasks/all when consumers actually need it (all-tasks view or active search).
     // Sidebar task counts come from per-session summary fields (taskCount/pending/inProgress/completed).
@@ -169,23 +167,23 @@ async function fetchSessions(includeTasks) {
       includeTasks = viewMode === 'all' || !!searchQuery;
     }
 
-    let newSessions, newTasks;
-    if (includeTasks) {
-      [newSessions, newTasks] = await Promise.all([sessionsPromise, fetch('/api/tasks/all').then((r) => r.json())]);
-    } else {
-      newSessions = await sessionsPromise;
-    }
+    const [sessionsRes, tasksRes] = await Promise.all([
+      sessionsPromise,
+      includeTasks ? fetch('/api/tasks/all') : Promise.resolve(null),
+    ]);
 
-    const sessionsHash = JSON.stringify(newSessions);
-    if (includeTasks) {
-      const tasksHash = JSON.stringify(newTasks);
-      if (sessionsHash === lastSessionsHash && tasksHash === lastTasksHash) return;
-      lastTasksHash = tasksHash;
-      allTasksCache = newTasks;
-    } else {
-      if (sessionsHash === lastSessionsHash) return;
+    const sessionsEtag = sessionsRes.headers.get('etag') || '';
+    const tasksEtag = tasksRes ? (tasksRes.headers.get('etag') || '') : lastTasksEtag;
+    const sessionsUnchanged = sessionsEtag && sessionsEtag === lastSessionsEtag;
+    const tasksUnchanged = !tasksRes || (tasksEtag && tasksEtag === lastTasksEtag);
+    if (sessionsUnchanged && tasksUnchanged) return;
+
+    const newSessions = await sessionsRes.json();
+    if (tasksRes && !tasksUnchanged) {
+      allTasksCache = await tasksRes.json();
+      lastTasksEtag = tasksEtag;
     }
-    lastSessionsHash = sessionsHash;
+    lastSessionsEtag = sessionsEtag;
 
     sessions = newSessions.map(applyStoredPlan);
     renderSessions();
@@ -1518,7 +1516,6 @@ function updateFullscreenBtnIcon(btnId, isFullscreen) {
 
 let _toastTimer = null;
 let _manualRefreshing = false;
-let _branchRenderQueued = false;
 //#endregion
 
 //#region TOAST
@@ -2213,7 +2210,7 @@ async function revealPlanSession(planSessionId) {
   }
   revealedPlanSessionId = planSessionId;
   if (!sessions.some((s) => s.id === planSessionId)) {
-    lastSessionsHash = '';
+    lastSessionsEtag = '';
     await fetchSessions();
   }
   await fetchTasks(planSessionId);
@@ -2266,7 +2263,17 @@ function renderAllTasks() {
   renderKanban();
 }
 
+let _renderSessionsQueued = false;
 function renderSessions() {
+  if (_renderSessionsQueued) return;
+  _renderSessionsQueued = true;
+  requestAnimationFrame(() => {
+    _renderSessionsQueued = false;
+    _renderSessions();
+  });
+}
+
+function _renderSessions() {
   // Update project dropdown
   updateProjectDropdown();
 
@@ -3527,7 +3534,7 @@ async function _storageViewSession(id) {
   closeStorageManager();
   revealedStorageSessionId = id;
   if (!sessions.some((s) => s.id === id)) {
-    lastSessionsHash = '';
+    lastSessionsEtag = '';
     await fetchSessions();
   }
   await fetchTasks(id);
@@ -4039,8 +4046,8 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (_manualRefreshing) return;
     _manualRefreshing = true;
-    lastSessionsHash = '';
-    lastTasksHash = '';
+    lastSessionsEtag = '';
+    lastTasksEtag = '';
     lastMessagesHash = '';
     const refreshes = [fetchSessions()];
     if (currentSessionId) refreshes.push(fetchTasks(currentSessionId));
@@ -4473,13 +4480,7 @@ function setupEventSource() {
             changed = true;
           }
         }
-        if (changed && !_branchRenderQueued) {
-          _branchRenderQueued = true;
-          requestAnimationFrame(() => {
-            _branchRenderQueued = false;
-            renderSessions();
-          });
-        }
+        if (changed) renderSessions();
       }
 
       if (data.type === 'task:update' && data.sessionId === currentSessionId) {
@@ -4489,24 +4490,13 @@ function setupEventSource() {
     };
   }
 
-  // When the tab becomes visible after being hidden, catch up immediately
-  let _pollMissed = false;
+  // Browsers may suspend SSE when tab is hidden, so catch up on return.
+  // Cheap with ETag in place — 304 when nothing changed.
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && _pollMissed) {
-      _pollMissed = false;
-      fetchSessions().catch(() => {});
-      if (currentSessionId) fetchTasks(currentSessionId).catch(() => {});
-    }
-  });
-
-  // Fallback poll every 30s in case SSE silently drops; skip when tab is hidden
-  setInterval(() => {
-    if (document.hidden) {
-      _pollMissed = true;
-      return;
-    }
+    if (document.hidden) return;
     fetchSessions().catch(() => {});
-  }, 30000);
+    if (currentSessionId) fetchTasks(currentSessionId).catch(() => {});
+  });
 
   connect();
 }
