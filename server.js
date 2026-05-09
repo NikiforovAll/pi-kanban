@@ -24,23 +24,27 @@ function enrichTask(t, sessionId, project) {
 }
 
 async function tasksForSession(sessionId, project) {
-  const tasks = taskStore.listTasks(sessionId);
+  const tasks = await taskStore.listTasksAsync(sessionId);
   return tasks.map((t) => enrichTask(t, sessionId, project));
 }
 
 async function allStoredTasks() {
-  const out = [];
-  for (const sid of taskStore.listSessionIds()) {
-    const tasks = taskStore.listTasks(sid);
-    if (!tasks.length) continue;
-    let project = null;
-    try {
-      const meta = await parsers.findSessionFileById(sid);
-      if (meta) project = meta.cwd;
-    } catch {}
-    for (const t of tasks) out.push(enrichTask(t, sid, project));
+  const [sids, sessionFiles] = await Promise.all([
+    taskStore.listSessionIdsAsync(),
+    parsers.listSessionFiles(),
+  ]);
+  const projectBySid = new Map();
+  for (const meta of sessionFiles) {
+    const slug = parsers.slugFromFile(meta.file);
+    if (!projectBySid.has(slug)) projectBySid.set(slug, meta.cwd);
   }
-  return out;
+  const groups = await Promise.all(sids.map(async (sid) => {
+    const tasks = await taskStore.listTasksAsync(sid);
+    if (!tasks.length) return [];
+    const project = projectBySid.get(sid) || null;
+    return tasks.map((t) => enrichTask(t, sid, project));
+  }));
+  return groups.flat();
 }
 
 
@@ -480,9 +484,12 @@ parsers.setOnBranchResolved((cwd, branch) => {
   sseSend({ type: 'branch:resolved', cwd, branch });
 });
 
-watcher.on('add', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
-watcher.on('change', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
-watcher.on('unlink', (f) => sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) }));
+for (const ev of ['add', 'change', 'unlink']) {
+  watcher.on(ev, (f) => {
+    parsers.invalidateSessionCache(f);
+    sseSend({ type: 'update', sessionId: parsers.slugFromFile(f) });
+  });
+}
 
 const taskWatcher = chokidar.watch(taskStore.getTasksDir(), {
   ignoreInitial: true,

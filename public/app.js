@@ -151,7 +151,7 @@ let lastTasksHash = '';
 //#endregion
 
 //#region DATA_FETCHING
-async function fetchSessions(includeTasks = true) {
+async function fetchSessions(includeTasks) {
   try {
     const allPinnedIds = new Set([...pinnedSessionIds, ...stickySessionIds]);
     if (revealedPlanSessionId) allPinnedIds.add(revealedPlanSessionId);
@@ -162,6 +162,12 @@ async function fetchSessions(includeTasks = true) {
     const sessionsPromise = fetch(`/api/sessions?limit=${sessionLimit}${pinnedParam}${projectParam}`).then((r) =>
       r.json(),
     );
+
+    // Only fetch /api/tasks/all when consumers actually need it (all-tasks view or active search).
+    // Sidebar task counts come from per-session summary fields (taskCount/pending/inProgress/completed).
+    if (includeTasks === undefined) {
+      includeTasks = viewMode === 'all' || !!searchQuery;
+    }
 
     let newSessions, newTasks;
     if (includeTasks) {
@@ -1682,7 +1688,7 @@ function renderToolParamsHtml(params) {
     html += `<div style="margin-top:6px;font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> <span style="word-break:break-all">${escapeHtml(display)}</span></div>`;
   }
   for (const { k, obj } of jsonBlocks) {
-    html += `<div style="margin-top:8px;font-size:0.75rem"><div style="color:var(--text-muted);margin-bottom:2px">${escapeHtml(k)}</div>${renderJsonPre(obj, 300)}</div>`;
+    html += `<div style="margin-top:8px;font-size:0.75rem"><div style="color:var(--text-muted);margin-bottom:2px">${escapeHtml(k)}</div>${renderJsonPre(obj)}</div>`;
   }
   if (params.old_string || params.new_string) {
     html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">`;
@@ -4713,8 +4719,8 @@ function tryParseJsonObject(text) {
   } catch { return null; }
 }
 
-function renderJsonPre(obj, maxHeight = 500) {
-  return `<pre class="${TINTED_PRE_CLASS}" style="max-height:${maxHeight}px;overflow:auto">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
+function renderJsonPre(obj) {
+  return `<pre class="${TINTED_PRE_CLASS}">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
 }
 
 function renderJsonInputHtml(text) {
