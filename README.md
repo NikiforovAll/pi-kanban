@@ -41,6 +41,11 @@ pi install npm:@juicesharp/rpiv-todo
 - [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) — task tracking that pi-kanban displays as kanban columns.
 - [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) — pi-kanban surfaces these as interactive Q&A cards.
 
+## Demo
+
+
+![pi-kanban demo](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-demo.gif)
+
 ## Documentation
 
 - [User guide](https://github.com/NikiforovAll/pi-kanban/blob/main/docs/user-guide.md) — slash commands, layout, sessions, subagents, storage manager, keyboard shortcuts.
