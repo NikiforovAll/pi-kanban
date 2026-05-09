@@ -1408,8 +1408,12 @@ function showMsgDetail(idx) {
       ? ''
       : renderToolResultHtml(m.toolResult, m.toolResultTruncated, m.toolResultFull, m.toolUseId);
     const hasAgentTabs = m.tool === 'Agent' && m.agentId && (m.agentLastMessage || m.agentPrompt);
+    const isParallelAgent = m.tool === 'Agent' && Array.isArray(m.agentTasks) && m.agentTasks.length > 0;
     let mainHtml;
-    if (sendProto) {
+    if (isParallelAgent) {
+      mainHtml = renderParallelSubagentHtml(m);
+      toolParamsHtml = '';
+    } else if (sendProto) {
       mainHtml = descHtml + renderProtocolDetail(m.params.protocol);
     } else if (m.tool === 'AskUserQuestion') {
       mainHtml = renderAskUserQuestionHtml(m);
@@ -1433,7 +1437,7 @@ function showMsgDetail(idx) {
     } else {
       mainHtml = TASK_TOOLS.has(m.tool) ? '' : '<em>No details</em>';
     }
-    body.innerHTML = mainHtml + toolParamsHtml + taskResultHtml + (hasAgentTabs ? '' : toolResultHtml) + agentExtraHtml;
+    body.innerHTML = mainHtml + toolParamsHtml + taskResultHtml + (hasAgentTabs || isParallelAgent ? '' : toolResultHtml) + agentExtraHtml;
   } else {
     const rawText = stripAnsi(m.fullText || m.text);
     const cmd = m.type === 'user' ? parseCommandMessage(rawText) : null;
@@ -1960,6 +1964,50 @@ function renderAskUserQuestionHtml(m) {
     html += '<div class="ask-user-cancelled">Cancelled by user</div>';
   }
   return html;
+}
+
+function renderParallelSubagentHtml(m) {
+  const tasks = m.agentTasks || [];
+  const results = m.parallelResults || [];
+  if (!tasks.length) return '';
+
+  const id = `psa-${m.toolUseId || Math.random().toString(36).slice(2, 8)}`;
+  const n = tasks.length;
+  const concurrency = m.params?.concurrency;
+  const modeLine = `parallel \u00b7 ${n} task${n !== 1 ? 's' : ''}${concurrency ? ` \u00b7 concurrency ${concurrency}` : ''}`;
+
+  const tabsHtml = tasks
+    .map((t, i) => {
+      const key = `t${i}`;
+      const label = `${i + 1}. ${t.agent || '?'}`;
+      return `<div class="agent-tab${i === 0 ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${key}" onclick="document.querySelectorAll('[data-tab-group=\\'${id}\\']').forEach(el=>{el.classList.toggle('active',el.dataset.tabKey==='${key}')})">${escapeHtml(label)}</div>`;
+    })
+    .join('');
+
+  const copyBtnHtml = `<button class="agent-tab-copy" title="Copy" onclick="copyParallelSubagentTab('${id}',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>`;
+
+  const panelsHtml = tasks
+    .map((t, i) => {
+      const key = `t${i}`;
+      const otherParams = Object.fromEntries(Object.entries(t).filter(([k]) => k !== 'agent' && k !== 'task'));
+      const result = results[i] || null;
+      let content = `<div class="psa-row"><span class="psa-key">agent</span><span class="detail-badge bg-secondary">${escapeHtml(t.agent || '?')}</span></div>`;
+      if (t.task) {
+        content += `<div class="psa-row psa-task-row"><span class="psa-key">task</span><div class="psa-task-text">${escapeHtml(t.task)}</div></div>`;
+      }
+      content += renderToolParamsHtml(otherParams);
+      const exitCode = result?.exitCode;
+      if (exitCode !== undefined && exitCode !== null) {
+        const ok = exitCode === 0;
+        const cls = ok ? 'psa-status-ok' : 'psa-status-err';
+        const label = ok ? 'done' : `failed (exit ${exitCode})`;
+        content += `<div class="psa-status ${cls}">${escapeHtml(label)}</div>`;
+      }
+      return `<div class="agent-tab-panel${i === 0 ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${key}"><div class="detail-desc" style="font-size:13px">${content}</div></div>`;
+    })
+    .join('');
+
+  return `<div class="psa-mode-label">${escapeHtml(modeLine)}</div><div class="agent-tabs">${tabsHtml}${copyBtnHtml}</div>${panelsHtml}`;
 }
 
 //#endregion
@@ -4797,6 +4845,14 @@ async function copyAgentTabActive(groupId, btn) {
   if (!activePanel) return;
   const key = `${groupId}-${activePanel.dataset.tabKey}`;
   copyAgentTab(key, btn);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function copyParallelSubagentTab(groupId, btn) {
+  const activePanel = document.querySelector(`.agent-tab-panel.active[data-tab-group="${groupId}"]`);
+  if (!activePanel) return;
+  const text = activePanel.innerText || activePanel.textContent || '';
+  copyWithFeedback(text.trim(), btn);
 }
 
 const ownerColors = [

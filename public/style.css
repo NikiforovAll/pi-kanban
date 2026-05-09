@@ -20,6 +20,7 @@
   --accent-glow: rgba(232, 111, 51, 0.55);
   --success: #3ecf8e;
   --success-dim: rgba(62, 207, 142, 0.18);
+  --error: #e5534b;
   --warning: #f0b429;
   --warning-dim: rgba(240, 180, 41, 0.18);
   --plan: #86a886;
@@ -2547,6 +2548,7 @@ body.light {
   --accent-glow: rgba(232, 111, 51, 0.5);
   --success: #1a8a5a;
   --success-dim: rgba(26, 138, 90, 0.15);
+  --error: #c0392b;
   --warning: #b07d0a;
   --warning-dim: rgba(176, 125, 10, 0.15);
   --plan: #5a7a5a;
@@ -3247,6 +3249,7 @@ select.form-input option:checked {
     --accent-glow: rgba(232, 111, 51, 0.5);
     --success: #1a8a5a;
     --success-dim: rgba(26, 138, 90, 0.15);
+    --error: #c0392b;
     --warning: #b07d0a;
     --warning-dim: rgba(176, 125, 10, 0.15);
     --plan: #5a7a5a;
@@ -3709,6 +3712,49 @@ pre.mermaid svg {
   font-size: 0.85rem;
   font-style: italic;
   padding: 8px 0;
+}
+/* #endregion */
+
+/* #region parallel-subagent */
+.psa-mode-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.psa-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0;
+}
+.psa-task-row {
+  align-items: flex-start;
+}
+.psa-key {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  min-width: 40px;
+}
+.psa-task-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.psa-status {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.psa-status-ok {
+  color: var(--success);
+}
+.psa-status-err {
+  color: var(--error);
 }
 /* #endregion */
 
