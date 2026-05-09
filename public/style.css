@@ -761,6 +761,13 @@ body::before {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.view-header > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .view-title {
@@ -789,6 +796,12 @@ body::before {
   display: flex;
   align-items: center;
   gap: 16px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .view-progress { display: none; }
+  .view-actions { gap: 8px; }
 }
 
 .view-progress {
