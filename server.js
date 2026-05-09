@@ -513,13 +513,16 @@ app.get('/api/sessions/:id/agents/:agentId/messages/stream', async (req, res) =>
   const rec = meta ? await parsers.findAgentRecord(meta, req.params.agentId).catch(() => null) : null;
   if (!rec || !rec._sessionFile) return;
 
+  // Subscribe before sending initial payload: any change during buildMessages
+  // will fire notify -> broadcast and be picked up. Otherwise the gap between
+  // initial send and subscribe could drop events.
+  unsubscribe = agentLogStreams.subscribe(rec._sessionFile, res, req.params.agentId);
+
   try {
     const out = await parsers.buildMessages(rec._sessionFile, 50);
     out.agentId = req.params.agentId;
     res.write(`event: agent-log-update\ndata: ${JSON.stringify(out)}\n\n`);
   } catch {}
-
-  unsubscribe = agentLogStreams.subscribe(rec._sessionFile, res, req.params.agentId);
 });
 
 const watcher = chokidar.watch(path.join(parsers.getSessionsDir(), '**/*.jsonl'), {
