@@ -931,7 +931,7 @@ function renderToolItem(m, i, compact) {
   const pinBtn = renderMsgPinBtn(m, i);
   return `<div class="msg-item msg-tool${compactClass}${getTodoStatusClass(m)}" ${itemClickAttr}>
       ${getToolIcon(m.tool)}
-      <div class="msg-body"><div class="msg-text">${agentLink}${escapeHtml(m.tool)}${toolDetail}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
+      <div class="msg-body"><div class="msg-text">${agentLink}<span style="color:var(--text-primary);font-weight:500">${escapeHtml(m.tool)}</span>${toolDetail}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
     </div>`;
 }
 
@@ -958,7 +958,7 @@ function renderMessageList(messages) {
         parts.push(`<div class="msg-tool-group">
             <div class="msg-item msg-tool msg-tool-group-header${getTodoStatusClass(first)}" onclick="toggleToolGroup('${gid}')" style="cursor:pointer">
               ${getToolIcon(first.tool)}
-              <div class="msg-body"><div class="msg-text">${escapeHtml(first.tool)}${toolDetail}<span class="tool-count-badge">×${count}</span></div><div class="msg-time">${timeRange}</div></div>${grpAgentLogBtn}${grpPinBtn}
+              <div class="msg-body"><div class="msg-text"><span style="color:var(--text-primary);font-weight:500">${escapeHtml(first.tool)}</span>${toolDetail}<span class="tool-count-badge">×${count}</span></div><div class="msg-time">${timeRange}</div></div>${grpAgentLogBtn}${grpPinBtn}
             </div>
             <div class="msg-tool-group-items" id="${gid}">${Array.from({ length: count }, (_, j) => renderToolItem(messages[i + j], i + j, true)).join('')}</div>
           </div>`);
@@ -1604,7 +1604,7 @@ function formatTaskToolDetail(params) {
     parts.push(`<span style="color:var(--text-muted)">#${escapeHtml(id)}</span>`);
   }
   if (params.status) parts.push(formatTaskStatusBadge(params.status));
-  if (params.subject) parts.push(`<span style="color:var(--text-secondary)">${escapeHtml(params.subject)}</span>`);
+  if (params.subject) parts.push(`<span style="color:var(--text-muted)">${escapeHtml(params.subject)}</span>`);
   return parts.length ? ` ${parts.join(' ')}` : '';
 }
 function getTodoStatusClass(m) {
@@ -1617,7 +1617,7 @@ function getTodoStatusClass(m) {
 
 function getToolDetail(tool, params, detail) {
   if (tool === 'TodoWrite' && params && typeof params.status === 'string') {
-    return ` <span style="color:var(--text-secondary)">${escapeHtml(params.status)}</span>`;
+    return ` <span style="color:var(--text-muted)">${escapeHtml(params.status)}</span>`;
   }
   if (TASK_TOOLS.has(tool)) return formatTaskToolDetail(params);
   if (!detail) return '';
@@ -1628,7 +1628,7 @@ function getToolDetail(tool, params, detail) {
     if (params.limit) parts.push(`+${params.limit}`);
     if (parts.length) extra = ` <span style="color:var(--text-muted)">${parts.join(' ')}</span>`;
   }
-  return ` <span style="color:var(--text-secondary)">${escapeHtml(detail)}</span>${extra}`;
+  return ` <span style="color:var(--text-muted)">${escapeHtml(detail)}</span>${extra}`;
 }
 function renderTaskResult(toolResult) {
   if (!toolResult) return '';
