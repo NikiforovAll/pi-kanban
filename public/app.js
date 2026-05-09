@@ -1398,7 +1398,7 @@ function showMsgDetail(idx) {
     let toolParamsHtml = renderToolParamsHtml(
       sendProto ? Object.fromEntries(Object.entries(m.params).filter(([k]) => k !== 'protocol')) : m.params,
     );
-    const hideResult = m.tool === 'SendMessage' || TASK_TOOLS.has(m.tool);
+    const hideResult = m.tool === 'SendMessage' || m.tool === 'AskUserQuestion' || TASK_TOOLS.has(m.tool);
     const taskResultHtml = TASK_TOOLS.has(m.tool) ? renderTaskResult(m.toolResult) : '';
     const toolResultHtml = hideResult
       ? ''
@@ -1407,6 +1407,9 @@ function showMsgDetail(idx) {
     let mainHtml;
     if (sendProto) {
       mainHtml = descHtml + renderProtocolDetail(m.params.protocol);
+    } else if (m.tool === 'AskUserQuestion') {
+      mainHtml = renderAskUserQuestionHtml(m);
+      toolParamsHtml = '';
     } else if (m.tool === 'SendMessage' && fullText) {
       mainHtml = `${descHtml}<div class="markdown-body">${renderMarkdown(fullText)}</div>`;
     } else if (hasAgentTabs) {
@@ -1905,6 +1908,55 @@ function formatDuration(ms) {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ${s % 60}s`;
   return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function renderAskUserQuestionHtml(m) {
+  const questions = (m.params && m.params.questions) || [];
+  const details = m.toolResultDetails || null;
+  const answers = details && Array.isArray(details.answers) ? details.answers : null;
+  const cancelled = details && details.cancelled;
+
+  const pending = !details;
+
+  const renderOption = (label, description, checked, mark) => {
+    const cls = `ask-user-option${checked ? ' ask-user-option--checked' : ''}`;
+    const desc = description ? `<span class="ask-user-option-desc">${escapeHtml(description)}</span>` : '';
+    return `<li class="${cls}"><span class="ask-user-check">${mark}</span><span class="ask-user-option-label">${escapeHtml(label)}</span>${desc}</li>`;
+  };
+  const isChecked = (answerRec, label) => {
+    if (!answerRec) return false;
+    if (answerRec.kind === 'multi' && Array.isArray(answerRec.selected)) return answerRec.selected.includes(label);
+    if (answerRec.kind === 'option' || answerRec.kind === 'custom') return answerRec.answer === label;
+    return false;
+  };
+
+  let html = '<div class="ask-user-questions">';
+  questions.forEach((q, qi) => {
+    const answerRec = answers ? answers.find((a) => a.questionIndex === qi) : null;
+    html += `<div class="ask-user-card">`;
+    if (q.header) html += `<div class="ask-user-header">${escapeHtml(q.header)}</div>`;
+    html += `<div class="ask-user-question-text">${escapeHtml(q.question)}</div>`;
+    if (q.multiSelect) html += `<div class="ask-user-hint">Multi-select</div>`;
+    html += '<ul class="ask-user-options">';
+    (q.options || []).forEach((opt) => {
+      const checked = isChecked(answerRec, opt.label);
+      html += renderOption(opt.label, opt.description, checked, checked ? '✓' : '○');
+    });
+    if (answerRec && answerRec.kind === 'custom' && answerRec.answer
+        && !(q.options || []).some((o) => o.label === answerRec.answer)) {
+      html += renderOption(answerRec.answer, null, true, '✎');
+    }
+    html += '</ul>';
+    html += '</div>';
+  });
+  html += '</div>';
+
+  if (pending) {
+    html += '<div class="ask-user-pending">⏳ Awaiting user response…</div>';
+  } else if (cancelled) {
+    html += '<div class="ask-user-cancelled">Cancelled by user</div>';
+  }
+  return html;
 }
 
 //#endregion
