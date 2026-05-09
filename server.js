@@ -10,6 +10,7 @@ const chokidar = require('chokidar');
 const open = require('open').default || require('open');
 const parsers = require('./lib/pi-parsers');
 const taskStore = require('./lib/task-store');
+const pkg = require('./package.json');
 
 function enrichTask(t, sessionId, project) {
   return {
@@ -112,7 +113,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const empty = (_req, res) => res.json([]);
 const emptyObj = (_req, res) => res.json({});
 
-app.get('/api/version', (_req, res) => res.json({ version: '0.1.0', name: 'pi-kanban' }));
+app.get('/api/version', (_req, res) => res.json({ version: pkg.version, name: pkg.name }));
 
 function resolveActiveTheme(mode) {
   const requestedId = mode === 'light' ? LIGHT_THEME_ID : DARK_THEME_ID;
