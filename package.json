@@ -1,6 +1,6 @@
 {
   "name": "pi-kanban",
-  "version": "0.3.0",
+  "version": "0.0.0-dev",
   "description": "Workspace for the pi coding agent — sessions, todos, subagents, and more.",
   "main": "server.js",
   "bin": {
@@ -13,7 +13,8 @@
     "preview:demo": "npm run build:demo && npx --yes http-server dist -p 8765 -c-1",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "docs:preview": "vitepress preview docs",
+    "release:local": "npm version \"$(git describe --tags --exact-match)\" --no-git-tag-version --allow-same-version && npm publish --access public && git checkout -- package.json package-lock.json"
   },
   "devDependencies": {
     "vitepress": "^1.6.4"
