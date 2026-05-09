@@ -1916,10 +1916,6 @@ function renderAskUserQuestionHtml(m) {
   const answers = details && Array.isArray(details.answers) ? details.answers : null;
   const cancelled = details && details.cancelled;
 
-  if (cancelled) {
-    return `<div class="ask-user-cancelled">Cancelled by user</div>`;
-  }
-
   const pending = !details;
 
   const renderOption = (label, description, checked, mark) => {
@@ -1957,6 +1953,8 @@ function renderAskUserQuestionHtml(m) {
 
   if (pending) {
     html += '<div class="ask-user-pending">⏳ Awaiting user response…</div>';
+  } else if (cancelled) {
+    html += '<div class="ask-user-cancelled">Cancelled by user</div>';
   }
   return html;
 }
