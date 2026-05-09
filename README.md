@@ -2,15 +2,13 @@
 
 [![npm version](https://img.shields.io/npm/v/pi-kanban.svg)](https://www.npmjs.com/package/pi-kanban)
 
-Web dashboard for the [pi coding agent](https://pi.dev) — sessions, todos, subagents, observability.
+Web dashboard for the [pi coding agent](https://pi.dev/packages/pi-kanban?name=kanban) — sessions, todos, subagents, observability.
 
 ![pi-kanban dashboard](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster.png)
 
 ## Documentation
 
-**[→ nikiforovall.github.io/pi-kanban/docs/](https://nikiforovall.github.io/pi-kanban/docs/)**
-
-- [User guide](https://nikiforovall.github.io/pi-kanban/docs/user-guide) — slash commands, layout, sessions, subagents, storage manager, keyboard shortcuts.
+**[→ See the documentation](https://nikiforovall.github.io/pi-kanban/docs/)**
 
 ## Try it now
 

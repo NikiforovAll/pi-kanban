@@ -15,8 +15,8 @@ Run from inside pi:
 | `/kanban open`           | Open current session                                 |
 | `/kanban web`            | Open the dashboard in the default browser            |
 | `/kanban app`            | Open in a standalone PWA window (if installed)       |
-| `/kanban `               | Pin a session to the top of the sidebar              |
-| `/kanban sticky-pin`     | Pin and keep across restarts                         |
+| `/kanban pin`            | Pin a session                                        |
+| `/kanban sticky-pin`     | Sticky-pin a session                                 |
 | `/kanban unpin`          | Remove a pin                                         |
 | `/kanban preview <path>` | Render a markdown file in the dashboard preview pane |
 | `/kanban link <path>`    | Add a document link to a session                     |

@@ -1,8 +1,6 @@
 name: Deploy demo and docs to GitHub Pages
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
