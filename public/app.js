@@ -5217,7 +5217,8 @@ function initSidebarResize() {
   });
 
   function onMove(e) {
-    const w = Math.min(600, Math.max(200, startWidth + e.clientX - startX));
+    const maxW = Math.floor(window.innerWidth * 0.9);
+    const w = Math.min(maxW, Math.max(200, startWidth + e.clientX - startX));
     sidebar.style.setProperty('--sidebar-width', `${w}px`);
     sidebar.style.width = `${w}px`;
   }
@@ -5249,7 +5250,8 @@ function initPanelResize(panelId, handleId, cssVar, storageKey) {
   });
 
   function onMove(e) {
-    const w = Math.min(900, Math.max(320, startWidth - (e.clientX - startX)));
+    const maxW = Math.floor(window.innerWidth * 0.9);
+    const w = Math.min(maxW, Math.max(320, startWidth - (e.clientX - startX)));
     panel.style.setProperty(cssVar, `${w}px`);
   }
 

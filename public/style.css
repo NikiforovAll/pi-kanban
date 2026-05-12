@@ -1728,7 +1728,7 @@ body::before {
   display: flex;
 }
 .message-panel.msg-expanded-wide {
-  width: 60vw;
+  width: 90vw;
 }
 .message-panel-header {
   padding: 16px 20px;
