@@ -2184,7 +2184,7 @@ function showAgentModal(agentId) {
   const modalNameLabel = agent.agentName ? ` · ${escapeHtml(agent.agentName)}` : '';
   title.innerHTML = `${statusDot} ${escapeHtml(agent.type || 'unknown')}${modalNameLabel}`;
 
-  const shortModel = agent.model ? agent.model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
+  const shortModel = agent.model ?? null;
   const shortId = agent.agentId ? agent.agentId.slice(0, 8) : '';
   const chip = (label, value, opts = {}) => {
     const cls = opts.cls ? ` ${opts.cls}` : '';
