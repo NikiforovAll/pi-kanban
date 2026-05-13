@@ -27,8 +27,8 @@ All session commands default to the current session when `[<id>]` is omitted.
 | `/kanban session pin [<id>]` | Pin a session |
 | `/kanban session sticky-pin [<id>]` | Sticky-pin a session |
 | `/kanban session unpin [<id>]` | Remove a pin |
-| `/kanban session preview <path> [<id>]` | Render a markdown file in the dashboard preview pane |
-| `/kanban session link <path> [<id>]` | Add a document link to a session |
+| `/kanban session preview-doc <path> [<id>]` | Render a markdown file in the dashboard preview pane |
+| `/kanban session link-doc <path> [<id>]` | Add a document link to a session |
 
 ## Layout
 

@@ -71,8 +71,8 @@ const SESSION_SUBCOMMANDS = [
 	"pin",
 	"sticky-pin",
 	"unpin",
-	"preview",
-	"link",
+	"preview-doc",
+	"link-doc",
 ] as const;
 type SessionSub = (typeof SESSION_SUBCOMMANDS)[number];
 
@@ -385,8 +385,8 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					"  session pin [<id>]",
 					"  session sticky-pin [<id>]",
 					"  session unpin [<id>]",
-					"  session preview <file> [<id>]",
-					"  session link <file> [<id>]",
+					"  session preview-doc <file> [<id>]",
+					"  session link-doc <file> [<id>]",
 				];
 				notify(lines.join("\n"));
 			}
@@ -486,15 +486,15 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				if (verb === "preview" || verb === "link") {
+				if (verb === "preview-doc" || verb === "link-doc") {
 					const file = verbRest[0];
 					if (!file) {
 						notify(`Usage: /kanban session ${verb} <file.md> [session-id]`, "error");
 						return;
 					}
 					const sessionId = verbRest[1] ?? ctx.sessionManager.getSessionId() ?? null;
-					if (verb === "link" && !sessionId) {
-						notify("Usage: /kanban session link <file.md> <session-id> (no current session to default to)", "error");
+					if (verb === "link-doc" && !sessionId) {
+						notify("Usage: /kanban session link-doc <file.md> <session-id> (no current session to default to)", "error");
 						return;
 					}
 					const expanded =
@@ -502,7 +502,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 							? joinPath(homedir(), file.slice(1))
 							: file;
 					const abs = isAbsolute(expanded) ? expanded : resolvePath(process.cwd(), expanded);
-					const res = await postPreview(abs, sessionId, verb === "link");
+					const res = await postPreview(abs, sessionId, verb === "link-doc");
 					if (!res.ok) {
 						notify(`${verb} failed (${res.status}): ${await res.text()}`, "error");
 						return;
