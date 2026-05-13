@@ -386,7 +386,7 @@ app.post('/api/preview', async (req, res) => {
     const { path: filePath, sessionId, base, link } = req.body || {};
     const abs = resolvePreviewPath(filePath, base);
     if (!abs) return res.status(400).json({ error: 'path is required' });
-    const content = await readMarkdownFile(abs);
+    const content = link ? null : await readMarkdownFile(abs);
     sseSend({ type: 'preview:open', path: abs, content, sessionId: sessionId || null, link: !!link });
     res.json({ success: true });
   } catch (err) {
