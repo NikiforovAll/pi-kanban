@@ -4340,7 +4340,7 @@ async function handlePreviewOpenEvent(data) {
     if (_infoModalSessionId === sessionId) refreshInfoModalLinkedDocs();
     renderSessions();
   }
-  openPreviewModal(filePath, content);
+  if (!link) openPreviewModal(filePath, content);
   if (link) updatePreviewLinkBtn();
 }
 

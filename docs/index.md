@@ -31,5 +31,5 @@ features:
   - title: Themed
     details: Four built-in themes (pi-light/dark, kanban-light/dark) plus 15-token custom themes loaded from disk.
   - title: Pi-native
-    details: Installs as a pi package (pi install npm:pi-kanban). /kanban slash command starts, opens, pins, links.
+    details: Installs as a pi package (pi install npm:pi-kanban). /kanban slash command controls the server and opens the dashboard via /kanban open web|app, with session actions under /kanban session <verb>.
 ---

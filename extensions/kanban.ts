@@ -62,15 +62,19 @@ const SUBCOMMANDS = [
 	"restart",
 	"status",
 	"open",
-	"web",
-	"app",
+	"session",
+] as const;
+type Sub = (typeof SUBCOMMANDS)[number];
+
+const SESSION_SUBCOMMANDS = [
+	"open",
 	"pin",
 	"sticky-pin",
 	"unpin",
-	"preview",
-	"link",
+	"view-doc",
+	"link-doc",
 ] as const;
-type Sub = (typeof SUBCOMMANDS)[number];
+type SessionSub = (typeof SESSION_SUBCOMMANDS)[number];
 
 function probePort(p: number, timeoutMs = 250): Promise<boolean> {
 	return new Promise((resolve) => {
@@ -285,7 +289,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 
 	async function startServer(notify: Notify, opts: { silentSuccess?: boolean } = {}): Promise<boolean> {
 		if (await probePort(port)) {
-			notify(`pi-kanban already listening on ${url} — run /kanban open or /kanban web`);
+			notify(`pi-kanban already listening on ${url} — run /kanban open web to launch it`);
 			return true;
 		}
 		lastStderr = "";
@@ -315,7 +319,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 		child.stderr?.resume();
 		child.unref();
 		if (!opts.silentSuccess) {
-			notify(`pi-kanban started → ${url} — run /kanban open or /kanban web to launch it`);
+			notify(`pi-kanban started → ${url} — run /kanban open web to launch it`);
 		}
 		return true;
 	}
@@ -347,14 +351,45 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("kanban", {
 		description:
-			"pi-kanban dashboard: start | stop | restart | status | open | web | app | pin | sticky-pin | unpin | preview | link",
-		getArgumentCompletions: (prefix) =>
-			SUBCOMMANDS.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
+			"pi-kanban dashboard: start | stop | restart | status | open web|app | session <verb>",
+		getArgumentCompletions: (prefix) => {
+			const tokens = splitArgs(prefix);
+			if (tokens.length >= 1 && tokens[0] === "session") {
+				const verbPrefix = tokens[1] ?? "";
+				return SESSION_SUBCOMMANDS
+					.filter((s) => s.startsWith(verbPrefix))
+					.map((s) => ({ value: `session ${s}`, label: s }));
+			}
+			return SUBCOMMANDS.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
+		},
 		handler: async (args, ctx) => {
 			const tokens = splitArgs(args);
 			const sub = (tokens[0] || "start") as Sub;
 			const rest = tokens.slice(1);
 			const notify = (m: string, l: "info" | "error" = "info") => ctx.ui.notify(m, l);
+
+			function showHelp() {
+				const lines = [
+					"Usage: /kanban <command>",
+					"",
+					"Global commands:",
+					"  start            Start the dashboard server",
+					"  stop             Stop the dashboard server",
+					"  restart          Restart the dashboard server",
+					"  status           Show server status",
+					"  open web          Open dashboard in browser",
+					"  open app          Open dashboard as PWA",
+					"",
+					"Session commands (default to current session):",
+					"  session open [<id>]",
+					"  session pin [<id>]",
+					"  session sticky-pin [<id>]",
+					"  session unpin [<id>]",
+					"  session view-doc <file> [<id>]",
+					"  session link-doc <file> [<id>]",
+				];
+				notify(lines.join("\n"));
+			}
 
 			if (sub === "start") {
 				await startServer(notify);
@@ -381,88 +416,104 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			}
 
 			if (sub === "open") {
+				const verb = rest[0];
+				if (verb === "web") {
+					const { default: open } = await import("open");
+					await open(url);
+					return;
+				}
+				if (verb === "app") {
+					const { default: open, apps } = await import("open");
+					for (const name of [apps.chrome, apps.edge, apps.browser]) {
+						try {
+							await open(url, { app: { name, arguments: [`--app=${url}`] } });
+							return;
+						} catch {}
+					}
+					notify("Could not find Chrome/Edge for PWA window mode", "error");
+					return;
+				}
+				notify(`Usage: /kanban open web|app${verb ? ` (unknown: ${verb})` : ""}`, "error");
+				return;
+			}
+
+			if (sub === "session") {
+				const verb = rest[0] as SessionSub | undefined;
+				const verbRest = rest.slice(1);
+
+				if (!verb) {
+					showHelp();
+					return;
+				}
+
+				if (!(SESSION_SUBCOMMANDS as readonly string[]).includes(verb)) {
+					notify(`Unknown session verb: ${verb}. Try: ${SESSION_SUBCOMMANDS.join(", ")}`, "error");
+					return;
+				}
+
 				if (!(await ensureRunning(notify))) return;
-				const id = rest[0] ?? ctx.sessionManager.getSessionId() ?? null;
-				if (!id) {
-					notify("Usage: /kanban open <session-id> (no current session to default to)", "error");
-					return;
-				}
-				const res = await postSessionOpen(id);
-				if (!res.ok) {
-					notify(`open failed (${res.status}): ${await res.text()}`, "error");
-					return;
-				}
-				const usedCurrent = !rest[0];
-				notify(`opened: ${id}${usedCurrent ? " (current)" : ""}`);
-				return;
-			}
 
-			if (sub === "web") {
-				const { default: open } = await import("open");
-				await open(url);
-				return;
-			}
-
-			if (sub === "app") {
-				const { default: open, apps } = await import("open");
-				for (const name of [apps.chrome, apps.edge, apps.browser]) {
-					try {
-						await open(url, { app: { name, arguments: [`--app=${url}`] } });
+				if (verb === "open") {
+					const id = verbRest[0] ?? ctx.sessionManager.getSessionId() ?? null;
+					if (!id) {
+						notify("Usage: /kanban session open <session-id> (no current session to default to)", "error");
 						return;
-					} catch {}
+					}
+					const res = await postSessionOpen(id);
+					if (!res.ok) {
+						notify(`open failed (${res.status}): ${await res.text()}`, "error");
+						return;
+					}
+					notify(`opened: ${id}${!verbRest[0] ? " (current)" : ""}`);
+					return;
 				}
-				notify("Could not find Chrome/Edge for PWA window mode", "error");
-				return;
+
+				if (verb === "pin" || verb === "sticky-pin" || verb === "unpin") {
+					const id = verbRest[0] ?? ctx.sessionManager.getSessionId() ?? null;
+					if (!id) {
+						notify(`Usage: /kanban session ${verb} <session-id> (no current session to default to)`, "error");
+						return;
+					}
+					const PIN_STATE = { "sticky-pin": "sticky", "unpin": "none", "pin": "pinned" } as const;
+					const state = PIN_STATE[verb];
+					const res = await postPin(id, state);
+					if (!res.ok) {
+						notify(`${verb} failed (${res.status}): ${await res.text()}`, "error");
+						return;
+					}
+					const pinVerb = verb === "unpin" ? "unpinned" : state;
+					notify(`${pinVerb}: ${id}${!verbRest[0] ? " (current)" : ""}`);
+					return;
+				}
+
+				if (verb === "view-doc" || verb === "link-doc") {
+					const file = verbRest[0];
+					if (!file) {
+						notify(`Usage: /kanban session ${verb} <file.md> [session-id]`, "error");
+						return;
+					}
+					const sessionId = verbRest[1] ?? ctx.sessionManager.getSessionId() ?? null;
+					if (verb === "link-doc" && !sessionId) {
+						notify("Usage: /kanban session link-doc <file.md> <session-id> (no current session to default to)", "error");
+						return;
+					}
+					const expanded =
+						file === "~" || file.startsWith("~/") || file.startsWith("~\\")
+							? joinPath(homedir(), file.slice(1))
+							: file;
+					const abs = isAbsolute(expanded) ? expanded : resolvePath(process.cwd(), expanded);
+					const res = await postPreview(abs, sessionId, verb === "link-doc");
+					if (!res.ok) {
+						notify(`${verb} failed (${res.status}): ${await res.text()}`, "error");
+						return;
+					}
+					const usedCurrent = !verbRest[1] && sessionId;
+					notify(`${verb}: ${abs}${sessionId ? ` → session ${sessionId}${usedCurrent ? " (current)" : ""}` : ""}`);
+					return;
+				}
 			}
 
-			if (sub === "pin" || sub === "sticky-pin" || sub === "unpin") {
-				if (!(await ensureRunning(notify))) return;
-				const id = rest[0] ?? ctx.sessionManager.getSessionId() ?? null;
-				if (!id) {
-					notify(`Usage: /kanban ${sub} <session-id> (no current session to default to)`, "error");
-					return;
-				}
-				const PIN_STATE = { "sticky-pin": "sticky", "unpin": "none", "pin": "pinned" } as const;
-				const state = PIN_STATE[sub];
-				const res = await postPin(id, state);
-				if (!res.ok) {
-					notify(`${sub} failed (${res.status}): ${await res.text()}`, "error");
-					return;
-				}
-				const usedCurrent = !rest[0];
-				const verb = sub === "unpin" ? "unpinned" : state;
-				notify(`${verb}: ${id}${usedCurrent ? " (current)" : ""}`);
-				return;
-			}
-
-			if (sub === "preview" || sub === "link") {
-				if (!(await ensureRunning(notify))) return;
-				const file = rest[0];
-				if (!file) {
-					notify(`Usage: /kanban ${sub} <file.md> [session-id]`, "error");
-					return;
-				}
-				const sessionId = rest[1] ?? ctx.sessionManager.getSessionId() ?? null;
-				if (sub === "link" && !sessionId) {
-					notify("Usage: /kanban link <file.md> <session-id> (no current session to default to)", "error");
-					return;
-				}
-				const expanded =
-					file === "~" || file.startsWith("~/") || file.startsWith("~\\")
-						? joinPath(homedir(), file.slice(1))
-						: file;
-				const abs = isAbsolute(expanded) ? expanded : resolvePath(process.cwd(), expanded);
-				const res = await postPreview(abs, sessionId, sub === "link");
-				if (!res.ok) {
-					notify(`${sub} failed (${res.status}): ${await res.text()}`, "error");
-					return;
-				}
-				const usedCurrent = !rest[1] && sessionId;
-				notify(`${sub}: ${abs}${sessionId ? ` → session ${sessionId}${usedCurrent ? " (current)" : ""}` : ""}`);
-				return;
-			}
-
-			notify(`Unknown subcommand: ${sub}. Try: ${SUBCOMMANDS.join(", ")}`, "error");
+			showHelp();
 		},
 	});
 }

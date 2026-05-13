@@ -10,7 +10,7 @@ pi-kanban is a **read-only observability dashboard** for the [pi coding agent](h
 
 2. **`public/`** — vanilla HTML/CSS/JS frontend. **Everything lives in one file: `public/app.js` organized by `//#region` blocks. No bundler, no framework.
 
-3. **`extensions/kanban.ts`** — pi extension exposing the `/kanban` slash command (`start | stop | status | open | app | pin | sticky-pin | unpin | preview | link`). Spawns `server.js` as a child process on port 3460 and proxies pin/preview commands via HTTP. This is the entry point when installed via `pi install npm:pi-kanban`.
+3. **`extensions/kanban.ts`** — pi extension exposing the `/kanban` slash command (`start | stop | status | open web|app | session open | session pin | session sticky-pin | session unpin | session view-doc | session link-doc`). Spawns `server.js` as a child process on port 3460 and proxies pin/preview commands via HTTP. This is the entry point when installed via `pi install npm:pi-kanban`.
 
 ### Session parsing (`lib/pi-parsers.js`)
 

@@ -6,20 +6,29 @@ A walkthrough of the dashboard and `/kanban` commands. For installation, see the
 
 Run from inside pi:
 
-| Command                  | What it does                                         |
-| ------------------------ | ---------------------------------------------------- |
-| `/kanban start`          | Start the local server (port 3460) in the background |
-| `/kanban stop`           | Stop the running server                              |
-| `/kanban restart`        | Restart the server (picks up theme/config changes)   |
-| `/kanban status`         | Show whether the server is running                   |
-| `/kanban open`           | Open current session                                 |
-| `/kanban web`            | Open the dashboard in the default browser            |
-| `/kanban app`            | Open in a standalone PWA window (if installed)       |
-| `/kanban pin`            | Pin a session                                        |
-| `/kanban sticky-pin`     | Sticky-pin a session                                 |
-| `/kanban unpin`          | Remove a pin                                         |
-| `/kanban preview <path>` | Render a markdown file in the dashboard preview pane |
-| `/kanban link <path>`    | Add a document link to a session                     |
+### Global commands
+
+| Command | What it does |
+| ---------------------- | ---------------------------------------------------- |
+| `/kanban start` | Start the local server (port 3460) in the background |
+| `/kanban stop` | Stop the running server |
+| `/kanban restart` | Restart the server (picks up theme/config changes) |
+| `/kanban status` | Show whether the server is running |
+| `/kanban open web` | Open the dashboard in the default browser |
+| `/kanban open app` | Open in a standalone PWA window (if installed) |
+
+### Session commands
+
+All session commands default to the current session when `[<id>]` is omitted.
+
+| Command | What it does |
+| --------------------------------------- | ---------------------------------------------------- |
+| `/kanban session open [<id>]` | Open/focus a session in the dashboard |
+| `/kanban session pin [<id>]` | Pin a session |
+| `/kanban session sticky-pin [<id>]` | Sticky-pin a session |
+| `/kanban session unpin [<id>]` | Remove a pin |
+| `/kanban session view-doc <path> [<id>]` | Render a markdown file in the dashboard preview pane |
+| `/kanban session link-doc <path> [<id>]` | Add a document link to a session |
 
 ## Layout
 
