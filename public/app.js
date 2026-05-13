@@ -981,11 +981,19 @@ function renderMessageList(messages) {
           </div>`);
       } else {
         const cmd = parseCommandMessage(m.text);
+        const imgCount = m.images?.length || 0;
         const displayText = cmd ? cmd : escapeHtml(cleanMessageText(m.text));
         const isCmd = !!cmd;
+        const chips = [];
+        if (imgCount) chips.push(`<span class="user-attach-chip">${imgCount} image${imgCount > 1 ? 's' : ''}</span>`);
+        const chipsHtml = chips.length ? `<div class="user-attach-chips">${chips.join('')}</div>` : '';
+        let textHtml;
+        if (displayText) textHtml = isCmd ? `<code>${escapeHtml(displayText)}</code>` : displayText;
+        else if (chips.length) textHtml = '<em class="msg-text-muted">(attachment)</em>';
+        else textHtml = '';
         parts.push(`<div class="msg-item msg-user${isCmd ? ' msg-cmd' : ''}" ${clickable}>
             ${MSG_ICON_USER}
-            <div class="msg-body"><div class="msg-text">${isCmd ? `<code>${escapeHtml(displayText)}</code>` : displayText}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${pinBtn}
+            <div class="msg-body"><div class="msg-text">${textHtml}</div>${chipsHtml}<div class="msg-time">${formatDate(m.timestamp)}</div></div>${pinBtn}
           </div>`);
       }
     } else if (m.type === 'assistant') {
@@ -1373,6 +1381,17 @@ const linkSvg = (size) =>
 //#endregion
 
 //#region MODALS
+function renderUserAttachments(m) {
+  if (!m.images?.length || !m.id || !currentSessionId) return '';
+  const imgs = m.images
+    .map((img) => {
+      const url = `/api/sessions/${encodeURIComponent(currentSessionId)}/user-image/${encodeURIComponent(m.id)}/${img.blockIndex}`;
+      return `<img src="${url}" loading="lazy" alt="attached image" class="user-attach-image" onerror="this.style.display='none'" />`;
+    })
+    .join('');
+  return `<div class="user-attach-section"><div class="user-attach-label">Attached images</div><div class="user-attach-images">${imgs}</div></div>`;
+}
+
 function showMsgDetail(idx) {
   currentMsgDetailIdx = idx;
   const m = currentMessages[idx];
@@ -1439,13 +1458,14 @@ function showMsgDetail(idx) {
     }
     body.innerHTML = mainHtml + toolParamsHtml + taskResultHtml + (hasAgentTabs || isParallelAgent ? '' : toolResultHtml) + agentExtraHtml;
   } else {
-    const rawText = stripAnsi(m.fullText || m.text);
+    let rawText = stripAnsi(m.fullText || m.text);
+    const userExtras = renderUserAttachments(m);
     const cmd = m.type === 'user' ? parseCommandMessage(rawText) : null;
     document.getElementById('msg-detail-title').textContent =
       m.type === 'assistant' ? 'Pi' : m.systemLabel ? 'System' : 'User';
     document.getElementById('msg-detail-agent-btn').style.display = 'none';
     if (m.compactSummary) {
-      body.innerHTML = renderMarkdown(m.compactSummary);
+      body.innerHTML = renderMarkdown(m.compactSummary) + userExtras;
     } else if (cmd) {
       const argsMatch = rawText.match(/<command-args>([^<]*)<\/command-args>/);
       const args = argsMatch?.[1].trim() ? argsMatch[1].trim() : null;
@@ -1455,9 +1475,9 @@ function showMsgDetail(idx) {
         .trim();
       let cmdHtml = `<code>${escapeHtml(cmd)}${args ? ` ${escapeHtml(args)}` : ''}</code>`;
       if (cleanBody) cmdHtml += `<div style="margin-top:10px">${renderMarkdown(cleanBody)}</div>`;
-      body.innerHTML = cmdHtml;
+      body.innerHTML = cmdHtml + userExtras;
     } else {
-      body.innerHTML = renderMarkdown(rawText);
+      body.innerHTML = renderMarkdown(rawText) + userExtras;
     }
   }
   const modal = document.getElementById('msg-detail-modal').querySelector('.modal');

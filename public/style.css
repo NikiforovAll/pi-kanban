@@ -3758,3 +3758,47 @@ pre.mermaid svg {
 }
 /* #endregion */
 
+/* #region USER_ATTACHMENTS */
+.user-attach-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.user-attach-chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+.msg-text-muted {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.user-attach-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.user-attach-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.user-attach-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.user-attach-image {
+  max-width: 100%;
+  max-height: 480px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+}
+/* #endregion */
+

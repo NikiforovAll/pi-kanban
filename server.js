@@ -213,6 +213,21 @@ app.get('/api/sessions/:id/tool-result/:toolUseId', async (req, res) => {
 });
 
 
+app.get('/api/sessions/:id/user-image/:msgId/:blockIndex', async (req, res) => {
+  const meta = await parsers.findSessionFileById(req.params.id);
+  if (!meta?.file) return res.status(404).end();
+  try {
+    const img = await parsers.readUserImage(meta.file, req.params.msgId, Number(req.params.blockIndex));
+    if (!img) return res.status(404).end();
+    res.setHeader('Content-Type', img.mediaType);
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(Buffer.from(img.data, 'base64'));
+  } catch (err) {
+    res.status(500).end();
+  }
+});
+
+
 app.get('/api/sessions/:id/agents', async (req, res) => {
   const meta = await parsers.findSessionFileById(req.params.id);
   if (!meta) return res.status(404).json({ agents: [], error: 'not found' });
@@ -535,11 +550,38 @@ parsers.setOnBranchResolved((cwd, branch) => {
 
 const queueSessionUpdate = debounceByKey(75, (sid) => sseSend({ type: 'update', sessionId: sid }));
 
+// When a subagent session file changes, notify the parent session so the
+// frontend refreshes agent chips with model info immediately.
+async function notifyParentSession(f) {
+  const base = path.basename(f);
+  if (base === 'session.jsonl') {
+    // Path: .../sessions/<enc>/<sessionName>/<runId>/run-N/session.jsonl
+    // Parent session dir is three levels up.
+    const parentId = parsers.slugFromFile(path.dirname(path.dirname(path.dirname(f))));
+    if (parentId && parentId !== 'session') queueSessionUpdate(parentId);
+  } else if (base.endsWith('.jsonl')) {
+    // Possible fork-mode sibling session — read first line to check parentSession.
+    try {
+      const fd = await fsp.open(f, 'r');
+      const buf = Buffer.alloc(512);
+      const { bytesRead } = await fd.read(buf, 0, 512, 0);
+      await fd.close();
+      const firstLine = buf.slice(0, bytesRead).toString('utf8').split('\n')[0];
+      const ev = JSON.parse(firstLine);
+      if (ev.parentSession) {
+        const parentId = parsers.slugFromFile(ev.parentSession);
+        if (parentId) queueSessionUpdate(parentId);
+      }
+    } catch {}
+  }
+}
+
 for (const ev of ['add', 'change', 'unlink']) {
   watcher.on(ev, (f) => {
     parsers.invalidateSessionCache(f);
     agentLogStreams.notify(f);
     queueSessionUpdate(parsers.slugFromFile(f));
+    notifyParentSession(f).catch(() => {});
   });
 }
 
