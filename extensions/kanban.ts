@@ -6,9 +6,10 @@ import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const extDir = fileURLToPath(new URL(".", import.meta.url));
+const extDir = fileURLToPath(new URL('.', import.meta.url));
+
 const taskStore = createRequire(import.meta.url)(
 	resolvePath(extDir, "..", "lib", "task-store.js"),
 ) as {
@@ -231,7 +232,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			const cwd = ctx?.sessionManager?.getCwd?.() ?? process.cwd();
 			const inputPath = String(params.path ?? "").trim();
 			if (!inputPath) {
-				return { content: [{ type: "text", text: "Error: path is required." }], isError: true };
+				return { content: [{ type: "text", text: "Error: path is required." }], isError: true, details: { path: inputPath, title: null, sessionId } };
 			}
 			const absPath = isAbsolute(inputPath) ? inputPath : resolvePath(cwd, inputPath);
 
@@ -239,7 +240,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			try {
 				const stat = statSync(absPath);
 				if (!stat.isFile()) {
-					return { content: [{ type: "text", text: `Error: ${absPath} is not a file.` }], isError: true };
+					return { content: [{ type: "text", text: `Error: ${absPath} is not a file.` }], isError: true, details: { path: absPath, title: null, sessionId } };
 				}
 				const buf = readFileSync(absPath, { encoding: "utf8" });
 				const head = buf.slice(0, PLAN_MAX_BYTES);
@@ -248,6 +249,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: `Error reading ${absPath}: ${e?.message ?? e}` }],
 					isError: true,
+					details: { path: absPath, title: null, sessionId },
 				};
 			}
 
@@ -255,6 +257,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: "Error: no active session id; cannot bind plan." }],
 					isError: true,
+					details: { path: absPath, title: title ?? null, sessionId },
 				};
 			}
 			try {
@@ -262,12 +265,12 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 				if (!res.ok) {
 					const msg = `pi-kanban server rejected bind_plan: HTTP ${res.status}. Is /kanban running?`;
 					console.warn(msg);
-					return { content: [{ type: "text", text: msg }], isError: true };
+					return { content: [{ type: "text", text: msg }], isError: true, details: { path: absPath, title, sessionId } };
 				}
 			} catch (e: any) {
 				const msg = `pi-kanban: bind_plan POST failed (server may be stopped): ${e?.message ?? e}`;
 				console.warn(msg);
-				return { content: [{ type: "text", text: msg }], isError: true };
+				return { content: [{ type: "text", text: msg }], isError: true, details: { path: absPath, title: title ?? null, sessionId } };
 			}
 
 			const summary = title ? `Bound plan "${title}" → ${absPath}` : `Bound plan → ${absPath}`;

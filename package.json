@@ -14,9 +14,12 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
-    "release:local": "npm version \"$(git describe --tags --exact-match)\" --no-git-tag-version --allow-same-version && npm publish --access public && git checkout -- package.json package-lock.json"
+    "release:local": "npm version \"$(git describe --tags --exact-match)\" --no-git-tag-version --allow-same-version && npm publish --access public && git checkout -- package.json package-lock.json",
+    "typecheck:extensions": "tsc -p extensions/tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^25.6.2",
+    "typescript": "^5.8.2",
     "vitepress": "^1.6.4"
   },
   "keywords": [
@@ -48,10 +51,11 @@
   "dependencies": {
     "chokidar": "^3.5.3",
     "express": "^4.18.2",
-    "open": "^11.0.0"
+    "open": "^11.0.0",
+    "typebox": "^1.1.38"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "pi": {
     "extensions": [
