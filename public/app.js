@@ -2357,7 +2357,7 @@ function _renderSessions() {
   const LIVE_INDICATOR_MS = 10 * 1000;
   let filteredSessions = sessions;
   if (sessionFilter === 'active') {
-    const ACTIVE_PLAN_MS = 15 * 60 * 1000;
+    const ACTIVE_PLAN_MS = 10 * 60 * 1000;
     const now = Date.now();
     const activeSessionIds = new Set();
     filteredSessions = filteredSessions.filter((s) => {
