@@ -325,6 +325,7 @@ body::before {
   display: flex;
   gap: 6px;
   padding: 0 16px 10px;
+  align-items: center;
 }
 
 .reset-btn {
@@ -358,6 +359,49 @@ body::before {
 
 .filter-dropdown option {
   background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.filter-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+  user-select: none;
+  cursor: pointer;
+}
+
+.filter-checkbox-label input[type='checkbox'] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.filter-pins-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: var(--bg-deep);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.filter-pins-btn:hover {
+  border-color: var(--border);
+}
+
+.filter-checkbox-label input[type='checkbox']:checked + .filter-pins-btn {
+  border-color: var(--border);
   color: var(--text-primary);
 }
 
