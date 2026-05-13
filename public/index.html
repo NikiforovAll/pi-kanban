@@ -53,15 +53,15 @@
           </div>
           <span class="logo-text">Dashboard</span>
         </div>
-        <div id="connection-status" class="connection">
-          <span class="connection-dot"></span>
-          <span>Connecting</span>
-        </div>
         <button id="sidebar-toggle" class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M15 18l-6-6 6-6"/>
           </svg>
         </button>
+        <div id="connection-status" class="connection">
+          <span class="connection-dot"></span>
+          <span>Connecting</span>
+        </div>
       </header>
 
       <!-- Tasks -->
@@ -93,8 +93,15 @@
             </select>
             <select id="session-filter" class="filter-dropdown" onchange="filterBySessions(this.value)" aria-label="Filter by session status">
               <option value="all">All Sessions</option>
-              <option value="active">Active Only</option>
+              <option value="active">Active</option>
             </select>
+            <label class="filter-checkbox-label" id="show-pins-label" title="Include pinned sessions in Active filter">
+              <input type="checkbox" id="show-pins" onchange="toggleShowPins(this.checked)" />
+              <span class="filter-pins-btn">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><path d="M5 10l7-7 7 7"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
+                Pins
+              </span>
+            </label>
           </div>
           <div class="filter-row">
             <select id="session-limit" class="filter-dropdown" onchange="changeSessionLimit(this.value)" aria-label="Number of sessions to show">

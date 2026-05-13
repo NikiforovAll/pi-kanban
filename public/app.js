@@ -4,6 +4,7 @@ let currentSessionId = null;
 let currentTasks = [];
 let viewMode = 'session';
 let sessionFilter = 'active';
+let showPins = false; // include pinned sessions when Active filter is active
 let sessionLimit = '20';
 let filterProject = '__recent__'; // null = all, '__recent__' = last 24h, or project path
 let recentProjects = new Set();
@@ -62,6 +63,9 @@ function getUrlState() {
       ? params.get('messages') === '1'
       : localStorage.getItem('message-panel-open') === 'true',
     projectView: params.get('projectView'),
+    pins: params.has('pins')
+      ? params.get('pins') === '1'
+      : localStorage.getItem('show-pins') === '1',
   };
 }
 
@@ -71,6 +75,7 @@ function updateUrl() {
   if (viewMode === 'project' && currentProjectPath) params.set('projectView', btoa(currentProjectPath));
   if (currentSessionId) params.set('session', currentSessionId);
   if (sessionFilter !== 'active') params.set('filter', sessionFilter);
+  if (showPins) params.set('pins', '1');
   if (sessionLimit !== '20') params.set('limit', sessionLimit);
   if (filterProject && filterProject !== '__recent__') params.set('project', filterProject);
   if (searchQuery) params.set('search', searchQuery);
@@ -107,6 +112,8 @@ function resetState() {
     localStorage.removeItem(LAST_VIEW_KEY);
   } catch (_) {}
   sessionFilter = 'active';
+  showPins = false;
+  localStorage.removeItem('show-pins');
   sessionLimit = '20';
   filterProject = '__recent__';
   searchQuery = '';
@@ -2404,15 +2411,15 @@ function _renderSessions() {
     filteredSessions = filteredSessions.filter(matchesSearch);
 
     // Re-add pinned/sticky sessions that match the query but were excluded by active filter
-    if (pinnedSessionIds.size > 0 || stickySessionIds.size > 0) {
+    if (showPins && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
       const filteredIds = new Set(filteredSessions.map((s) => s.id));
       const missingPinned = sessions.filter((s) => isAnyPinned(s.id) && !filteredIds.has(s.id) && matchesSearch(s));
       if (missingPinned.length) filteredSessions = [...missingPinned, ...filteredSessions];
     }
   }
 
-  // Include pinned/sticky sessions even if they don't match active/recent filter
-  if (!searchQuery && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
+  // Include pinned/sticky sessions even if they don't match active filter
+  if (sessionFilter === 'active' && showPins && !searchQuery && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
     const filteredIds = new Set(filteredSessions.map((s) => s.id));
     const missingPinned = sessions.filter((s) => isAnyPinned(s.id) && !filteredIds.has(s.id));
     if (missingPinned.length) filteredSessions = [...missingPinned, ...filteredSessions];
@@ -2625,31 +2632,7 @@ function _renderSessions() {
 
     sessionsList.innerHTML = html;
   } else {
-    const sticky = filteredSessions.filter((s) => isPlacedSticky(s.id));
-    const idlePinned = filteredSessions.filter((s) => isPlacedPinned(s.id) && !isSessionActive(s));
-    const rest = filteredSessions.filter(
-      (s) => (!isPlacedPinned(s.id) && !isPlacedSticky(s.id)) || (isPlacedPinned(s.id) && isSessionActive(s)),
-    );
-    let html = '';
-    if (sticky.length > 0) {
-      html += sticky.map(renderSessionCard).join('');
-    }
-    const isCollapsed = collapsedProjectGroups.has('__pinned__');
-    const hasPinned = pinnedSessionIds.size > 0 && filteredSessions.some((s) => pinnedSessionIds.has(s.id));
-    if (idlePinned.length > 0 || (hasPinned && isCollapsed)) {
-      html += `
-            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}" data-group-path="__pinned__">
-              <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              <span class="group-name">Pinned</span>
-              <span class="group-count">${idlePinned.length}</span>
-            </div>
-            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}">
-              ${idlePinned.map(renderSessionCard).join('')}
-            </div>
-          `;
-    }
-    html += rest.map(renderSessionCard).join('');
-    sessionsList.innerHTML = html;
+    sessionsList.innerHTML = filteredSessions.map(renderSessionCard).join('');
   }
 
   const navItems = getNavigableItems();
@@ -4941,8 +4924,16 @@ function filterBySessions(value) {
   sessionFilter = value;
   updateUrl();
   renderSessions();
+  syncFilterUI();
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleShowPins(checked) {
+  showPins = checked;
+  localStorage.setItem('show-pins', showPins ? '1' : '0');
+  updateUrl();
+  renderSessions();
+}
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function changeSessionLimit(value) {
   sessionLimit = value;
@@ -5289,9 +5280,16 @@ function loadPanelWidths() {
 //#endregion
 
 //#region PREFERENCES
+function syncFilterUI() {
+  const pinsLabel = document.getElementById('show-pins-label');
+  if (pinsLabel) pinsLabel.style.display = sessionFilter === 'active' ? '' : 'none';
+  const pinsChk = document.getElementById('show-pins');
+  if (pinsChk) pinsChk.checked = showPins;
+}
 function loadPreferences() {
   document.getElementById('session-filter').value = sessionFilter;
   document.getElementById('session-limit').value = sessionLimit;
+  syncFilterUI();
 }
 
 //#endregion
@@ -5802,6 +5800,7 @@ fetch('/api/version')
 
 const urlState = getUrlState();
 sessionFilter = urlState.filter || 'active';
+showPins = urlState.pins;
 sessionLimit = urlState.limit || '20';
 filterProject = urlState.project || '__recent__';
 searchQuery = urlState.search || '';
@@ -5854,6 +5853,7 @@ fetchSessions()
 window.addEventListener('popstate', () => {
   const s = getUrlState();
   sessionFilter = s.filter || 'active';
+  showPins = s.pins;
   sessionLimit = s.limit || '20';
   filterProject = s.project || '__recent__';
   searchQuery = s.search || '';
