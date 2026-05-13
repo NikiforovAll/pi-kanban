@@ -4321,15 +4321,6 @@ function handleSessionOpenEvent(data) {
     showToast(`Session not found: ${id.slice(0, 8)}`);
     return;
   }
-  if (sessionFilter !== 'active') {
-    sessionFilter = 'active';
-    const sel = document.getElementById('session-filter');
-    if (sel) sel.value = 'active';
-    updateUrl();
-  }
-  if (!isSessionActive(target)) {
-    stickySessionIds.add(id);
-  }
   fetchTasks(id);
 }
 
