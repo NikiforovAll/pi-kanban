@@ -24,7 +24,7 @@ When you're ready to run it on your own pi sessions, install below.
 pi install npm:pi-kanban
 ```
 
-Then use `/kanban start | stop | restart | status | open | web | app | pin | sticky-pin | unpin | preview | link` from inside pi.
+Then use `/kanban start | stop | restart | status | open web|app` for global controls, and `/kanban session open | pin | sticky-pin | unpin | preview | link` for session-scoped actions.
 
 Or run standalone:
 
