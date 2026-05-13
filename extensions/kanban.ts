@@ -71,7 +71,7 @@ const SESSION_SUBCOMMANDS = [
 	"pin",
 	"sticky-pin",
 	"unpin",
-	"preview-doc",
+	"view-doc",
 	"link-doc",
 ] as const;
 type SessionSub = (typeof SESSION_SUBCOMMANDS)[number];
@@ -385,7 +385,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					"  session pin [<id>]",
 					"  session sticky-pin [<id>]",
 					"  session unpin [<id>]",
-					"  session preview-doc <file> [<id>]",
+					"  session view-doc <file> [<id>]",
 					"  session link-doc <file> [<id>]",
 				];
 				notify(lines.join("\n"));
@@ -486,7 +486,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				if (verb === "preview-doc" || verb === "link-doc") {
+				if (verb === "view-doc" || verb === "link-doc") {
 					const file = verbRest[0];
 					if (!file) {
 						notify(`Usage: /kanban session ${verb} <file.md> [session-id]`, "error");
