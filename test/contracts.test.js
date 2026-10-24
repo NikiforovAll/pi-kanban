@@ -20,16 +20,11 @@ const {
   readRecentMessages,
   readMessagesPage,
   buildAgentProgressMap,
-  readCompactSummaries,
-  fillCompactSummaries,
   findTerminatedTeammates,
   extractPromptFromTranscript,
   extractModelFromTranscript,
-  readSubagentMeta,
   extractAgentResultFromTranscript,
   readScratchpadCreations,
-  updateLoopInfo,
-  buildLoopInfoFromState,
   modelDisplayName
 } = require('../lib/parsers');
 const { readClaudeLines } = require('../lib/pi-transcript');
@@ -560,85 +555,6 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   });
 });
 
-describe('Parser: updateLoopInfo', () => {
-  const line = (o) => `${JSON.stringify({ timestamp: '2026-01-01T00:00:00Z', ...o })}\n`;
-  const toolUse = (id, name, input) => line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } });
-  const toolResult = (toolUseId, resultId) => line({
-    type: 'user',
-    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'ok' }] },
-    ...(resultId && { toolUseResult: { id: resultId } }),
-  });
-  const otherTools = toolUse('toolu_b1', 'Bash', { command: 'ls' }) + toolResult('toolu_b1', 'not-a-cron');
-
-  let dir;
-  before(() => { dir = mkdtempSync(path.join(os.tmpdir(), 'pk-loop-')); });
-  after(() => rmSync(dir, { recursive: true, force: true }));
-
-  it('resolves a cron task id from its result and drops a deleted cron', () => {
-    const p = path.join(dir, 'full.jsonl');
-    writeFileSync(p, [
-      otherTools,
-      toolUse('toolu_w1', 'ScheduleWakeup', { delaySeconds: 60, reason: 'poll', prompt: 'go' }),
-      toolUse('toolu_c1', 'CronCreate', { cron: '0 * * * *', prompt: 'hourly' }),
-      otherTools,
-      toolResult('toolu_c1', 'task-1'),
-      toolUse('toolu_c2', 'CronCreate', { cron: '5 * * * *', prompt: 'gone' }),
-      toolResult('toolu_c2', 'task-2'),
-      toolUse('toolu_d1', 'CronDelete', { id: 'task-2' }),
-    ].join(''));
-    const info = buildLoopInfoFromState(updateLoopInfo(p, null));
-    assert.equal(info.wakeups.length, 1);
-    assert.equal(info.wakeups[0].delaySeconds, 60);
-    assert.deepEqual(info.crons.map((c) => [c.id, c.taskId, c.prompt]), [['toolu_c1', 'task-1', 'hourly']]);
-  });
-
-  it('resolves a cron result that arrives in a later append with no loop tool in it', () => {
-    const p = path.join(dir, 'append.jsonl');
-    writeFileSync(p, toolUse('toolu_c1', 'CronCreate', { cron: '0 * * * *', prompt: 'hourly' }));
-    let state = updateLoopInfo(p, null);
-    assert.equal(buildLoopInfoFromState(state).crons[0].taskId, null);
-    writeFileSync(p, otherTools, { flag: 'a' });
-    state = updateLoopInfo(p, state);
-    writeFileSync(p, otherTools + toolResult('toolu_c1', 'task-1'), { flag: 'a' });
-    state = updateLoopInfo(p, state);
-    assert.equal(buildLoopInfoFromState(state).crons[0].taskId, 'task-1');
-    assert.equal(state.scannedOffset, readFileSync(p).length);
-  });
-
-  const wakeAt = (timestamp, id, input) => line({ timestamp, type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'ScheduleWakeup', input }] } });
-
-  it('replaces a pending wakeup with a newer one and keeps the fired ones', () => {
-    const p = path.join(dir, 'replace.jsonl');
-    writeFileSync(p, [
-      wakeAt('2026-01-01T00:00:00Z', 'toolu_w1', { delaySeconds: 60, prompt: 'fired' }),
-      wakeAt('2026-01-01T00:02:00Z', 'toolu_w2', { delaySeconds: 600, prompt: 'replaced' }),
-      wakeAt('2026-01-01T00:03:00Z', 'toolu_w3', { delaySeconds: 600, prompt: 'pending' }),
-    ].join(''));
-    const info = buildLoopInfoFromState(updateLoopInfo(p, null));
-    assert.deepEqual(info.wakeups.map((w) => w.id), ['toolu_w1', 'toolu_w3']);
-  });
-
-  it('cancels the pending wakeup on stop and shows no row for the stop', () => {
-    const p = path.join(dir, 'stop.jsonl');
-    writeFileSync(p, wakeAt('2026-01-01T00:00:00Z', 'toolu_w1', { delaySeconds: 600, prompt: 'go' }));
-    let state = updateLoopInfo(p, null);
-    writeFileSync(p, wakeAt('2026-01-01T00:01:00Z', 'toolu_w2', { stop: true }), { flag: 'a' });
-    state = updateLoopInfo(p, state);
-    assert.deepEqual(buildLoopInfoFromState(state).wakeups, []);
-  });
-
-  it('keeps a partial last line for the next call', () => {
-    const p = path.join(dir, 'partial.jsonl');
-    const wake = toolUse('toolu_w1', 'ScheduleWakeup', { delaySeconds: 30 });
-    writeFileSync(p, otherTools + wake.slice(0, 20));
-    let state = updateLoopInfo(p, null);
-    assert.equal(state.scannedOffset, Buffer.byteLength(otherTools));
-    writeFileSync(p, wake.slice(20), { flag: 'a' });
-    state = updateLoopInfo(p, state);
-    assert.equal(buildLoopInfoFromState(state).wakeups.length, 1);
-  });
-});
-
 describe('Session cache across restarts', () => {
   const { execFileSync } = require('child_process');
   const { utimesSync } = require('fs');
@@ -897,21 +813,6 @@ describe('Parser: extractModelFromTranscript', () => {
   });
 });
 
-describe('Parser: readSubagentMeta', () => {
-  let tmpDir;
-  before(() => { tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-')); });
-  after(() => rmSync(tmpDir, { recursive: true, force: true }));
-
-  it('reads the meta file next to the transcript', () => {
-    writeFileSync(path.join(tmpDir, 'agent-a1.meta.json'), JSON.stringify({ agentType: 'general-purpose', model: 'opus' }));
-    assert.deepEqual(readSubagentMeta(path.join(tmpDir, 'agent-a1.jsonl')), { agentType: 'general-purpose', model: 'opus' });
-  });
-
-  it('returns null without a meta file', () => {
-    assert.equal(readSubagentMeta(path.join(tmpDir, 'agent-missing.jsonl')), null);
-  });
-});
-
 describe('Parser: readScratchpadCreations', () => {
   const call = (command, id = 'call_1') => piCall(id, 'bash', { command }, { timestamp: '2026-03-05T10:00:00.344Z' });
   const result = (text, id = 'call_1') => ({ ...piResult(id, 'bash', text), timestamp: '2026-03-05T10:00:01.000Z' });
@@ -946,18 +847,7 @@ describe('Parser: readScratchpadCreations', () => {
   });
 });
 
-describe('Parser: readCompactSummaries', () => {
-  it('returns empty without a compaction and for a missing file', async () => {
-    assert.deepEqual(await readCompactSummaries(PI.chat), []);
-    assert.deepEqual(await readCompactSummaries('/nonexistent/path.jsonl'), []);
-  });
-
-  it('returns the inline summary of a compaction', async () => {
-    assert.deepEqual(await readCompactSummaries(PI.compact), [
-      { timestamp: '2026-10-24T11:02:00.000Z', summary: '## Goal\nPlan the release.\n\n## Progress\nSteps 1 and 2 drafted.', source: 'inline' },
-    ]);
-  });
-
+describe('Compaction chips', () => {
   it('gives each chip on an older page its own summary', () => withTmp((dir) => {
     const user = (text, timestamp) => piUser(text, { timestamp });
     const compact = (summary, timestamp) => ({ type: 'compaction', summary, firstKeptEntryId: 'e1', tokensBefore: 10, timestamp });
@@ -976,15 +866,6 @@ describe('Parser: readCompactSummaries', () => {
       ['2026-03-05T10:30:00.000Z', 'Summary three'],
     ]);
   }));
-
-  it('leaves a chip empty when no subagent summary is near it', () => {
-    const chips = [{ systemLabel: 'Compacted', compactSummary: null, timestamp: '2026-03-05T10:20:00.000Z' }];
-    fillCompactSummaries(chips, [
-      { timestamp: '2026-03-05T10:10:00.000Z', summary: 'Summary one', source: 'inline' },
-      { timestamp: '2026-03-05T09:00:00.000Z', summary: 'Old', source: 'subagent' }
-    ]);
-    assert.equal(chips[0].compactSummary, null);
-  });
 });
 
 // --- Background task-notification parsing ---

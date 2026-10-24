@@ -4,7 +4,7 @@
 const express = require('express');
 const path = require('node:path');
 const fs = require('node:fs').promises;
-const { existsSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync, rmSync, mkdirSync, renameSync, openSync, readSync, closeSync, realpathSync } = require('node:fs');
+const { existsSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync, rmSync, mkdirSync, renameSync, realpathSync } = require('node:fs');
 const _readline = require('node:readline');
 const chokidar = require('chokidar');
 const os = require('node:os');
@@ -25,21 +25,15 @@ const {
   transcriptActivityMs,
   modelDisplayName,
   buildSessionDigest,
-  readCompactSummaries,
-  fillCompactSummaries,
   readArtifactLinks,
   readScratchpadCreations,
   extractPromptFromTranscript,
   extractModelFromTranscript,
-  readSubagentMeta,
   extractAgentResultFromTranscript,
-  extractTranscriptStats,
   readFullToolResult,
   readUserImage,
   readToolResultImage,
   readCachedImage,
-  updateLoopInfo,
-  buildLoopInfoFromState,
   readLines
 } = require('./lib/parsers');
 const { inlineHtmlAssets, MIME_BY_EXT } = require('./lib/inline-assets');
@@ -56,7 +50,7 @@ const { createUserGroupStore } = require('./lib/user-groups');
 const { createSessionPinStore } = require('./lib/session-pins');
 const { stampedJsonFile } = require('./lib/stamped-json-file');
 const { parseReviewSource, parseActionBody, formatActionMarkdown } = require('./lib/preview-action');
-const { createDispatchedStore, scanTranscripts, pruneSessionDirs, pruneContextStatus, pruneTaskMaps, retentionMs } = require('./lib/retention');
+const { createDispatchedStore, pruneSessionDirs, pruneContextStatus, pruneTaskMaps, retentionMs } = require('./lib/retention');
 const { createWorktreeStore } = require('./lib/worktrees');
 const { createScratchpadDirResolver, scratchpadRoot } = require('./lib/scratchpad-dir');
 const { readSettings } = require('./lib/claude-settings');
@@ -70,7 +64,7 @@ const { countTaskDir } = require('./lib/task-counts');
 const { readTaskDir } = require('./lib/task-dir');
 const { foldAgentLines } = require('./lib/agent-log');
 const { projectMatcher, normalizeProjectPath, sessionProjectKey } = require('./public/project-match');
-const { getParentVerdict, setParentVerdict } = require('./lib/parent-cache');
+const { sessionRoots, listSessionFiles, readSessionHeader, describeSessionFile, decodeProjectDir, scanSessionIds } = require('./lib/pi-sessions');
 
 if (!require("./cli").runCli(process.argv)) {
   startServer();
@@ -100,8 +94,8 @@ const MEMORY_URL = getArgUrl('memory-url', 'MEMORY_URL');
 const PI_AGENT_DIR = resolvePiAgentDir();
 const PK_DIR = boardDir(PI_AGENT_DIR);
 const TASKS_DIR = path.join(PK_DIR, 'tasks');
-// TODO(port wave 1): point at path.join(PI_AGENT_DIR, 'sessions') once lib/parsers reads pi JSONL.
-const PROJECTS_DIR = path.join(PK_DIR, 'projects');
+const SESSION_ROOTS = sessionRoots({ agentDir: PI_AGENT_DIR });
+const SESSION_OPTS = { roots: SESSION_ROOTS };
 const TEAMS_DIR = path.join(PK_DIR, 'teams');
 const PLANS_DIR = path.join(PK_DIR, 'plans');
 const SESSIONS_DIR = path.join(PK_DIR, 'live');
@@ -682,7 +676,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 const messageCache = new Map();
 const MESSAGE_CACHE_TTL = 5000;
 const MAX_CACHE_ENTRIES = 200;
-const compactSummaryCache = new Map();
 const taskCountsCache = new Map();
 const contextStatusCache = new Map();
 const TASK_MAPS_DIR = path.join(AGENT_ACTIVITY_DIR, '_task-maps');
@@ -860,37 +853,35 @@ function readRecentMessages(jsonlPath, limit = 10) {
  */
 // Returns false when sessionId is unknown — caller must promote to full scan.
 function refreshSessionMetadataPath(jsonlPath) {
-  const sessionId = path.basename(jsonlPath, '.jsonl');
-  if (!isSafeId(sessionId)) return false;
-  const existing = sessionMetadataCache[sessionId];
-  if (!existing) return false;
+  const entry = sessionMetadataOf(jsonlPath);
+  if (!entry || !sessionMetadataCache[entry.sessionId]) return false;
+  sessionMetadataCache[entry.sessionId] = entry.meta;
+  return true;
+}
+
+// Null for a file that is not a pi session or has an unsafe id.
+function sessionMetadataOf(jsonlPath) {
   let info;
   try {
     info = readSessionInfoFromJsonl(jsonlPath);
   } catch (_) {
-    return false;
+    return null;
   }
-  // Shadow JSONLs (continued from a worktree) hold only custom-title / agent-
-  // name records — no projectPath. Don't let a shadow clobber the real entry.
-  const shadow = existing.project && !info.projectPath;
-  if (shadow) {
-    if (!existing.slug && info.slug) existing.slug = info.slug;
-    if (!existing.customTitle && info.customTitle) existing.customTitle = info.customTitle;
-    if (!existing.agentName && info.agentName) existing.agentName = info.agentName;
-    return true;
-  }
-  if (info.slug) existing.slug = info.slug;
-  if (info.cwd) existing.cwd = info.cwd;
-  if (info.gitBranch) existing.gitBranch = info.gitBranch;
-  if (info.customTitle) existing.customTitle = info.customTitle;
-  if (info.agentName) existing.agentName = info.agentName;
-  if (info.logicalParentUuid) existing.logicalParentUuid = info.logicalParentUuid;
-  if (info.compactBoundaryUuid) existing.compactBoundaryUuid = info.compactBoundaryUuid;
-  existing.permissionMode = info.permissionMode;
-  existing.cacheTtl = info.cacheTtl;
-  if (info.scratchpadDir) existing.scratchpadDir = info.scratchpadDir;
-  existing.lastReply = info.lastReply;
-  return true;
+  if (!info.sessionId || !isSafeId(info.sessionId)) return null;
+  return {
+    sessionId: info.sessionId,
+    meta: {
+      project: info.projectPath || decodeProjectDir(path.basename(path.dirname(jsonlPath))),
+      cwd: info.cwd,
+      customTitle: info.customTitle,
+      jsonlPath,
+      lastReply: info.lastReply,
+      scratchpadDir: info.scratchpadDir,
+      firstPrompt: info.firstPrompt,
+      parentSessionPath: info.parentSessionPath,
+      created: info.createdAt,
+    },
+  };
 }
 
 function loadSessionMetadata() {
@@ -915,105 +906,9 @@ function loadSessionMetadata() {
   const metadata = {};
 
   try {
-    if (!existsSync(PROJECTS_DIR)) {
-      return metadata;
-    }
-
-    const projectDirs = readdirSync(PROJECTS_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory());
-
-    for (const projectDir of projectDirs) {
-      const projectPath = path.join(PROJECTS_DIR, projectDir.name);
-
-      // Find all .jsonl files (session logs)
-      const files = readdirSync(projectPath).filter(f => f.endsWith('.jsonl'));
-      const sessionIds = [];
-
-      // Read sessions-index.json first for canonical projectPath
-      let indexProjectPath = null;
-      const indexPath = path.join(projectPath, 'sessions-index.json');
-      let indexEntries = [];
-      if (existsSync(indexPath)) {
-        try {
-          const indexData = JSON.parse(readFileSync(indexPath, 'utf8'));
-          indexEntries = indexData.entries || [];
-          for (const entry of indexEntries) {
-            if (entry.projectPath) { indexProjectPath = entry.projectPath; break; }
-          }
-        } catch {}
-      }
-
-      // First pass: read all JSONL files
-      let resolvedProjectPath = null;
-      for (const file of files) {
-        const sessionId = file.replace('.jsonl', '');
-        const jsonlPath = path.join(projectPath, file);
-        const sessionInfo = readSessionInfoFromJsonl(jsonlPath);
-
-        if (sessionInfo.projectPath && !resolvedProjectPath) {
-          resolvedProjectPath = sessionInfo.projectPath;
-        }
-
-        const candidateProject = indexProjectPath || sessionInfo.projectPath || null;
-        const existing = metadata[sessionId];
-        // Same sessionId can appear in multiple project dirs (e.g. "shadow"
-        // JSONLs that only hold custom-title/agent-name records when a session
-        // is continued from a worktree). Don't let a weaker entry (no cwd, no
-        // project) overwrite a previously resolved one — just merge scalars.
-        if (existing?.project && !candidateProject) {
-          if (!existing.slug && sessionInfo.slug) existing.slug = sessionInfo.slug;
-          if (!existing.customTitle && sessionInfo.customTitle) existing.customTitle = sessionInfo.customTitle;
-          if (!existing.agentName && sessionInfo.agentName) existing.agentName = sessionInfo.agentName;
-          if (!existing.gitBranch && sessionInfo.gitBranch) existing.gitBranch = sessionInfo.gitBranch;
-          sessionIds.push(sessionId);
-          continue;
-        }
-
-        metadata[sessionId] = {
-          slug: sessionInfo.slug,
-          project: candidateProject,
-          cwd: sessionInfo.cwd || null,
-          gitBranch: sessionInfo.gitBranch || null,
-          customTitle: sessionInfo.customTitle || null,
-          agentName: sessionInfo.agentName || null,
-          jsonlPath: jsonlPath,
-          logicalParentUuid: sessionInfo.logicalParentUuid || null,
-          compactBoundaryUuid: sessionInfo.compactBoundaryUuid || null,
-          permissionMode: sessionInfo.permissionMode,
-          cacheTtl: sessionInfo.cacheTtl || null,
-          lastReply: sessionInfo.lastReply || null,
-          scratchpadDir: sessionInfo.scratchpadDir || null
-        };
-        sessionIds.push(sessionId);
-      }
-
-      // Second pass: fill in missing project paths from siblings
-      const canonicalProject = indexProjectPath || resolvedProjectPath;
-      if (canonicalProject) {
-        for (const sid of sessionIds) {
-          if (!metadata[sid].project) {
-            metadata[sid].project = canonicalProject;
-          }
-        }
-      }
-
-      // Apply index metadata (descriptions, custom titles, etc.)
-      for (const entry of indexEntries) {
-        if (entry.sessionId) {
-          if (!metadata[entry.sessionId]) {
-            metadata[entry.sessionId] = {
-              slug: null,
-              project: indexProjectPath || entry.projectPath || null,
-              cwd: null,
-              jsonlPath: null
-            };
-          }
-          metadata[entry.sessionId].description = entry.description || null;
-          if (entry.gitBranch) metadata[entry.sessionId].gitBranch = entry.gitBranch;
-          if (entry.customTitle) metadata[entry.sessionId].customTitle = entry.customTitle;
-          metadata[entry.sessionId].created = entry.created || null;
-        }
-      }
+    for (const file of listSessionFiles(SESSION_OPTS)) {
+      const entry = sessionMetadataOf(file);
+      if (entry) metadata[entry.sessionId] = entry.meta;
     }
   } catch (e) {
     console.error('Error loading session metadata:', e);
@@ -1053,72 +948,6 @@ function loadSessionMetadata() {
   return metadata;
 }
 
-// Workflow (Workflow tool) scripts are persisted at
-//   projects/<projEnc>/<sessionId>/workflows/scripts/<name>-<wf_id>.js
-// The script's projEnc can differ from the session's own JSONL dir (the workflow
-// may run from a different cwd), so we scan every project dir into a TTL-cached
-// index rather than deriving the path from meta.jsonlPath. Isolated from the
-// session-scan hot path: a single Map lookup per buildSessionObject call.
-const WORKFLOW_INDEX_TTL_MS = 5000;
-let workflowIndexCache = null; // Map<sessionId, Array<{id,name,path,mtimeMs}>>
-let workflowIndexBuiltAt = 0;
-
-function buildWorkflowIndex() {
-  const index = new Map();
-  if (!existsSync(PROJECTS_DIR)) return index;
-  let projs;
-  try { projs = readdirSync(PROJECTS_DIR, { withFileTypes: true }); } catch { return index; }
-  for (const proj of projs) {
-    if (!proj.isDirectory()) continue;
-    const projPath = path.join(PROJECTS_DIR, proj.name);
-    let sessDirs;
-    try { sessDirs = readdirSync(projPath, { withFileTypes: true }); } catch { continue; }
-    for (const sess of sessDirs) {
-      if (!sess.isDirectory() || !isUUID(sess.name)) continue;
-      const scriptsDir = path.join(projPath, sess.name, 'workflows', 'scripts');
-      let scripts;
-      try { scripts = readdirSync(scriptsDir); } catch { continue; } // ENOENT for most — skip fast
-      for (const f of scripts) {
-        if (!f.endsWith('.js')) continue;
-        const full = path.join(scriptsDir, f);
-        let mtimeMs = 0;
-        try { mtimeMs = statSync(full).mtimeMs; } catch {}
-        const base = f.slice(0, -3);
-        const m = base.match(/^(.*)-(wf_[a-z0-9-]+)$/i);
-        const entry = { id: m ? m[2] : base, name: m ? m[1] : base, path: full, mtimeMs };
-        if (!index.has(sess.name)) index.set(sess.name, []);
-        index.get(sess.name).push(entry);
-      }
-    }
-  }
-  return index;
-}
-
-function getWorkflowIndex() {
-  const now = Date.now();
-  if (workflowIndexCache && now - workflowIndexBuiltAt < WORKFLOW_INDEX_TTL_MS) return workflowIndexCache;
-  workflowIndexCache = buildWorkflowIndex();
-  workflowIndexBuiltAt = now;
-  return workflowIndexCache;
-}
-
-// Resolve a session's workflow scripts, newest first. Tries the raw id then the
-// team-lead resolution (a team session's scripts live under the lead's dir).
-function getWorkflowScripts(sessionId) {
-  const idx = getWorkflowIndex();
-  let list = idx.get(sessionId);
-  if (!list?.length) {
-    const alt = resolveSessionId(sessionId);
-    if (alt && alt !== sessionId) list = idx.get(alt);
-  }
-  return list ? [...list].sort((a, b) => b.mtimeMs - a.mtimeMs) : [];
-}
-
-function getWorkflowInfoSummary(sessionId) {
-  const list = getWorkflowIndex().get(sessionId);
-  return { hasWorkflow: !!(list?.length), workflowCount: list ? list.length : 0 };
-}
-
 function getPlanInfo(slug) {
   if (!slug) return { hasPlan: false, planTitle: null, planPath: null };
   const planPath = path.join(PLANS_DIR, `${slug}.md`);
@@ -1130,51 +959,6 @@ function getPlanInfo(slug) {
   } catch {
     return { hasPlan: true, planTitle: null, planPath };
   }
-}
-
-// Hide wakeups whose fire time is more than this far in the past — long /loop
-// sessions otherwise produce dozens of stale entries that drown the badge.
-const WAKEUP_FIRED_GRACE_MS = 5 * 60 * 1000;
-
-function isWakeupActive(w, now = Date.now()) {
-  if (!w?.timestamp || w.delaySeconds == null) return true;
-  const fireMs = new Date(w.timestamp).getTime() + w.delaySeconds * 1000;
-  return (now - fireMs) <= WAKEUP_FIRED_GRACE_MS;
-}
-
-function filterActiveLoopInfo(info) {
-  const now = Date.now();
-  return {
-    wakeups: info.wakeups.filter(w => isWakeupActive(w, now)),
-    crons: info.crons
-  };
-}
-
-// Per-path incremental scan state. Populated lazily on first access and
-// updated in place; the projectsWatcher event handler keeps entries warm so
-// the request path does O(1) work in steady state.
-const loopInfoStateByPath = new Map();
-
-function refreshLoopInfoState(jsonlPath) {
-  if (!jsonlPath) return null;
-  const prev = loopInfoStateByPath.get(jsonlPath);
-  const next = updateLoopInfo(jsonlPath, prev);
-  if (next) loopInfoStateByPath.set(jsonlPath, next);
-  return next;
-}
-
-function getLoopInfoSummary(meta) {
-  const empty = { wakeupCount: 0, cronCount: 0, latest: null };
-  if (!meta?.jsonlPath) return empty;
-  try {
-    const state = refreshLoopInfoState(meta.jsonlPath);
-    const filtered = filterActiveLoopInfo(buildLoopInfoFromState(state));
-    return {
-      wakeupCount: filtered.wakeups.length,
-      cronCount: filtered.crons.length,
-      latest: filtered.wakeups[filtered.wakeups.length - 1] || filtered.crons[filtered.crons.length - 1] || null
-    };
-  } catch (_) { return empty; }
 }
 
 function getSessionDisplayName(_sessionId, meta) {
@@ -1206,6 +990,7 @@ function buildSessionObject(id, meta, overrides = {}) {
     gitBranch: sessionGitBranch(meta, !!worktree, getGitBranch),
     worktree,
     customTitle: meta.customTitle || null,
+    firstPrompt: meta.firstPrompt || null,
     taskCount: 0,
     completed: 0,
     inProgress: 0,
@@ -1227,7 +1012,6 @@ function buildSessionObject(id, meta, overrides = {}) {
     scratchpadDir: getScratchpadDir(id, meta),
     ...getContextFields(id, meta),
     ...getPlanInfo(meta.slug),
-    ...getWorkflowInfoSummary(id),
     ...overrides,
     // Remove internal-only field
     _logStat: undefined,
@@ -1532,27 +1316,6 @@ app.get('/api/sessions', async (req, res) => {
       }
     }
 
-    // Suppress parent sessions that have a compact continuation — compaction is involuntary
-    // (context limit hit), not an intentional fork. Only the continuation is shown.
-    // A fork off an already-compacted transcript looks identical from the metadata alone
-    // (its copied compact_boundary gives the child a logicalParentUuid), so the verdict
-    // comes from lookupParentSession, not from the anchor's presence.
-    const compactSuppressed = new Set();
-    for (const [sid] of sessionsMap) {
-      // Cheap pre-gate: only a session with a boundary anchor can be a continuation,
-      // and lookupParentSession reads JSONLs on a cold cache.
-      if (!metadata[sid]?.logicalParentUuid) continue;
-      const parent = lookupParentSession(sid);
-      if (parent.relation !== 'compact' || !sessionsMap.has(parent.parentSessionId)) continue;
-      compactSuppressed.add(parent.parentSessionId);
-      sessionsMap.get(sid).continuedFromSessionId = parent.parentSessionId;
-    }
-    // Invariant: a running process is never a superseded lineage, whatever the heuristics say.
-    if (compactSuppressed.size) {
-      for (const s of loadLiveSessions()) compactSuppressed.delete(s.sessionId);
-    }
-    for (const sid of compactSuppressed) sessionsMap.delete(sid);
-
     // Backfill contextStatus for already-built sessions that are pinned
     for (const pid of pinnedIds) {
       const s = sessionsMap.get(pid);
@@ -1624,15 +1387,13 @@ app.get('/api/sessions', async (req, res) => {
       sessions = [...top, ...missingPinned];
     }
 
-    // Loop info can mean a full read of the transcript, so only the rows sent pay for it, and
+    // autoCompact costs up to 3 settings stats per call, so only the rows sent pay for it, and
     // `lite=1` (the CLI's group list, which only counts and names sessions) skips it.
-    // Same for autoCompact: up to 3 settings stats per call.
     const lite = req.query.lite === '1';
     const autoCompactByProject = new Map();
     for (const s of sessions) {
       s.pin = pins[s.id] || null;
       if (lite) continue;
-      s.loopInfo = getLoopInfoSummary(s);
       if (!s.contextStatus) continue;
       if (!autoCompactByProject.has(s.project)) autoCompactByProject.set(s.project, getAutoCompact(PI_AGENT_DIR, s.project));
       s.autoCompact = autoCompactByProject.get(s.project);
@@ -1646,7 +1407,7 @@ app.get('/api/sessions', async (req, res) => {
   }
 });
 
-// Ids of sessions whose id or name contains q, from any transcript, newest first. The client
+// Ids of sessions whose id, name or first prompt contains q, from any transcript, newest first. The client
 // gets the rows through `/api/sessions?include=`. A linear scan is enough: ~4 ms for 10k ids,
 // plus one stat per hit for the sort.
 const SESSION_SEARCH_MIN = 3;
@@ -1660,7 +1421,7 @@ app.get('/api/sessions/search', (req, res) => {
   const hits = [];
   for (const [id, meta] of Object.entries(loadSessionMetadata())) {
     const name = getSessionDisplayName(id, meta);
-    if ((searchIds && id.replace(/-/g, '').includes(idQ)) || name?.toLowerCase().includes(text)) {
+    if ((searchIds && id.replace(/-/g, '').includes(idQ)) || name?.toLowerCase().includes(text) || meta.firstPrompt?.toLowerCase().includes(text)) {
       hits.push({ id, mtime: getSessionLogStat(meta).mtime || 0 });
     }
   }
@@ -1800,22 +1561,6 @@ app.get('/api/sessions/:sessionId/plan', async (req, res) => {
   } catch (error) {
     console.error('Error reading plan:', error);
     res.status(500).json({ error: 'Failed to read plan' });
-  }
-});
-
-app.get('/api/sessions/:sessionId/loop', (req, res) => {
-  try {
-    const meta = sessionMetaFor(req.params.sessionId);
-    if (!meta?.jsonlPath) return res.json({ wakeups: [], crons: [] });
-    const state = refreshLoopInfoState(meta.jsonlPath);
-    const filtered = filterActiveLoopInfo(buildLoopInfoFromState(state));
-    res.json({
-      wakeups: [...filtered.wakeups].reverse(),
-      crons: [...filtered.crons].reverse()
-    });
-  } catch (error) {
-    console.error('Error reading loop info:', error);
-    res.status(500).json({ error: 'Failed to read loop info' });
   }
 });
 
@@ -1982,302 +1727,6 @@ app.get('/api/sessions/:sessionId/scratchpad-files', async (req, res) => {
   } catch (error) {
     console.error('Error listing scratchpad files:', error);
     res.status(500).json({ error: 'Failed to list scratchpad files' });
-  }
-});
-
-// API: List workflow scripts for a session. Parses each script's meta for the
-// canonical name + description (cold path — only when the workflow modal opens).
-app.get('/api/sessions/:sessionId/workflows', (req, res) => {
-  try {
-    const workflows = getWorkflowScripts(req.params.sessionId).map((w) => {
-      const meta = getWorkflowMeta(w.path);
-      return {
-        id: w.id,
-        name: meta.name || w.name,
-        description: meta.description || null,
-        modifiedAt: w.mtimeMs ? new Date(w.mtimeMs).toISOString() : null,
-      };
-    });
-    res.json({ workflows });
-  } catch (error) {
-    console.error('Error listing workflows:', error);
-    res.status(500).json({ error: 'Failed to list workflows' });
-  }
-});
-
-// API: Get a single workflow script's source. Looked up by id from the session's
-// own script list (never built from the param), so the id can't traverse paths.
-app.get('/api/sessions/:sessionId/workflows/:wfId', async (req, res) => {
-  try {
-    const wf = getWorkflowScripts(req.params.sessionId).find((w) => w.id === req.params.wfId);
-    if (!wf) return res.status(404).json({ error: 'Workflow script not found' });
-    const content = await fs.readFile(wf.path, 'utf8');
-    res.json({ id: wf.id, name: wf.name, content });
-  } catch (error) {
-    console.error('Error reading workflow script:', error);
-    res.status(500).json({ error: 'Failed to read workflow script' });
-  }
-});
-
-// #endregion
-
-// #region WORKFLOWS
-// meta.phases and meta.name/description are pure literals per the Workflow tool
-// contract, so pull them by regex rather than executing the untrusted script.
-// name/description take the first match (the meta block is at the top of the file).
-// Pull a quoted string value for `key` out of `src` (matches ', ", or `).
-function matchStr(src, key) {
-  const m = src.match(new RegExp(`${key}\\s*:\\s*(['"\`])([\\s\\S]*?)\\1`));
-  return m ? m[2] : null;
-}
-
-const workflowMetaCache = new Map();
-const EMPTY_WORKFLOW_META = { name: null, description: null, phases: [] };
-// A script never changes mid-run, and three endpoints parse the same file — one of them
-// on a poll — so key the parse by the script's mtime.
-function getWorkflowMeta(scriptPath) {
-  return cachedByMtime(
-    workflowMetaCache,
-    scriptPath,
-    scriptPath,
-    () => parseWorkflowMeta(readFileSync(scriptPath, 'utf8')),
-    EMPTY_WORKFLOW_META,
-  );
-}
-
-function parseWorkflowMeta(source) {
-  const meta = { name: matchStr(source, 'name'), description: matchStr(source, 'description'), phases: [] };
-  const phasesM = source.match(/phases\s*:\s*\[([\s\S]*?)\]/);
-  if (phasesM) {
-    for (const m of phasesM[1].matchAll(/\{[\s\S]*?\}/g)) {
-      const title = matchStr(m[0], 'title');
-      if (title) meta.phases.push({ title, detail: matchStr(m[0], 'detail') });
-    }
-  }
-  return meta;
-}
-
-// journal.jsonl records {type:'started',agentId,phase,label} then
-// {type:'result',agentId,...} per workflow agent. Map agentId →
-// {started, done, phase, label}; done count matches the "N/M agents" ratio the
-// /workflows viewer shows.
-const workflowJournalCache = new Map();
-function workflowJournalPath(runDir) {
-  return path.join(runDir, 'journal.jsonl');
-}
-
-function readWorkflowJournal(runDir) {
-  const journalPath = workflowJournalPath(runDir);
-  return cachedByMtime(workflowJournalCache, journalPath, journalPath, () => parseWorkflowJournal(journalPath), new Map());
-}
-
-function parseWorkflowJournal(journalPath) {
-  const status = new Map();
-  let content;
-  try { content = readFileSync(journalPath, 'utf8'); } catch { return status; }
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue;
-    let o;
-    try { o = JSON.parse(line); } catch { continue; }
-    if (!o.agentId) continue;
-    const e = status.get(o.agentId) || { started: false, done: false, phase: null, label: null };
-    if (o.type === 'started') e.started = true;
-    else if (o.type === 'result') e.done = true;
-    if (o.phase) e.phase = o.phase;
-    if (o.label) e.label = o.label;
-    status.set(o.agentId, e);
-  }
-  return status;
-}
-
-// One definition of "how far along is this run", shared by the modal's /run view and
-// the sidebar widget, so the two can never disagree about what counts as done.
-function summarizeWorkflowJournal(journal) {
-  const byPhase = new Map();
-  const running = [];
-  let startedCount = 0;
-  let doneCount = 0;
-  for (const e of journal.values()) {
-    if (!e.started) continue;
-    const phase = e.phase || '';
-    const c = byPhase.get(phase) || { started: 0, done: 0 };
-    startedCount++;
-    c.started++;
-    if (e.done) {
-      doneCount++;
-      c.done++;
-    } else running.push(e.label || phase || 'agent');
-    byPhase.set(phase, c);
-  }
-  return { startedCount, doneCount, byPhase, running };
-}
-
-// A workflow's run artifacts (journal + agent transcripts) live at
-// <sessionDir>/subagents/workflows/<wfId>/. The script itself sits under
-// <sessionDir>/workflows/scripts/, so the run dir is derivable from the script
-// path with no I/O — try that first. Fall back to the session dir from metadata,
-// then to scanning every project/session (the session dir can sit under a
-// different projEnc than the script when a workflow runs from another cwd). wfId
-// comes from the trusted script index (validated filename), so it can't
-// traverse. That last scan is a cold path only — `skipScan` is what keeps it out
-// of the polled live view, where a script with no run dir would pay it every tick.
-function resolveWorkflowRunDir(meta, wfId, scriptPath, skipScan = false) {
-  const rel = path.join('subagents', 'workflows', wfId);
-  if (scriptPath) {
-    const sessionDir = path.dirname(path.dirname(path.dirname(scriptPath)));
-    const fromScript = path.join(sessionDir, rel);
-    if (existsSync(fromScript)) return fromScript;
-  }
-  if (meta.jsonlPath) {
-    const local = path.join(sessionDirFromMeta(meta), rel);
-    if (existsSync(local)) return local;
-  }
-  if (skipScan) return null;
-  try {
-    for (const proj of readdirSync(PROJECTS_DIR, { withFileTypes: true })) {
-      if (!proj.isDirectory()) continue;
-      const projPath = path.join(PROJECTS_DIR, proj.name);
-      let sessDirs;
-      try { sessDirs = readdirSync(projPath, { withFileTypes: true }); } catch { continue; }
-      for (const s of sessDirs) {
-        if (!s.isDirectory()) continue;
-        const cand = path.join(projPath, s.name, rel);
-        if (existsSync(cand)) return cand;
-      }
-    }
-  } catch {}
-  return null;
-}
-
-// API: Workflow run state — declared phases (from the script) plus the agent
-// roster (type/model/output-tokens/duration/status) reconstructed from the run
-// dir's journal + transcripts. The roster is flat: the journal carries each
-// agent's phase and label, but the modal lists agents in start order.
-app.get('/api/sessions/:sessionId/workflows/:wfId/run', async (req, res) => {
-  try {
-    const wf = getWorkflowScripts(req.params.sessionId).find((w) => w.id === req.params.wfId);
-    if (!wf) return res.status(404).json({ error: 'Workflow not found' });
-    const parsed = getWorkflowMeta(wf.path);
-
-    const sessionId = resolveSessionId(req.params.sessionId);
-    const meta = loadSessionMetadata()[sessionId] || {};
-    const runDir = resolveWorkflowRunDir(meta, wf.id, wf.path);
-    const journal = runDir ? readWorkflowJournal(runDir) : new Map();
-
-    const agents = [];
-    let stoppedAt = null;
-    if (runDir) {
-      let files = [];
-      try { files = readdirSync(runDir).filter((f) => /^agent-.+\.jsonl$/.test(f)); } catch (_) {}
-      for (const f of files) {
-        const agentId = f.slice('agent-'.length, -'.jsonl'.length);
-        const stats = (await extractTranscriptStats(path.join(runDir, f))) || {};
-        const type = readSubagentMeta(path.join(runDir, f))?.agentType || null;
-        const entry = journal.get(agentId);
-        const durationMs = stats.firstTs && stats.lastTs ? new Date(stats.lastTs) - new Date(stats.firstTs) : null;
-        if (stats.lastTs && (!stoppedAt || stats.lastTs > stoppedAt)) stoppedAt = stats.lastTs;
-        agents.push({
-          agentId,
-          type,
-          phase: entry?.phase || null,
-          label: entry?.label || null,
-          model: stats.model || null,
-          outputTokens: stats.outputTokens || 0,
-          durationMs,
-          startedAt: stats.firstTs || null,
-          status: entry?.done ? 'done' : 'running',
-        });
-      }
-      agents.sort((a, b) => (a.startedAt || '').localeCompare(b.startedAt || ''));
-    }
-    // Roster is start-ordered, so the earliest start is simply the first agent.
-    const startedAt = agents[0]?.startedAt || null;
-
-    let { startedCount, doneCount } = summarizeWorkflowJournal(journal);
-    if (!startedCount) {
-      startedCount = agents.length;
-      doneCount = agents.filter((a) => a.status === 'done').length;
-    }
-
-    res.json({
-      id: wf.id,
-      name: parsed.name || wf.name,
-      description: parsed.description,
-      phases: parsed.phases,
-      agents,
-      startedCount,
-      doneCount,
-      startedAt,
-      stoppedAt,
-    });
-  } catch (error) {
-    console.error('Error building workflow run view:', error);
-    res.status(500).json({ error: 'Failed to build workflow run view' });
-  }
-});
-
-// A workflow has no terminal journal entry, so "still running" is every started
-// agent without a result plus a journal that moved recently — a run killed
-// mid-flight would otherwise stay live forever.
-const WORKFLOW_LIVE_MAX_IDLE_MS = 10 * 60 * 1000;
-// Only the newest few scripts can hold the live run, and each miss costs two
-// existsSync probes — a session that has accumulated scripts must not turn the
-// poll into a scan of all of them.
-const WORKFLOW_LIVE_MAX_SCRIPTS = 3;
-
-// API: The session's running workflow, or null. The zen panel polls this, so it
-// reads the journal only — never the agent transcripts the /run view parses.
-app.get('/api/sessions/:sessionId/workflow-live', (req, res) => {
-  try {
-    const sessionId = resolveSessionId(req.params.sessionId);
-    const meta = loadSessionMetadata()[sessionId] || {};
-    for (const wf of getWorkflowScripts(req.params.sessionId).slice(0, WORKFLOW_LIVE_MAX_SCRIPTS)) {
-      const runDir = resolveWorkflowRunDir(meta, wf.id, wf.path, true);
-      if (!runDir) continue;
-      let mtimeMs = 0;
-      try { mtimeMs = statSync(path.join(runDir, 'journal.jsonl')).mtimeMs; } catch { continue; }
-      if (Date.now() - mtimeMs > WORKFLOW_LIVE_MAX_IDLE_MS) continue;
-
-      const { startedCount, doneCount, byPhase, running } = summarizeWorkflowJournal(readWorkflowJournal(runDir));
-      if (!startedCount || doneCount >= startedCount) continue;
-
-      const parsed = getWorkflowMeta(wf.path);
-      const declared = parsed.phases.map((p) => p.title);
-      const extra = [...byPhase.keys()].filter((t) => t && !declared.includes(t));
-      const phases = [...declared, ...extra].map((title) => ({
-        title,
-        started: byPhase.get(title)?.started || 0,
-        done: byPhase.get(title)?.done || 0,
-      }));
-
-      return res.json({
-        workflow: {
-          id: wf.id,
-          name: parsed.name || wf.name,
-          startedCount,
-          doneCount,
-          phases,
-          running: running.slice(0, 4),
-        },
-      });
-    }
-    res.json({ workflow: null });
-  } catch (error) {
-    console.error('Error building live workflow view:', error);
-    res.status(500).json({ error: 'Failed to build live workflow view' });
-  }
-});
-
-// API: Open a workflow script in VS Code
-app.post('/api/sessions/:sessionId/workflows/:wfId/open', (req, res) => {
-  try {
-    const wf = getWorkflowScripts(req.params.sessionId).find((w) => w.id === req.params.wfId);
-    if (!wf) return res.status(404).json({ error: 'Workflow script not found' });
-    openInEditor([wf.path]);
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error opening workflow script in editor:', error);
-    res.status(500).json({ error: 'Failed to open workflow script' });
   }
 });
 
@@ -2519,58 +1968,43 @@ app.get('/api/sessions/:sessionId/agents', async (req, res) => {
         flag: 'promptUnavailable',
         lookup: (a) => {
           if (byAgentId[a.agentId]?.prompt) return byAgentId[a.agentId].prompt;
-          try { return extractPromptFromTranscript(subagentJsonlForExtraction(meta, a.agentId)); } catch (_) { return null; }
+          try { return extractPromptFromTranscript(subagentJsonlForExtraction(a)); } catch (_) { return null; }
         },
       },
       { field: 'agentName',   flag: 'agentNameUnavailable',   lookup: (a) => byAgentId[a.agentId]?.name || null },
       { field: 'description', flag: 'descriptionUnavailable', lookup: (a) => byAgentId[a.agentId]?.description || null },
     ];
-    if (meta.jsonlPath) {
-      for (const { field, flag, lookup } of reconcileFields) {
-        for (const agent of agents) {
-          if (agent[field]) continue;
-          // Workflow subagents nest their transcript under subagents/workflows/;
-          // pre-fix builds latched *Unavailable using the flat path, so always
-          // re-attempt for them (the extractor resolves the nested path now).
-          if (agent[flag] && !isAgentLive(agent) && agent.type !== 'workflow-subagent') continue;
-          const value = lookup(agent);
-          if (value) {
-            agent[field] = value;
-            delete agent[flag];
-            dirty.add(agent);
-          } else if (!isAgentLive(agent) && !agent[flag]) {
-            agent[flag] = true;
-            dirty.add(agent);
-          }
+    for (const { field, flag, lookup } of reconcileFields) {
+      for (const agent of agents) {
+        if (agent[field]) continue;
+        // Workflow subagents nest their transcript under subagents/workflows/;
+        // pre-fix builds latched *Unavailable using the flat path, so always
+        // re-attempt for them (the extractor resolves the nested path now).
+        if (agent[flag] && !isAgentLive(agent) && agent.type !== 'workflow-subagent') continue;
+        const value = lookup(agent);
+        if (value) {
+          agent[field] = value;
+          delete agent[flag];
+          dirty.add(agent);
+        } else if (!isAgentLive(agent) && !agent[flag]) {
+          agent[flag] = true;
+          dirty.add(agent);
         }
       }
     }
 
     // The plugin's start record carries the model; this covers sessions without it.
     const agentsNeedingModel = agents.filter(a => !a.model && a.modelUnavailable !== MODEL_SCAN);
-    if (agentsNeedingModel.length && meta.jsonlPath) {
+    if (agentsNeedingModel.length) {
       for (const agent of agentsNeedingModel) {
-        const jsonl = subagentJsonlForExtraction(meta, agent.agentId);
         let model = null;
-        try { model = extractModelFromTranscript(jsonl); } catch (_) {}
+        try { model = extractModelFromTranscript(subagentJsonlForExtraction(agent)); } catch (_) {}
         if (model) {
           agent.model = model;
           delete agent.modelUnavailable;
           delete agent.modelAlias;
           dirty.add(agent);
           continue;
-        }
-        // Until the transcript has an assistant line, show the requested alias.
-        // agent.model stays empty so the exact id is still looked up.
-        if (!agent.modelAlias) {
-          let alias = readSubagentMeta(jsonl)?.model || null;
-          if (alias === 'inherit') {
-            try { alias = extractModelFromTranscript(meta.jsonlPath); } catch (_) { alias = null; }
-          }
-          if (alias) {
-            agent.modelAlias = alias;
-            dirty.add(agent);
-          }
         }
         if (agent.status === 'stopped') {
           agent.modelUnavailable = MODEL_SCAN;
@@ -2591,10 +2025,10 @@ app.get('/api/sessions/:sessionId/agents', async (req, res) => {
     const agentsNeedingResult = agents.filter(
       (a) => !a.lastMessage && !isAgentLive(a) && (a.resultUnavailable !== RESULT_SCAN || a.type === 'workflow-subagent'),
     );
-    if (agentsNeedingResult.length && meta.jsonlPath) {
+    if (agentsNeedingResult.length) {
       for (const agent of agentsNeedingResult) {
         let result = null;
-        try { result = extractAgentResultFromTranscript(subagentJsonlForExtraction(meta, agent.agentId)); } catch (_) {}
+        try { result = extractAgentResultFromTranscript(subagentJsonlForExtraction(agent)); } catch (_) {}
         if (result) agent.lastMessage = result;
         else agent.resultUnavailable = RESULT_SCAN;
         dirty.add(agent);
@@ -2725,205 +2159,35 @@ function sanitizeAgentId(raw) {
   return path.basename(raw).replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-function sessionDirFromMeta(meta) {
-  return path.join(path.dirname(meta.jsonlPath), path.basename(meta.jsonlPath, '.jsonl'));
+const inSessionRoots = (file) => typeof file === 'string' && SESSION_ROOTS.some((r) => isContained(file, r.dir));
+
+// pi-subagents runs each subagent as a child pi session and reports its file in the
+// tool result; the extension copies it into the agent record as sessionFile.
+function subagentJsonlForExtraction(agent) {
+  const file = agent?.sessionFile;
+  return inSessionRoots(file) && existsSync(file) ? file : null;
 }
 
-function subagentJsonlPath(meta, agentId) {
-  return path.join(sessionDirFromMeta(meta), 'subagents', `agent-${agentId}.jsonl`);
-}
-
-// A subagent transcript is normally at <sessionDir>/subagents/agent-<id>.jsonl.
-// Workflow-tool subagents nest one level deeper, under
-// <sessionDir>/subagents/workflows/<wf_id>/agent-<id>.jsonl. Return whichever
-// exists (flat first), else null.
-function subagentJsonlInDir(sessionDir, agentId) {
-  const flat = path.join(sessionDir, 'subagents', `agent-${agentId}.jsonl`);
-  if (existsSync(flat)) return flat;
-  const wfRoot = path.join(sessionDir, 'subagents', 'workflows');
-  let wfDirs;
-  try { wfDirs = readdirSync(wfRoot, { withFileTypes: true }); } catch { return null; }
-  for (const wf of wfDirs) {
-    if (!wf.isDirectory()) continue;
-    const nested = path.join(wfRoot, wf.name, `agent-${agentId}.jsonl`);
-    if (existsSync(nested)) return nested;
-  }
-  return null;
-}
-
-// Path for prompt/model extraction in agent enrichment: prefer the nested
-// workflow-subagent transcript when the flat path is absent. Falls back to the
-// flat path (which extract* handle gracefully when missing).
-function subagentJsonlForExtraction(meta, agentId) {
-  const resolved = meta.jsonlPath ? subagentJsonlInDir(sessionDirFromMeta(meta), agentId) : null;
-  return resolved || subagentJsonlPath(meta, agentId);
-}
-
-// Claude Code can scatter a session's records across multiple project dirs
-// (e.g. main repo + worktree) and across sibling sessionId dirs when a
-// session is forked/resumed — the subagent JSONL stays under the original
-// parent sessionId. Fall back to scanning when the derived path is missing.
-const subagentPathCache = new Map();
-function findSubagentJsonlInProject(projPath, sessionId, agentId) {
-  const sameSid = subagentJsonlInDir(path.join(projPath, sessionId), agentId);
-  if (sameSid) return sameSid;
-  let sessions;
-  try { sessions = readdirSync(projPath, { withFileTypes: true }); } catch { return null; }
-  for (const sess of sessions) {
-    if (!sess.isDirectory() || sess.name === sessionId) continue;
-    const candidate = subagentJsonlInDir(path.join(projPath, sess.name), agentId);
-    if (candidate) return candidate;
-  }
-  return null;
-}
-function resolveSubagentJsonl(meta, sessionId, agentId) {
-  // Same session dir: flat path or nested under subagents/workflows/ (both checked here).
-  const local = meta.jsonlPath ? subagentJsonlInDir(sessionDirFromMeta(meta), agentId) : null;
-  if (local) return local;
-  const key = `${sessionId}/${agentId}`;
-  const cached = subagentPathCache.get(key);
-  if (cached) return cached;
-  let found = null;
-  const parent = lookupParentSession(sessionId);
-  if (parent.parentSessionId && parent.parentJsonlPath) {
-    const projDir = path.dirname(parent.parentJsonlPath);
-    const candidate = subagentJsonlInDir(path.join(projDir, parent.parentSessionId), agentId);
-    if (candidate) found = candidate;
-  }
-  if (!found) {
-    try {
-      for (const proj of readdirSync(PROJECTS_DIR, { withFileTypes: true })) {
-        if (!proj.isDirectory()) continue;
-        found = findSubagentJsonlInProject(path.join(PROJECTS_DIR, proj.name), sessionId, agentId);
-        if (found) break;
-      }
-    } catch (_) { /* projects dir missing */ }
-  }
-  if (found) subagentPathCache.set(key, found);
-  return found || subagentJsonlPath(meta, agentId);
-}
-
-// Claude Code creates child sessions in two ways:
-//   Fork: copies the parent's early messages verbatim (same UUIDs). Anchor = first UUID.
-//   Compact: writes a compact_boundary record with logicalParentUuid in the preamble.
-// Birthtime (not mtime) identifies the parent — mtime changes on resume, birthtime is immutable.
-const FORK_ANCHOR_SCAN_LINES = 10;
-function findForkAnchorUuid(jsonlPath) {
-  let text;
-  try { text = readFileSync(jsonlPath, 'utf8'); } catch { return null; }
-  let firstUuid = null, scanned = 0;
-  for (const l of text.split('\n')) {
-    if (!l) continue;
-    if (scanned++ >= FORK_ANCHOR_SCAN_LINES) break;
-    try { const d = JSON.parse(l); if (!firstUuid && d.uuid) firstUuid = d.uuid; } catch { /* skip malformed */ }
-  }
-  return firstUuid;
-}
-// Fallback when the metadata cache lacks the boundary pair (older entries, cold cache).
-// Reached only from lookupParentSession, whose result is cached (lib/parent-cache.js) —
-// one read per session until its verdict goes stale, never per request.
-// Bounded read (~1 MB) mirrors readSessionInfoFromJsonl's HEAD_MAX — compact_boundary
-// always sits in the preamble before the first user/assistant record.
-const COMPACT_ANCHOR_READ_MAX = 1048576;
-// Returns { anchor, boundaryUuid } for the preamble compact_boundary, or null.
-function findCompactBoundary(jsonlPath) {
-  let fd;
+function resolveSubagentJsonl(sessionId, agentId) {
   try {
-    fd = openSync(jsonlPath, 'r');
-    const buf = Buffer.alloc(COMPACT_ANCHOR_READ_MAX);
-    const n = readSync(fd, buf, 0, COMPACT_ANCHOR_READ_MAX, 0);
-    const text = buf.toString('utf8', 0, n);
-    const lastNl = text.lastIndexOf('\n');
-    const complete = lastNl >= 0 ? text.slice(0, lastNl) : text;
-    for (const l of complete.split('\n')) {
-      if (!l) continue;
-      try {
-        const d = JSON.parse(l);
-        if (d.type === 'user' || d.type === 'assistant') return null;
-        if (d.subtype === 'compact_boundary' && d.logicalParentUuid) {
-          return { anchor: d.logicalParentUuid, boundaryUuid: d.uuid || null };
-        }
-      } catch { /* skip malformed */ }
-    }
+    return subagentJsonlForExtraction(readAgentJsonl(path.join(AGENT_ACTIVITY_DIR, sessionId, `${agentId}.jsonl`)));
+  } catch (_) {
     return null;
-  } catch { return null; }
-  finally { if (fd !== undefined) { try { closeSync(fd); } catch {} } }
-}
-// forkProbeUuid (optional): the child's own compact_boundary uuid. It only shows up
-// in the parent when the child copied the record — i.e. a fork off an already-compacted
-// transcript, not a compact continuation. Probed once, on the winner's text, which the
-// scan already read.
-function findSessionContainingUuid(projectDir, targetUuid, excludeJsonlPath, maxBirthtimeMs, forkProbeUuid) {
-  let files;
-  try { files = readdirSync(projectDir); } catch { return null; }
-  let best = null, bestBirthtime = Infinity, bestText = null;
-  for (const f of files) {
-    if (!f.endsWith('.jsonl')) continue;
-    const fp = path.join(projectDir, f);
-    if (fp === excludeJsonlPath) continue;
-    let st;
-    try { st = statSync(fp); } catch { continue; }
-    const birthtime = st.birthtimeMs;
-    if (maxBirthtimeMs != null && birthtime >= maxBirthtimeMs) continue;
-    if (birthtime >= bestBirthtime) continue;
-    let text;
-    try { text = readFileSync(fp, 'utf8'); } catch { continue; }
-    if (!text.includes(targetUuid)) continue;
-    for (const l of text.split('\n')) {
-      if (!l?.includes(targetUuid)) continue;
-      try {
-        const d = JSON.parse(l);
-        if (d.uuid === targetUuid && d.sessionId) {
-          best = { parentSessionId: d.sessionId, parentJsonlPath: fp, parentIno: st.ino, isFork: false };
-          bestBirthtime = birthtime;
-          bestText = text;
-          break;
-        }
-      } catch { /* skip */ }
-    }
   }
-  if (!best) return null;
-  if (forkProbeUuid) best.isFork = bestText.includes(forkProbeUuid);
-  return best;
 }
+
+// pi records a fork's parent in the session header (`parentSession`), so no scan is needed.
+// pi compacts in place, so a parent is always a fork.
 function lookupParentSession(sessionId) {
-  const meta = loadSessionMetadata()[sessionId];
-  const known = getParentVerdict(sessionId, meta);
-  if (known) return known;
-  let self = null, parentIno = null;
-  // relation is the single verdict: 'none' (no parent found), 'compact' (this session
-  // continues a lineage the parent could not hold) or 'fork' (an intentional branch off
-  // a parent that keeps its own life). isCompact/isFork are derived views of it.
-  const result = { parentSessionId: null, parentJsonlPath: null, relation: 'none', isCompact: false, isFork: false };
-  if (meta?.jsonlPath) {
-    // Metadata entries cached before compactBoundaryUuid existed carry the anchor
-    // without the boundary uuid — re-read rather than lose fork detection.
-    const boundary = (meta.logicalParentUuid && meta.compactBoundaryUuid)
-      ? { anchor: meta.logicalParentUuid, boundaryUuid: meta.compactBoundaryUuid }
-      : findCompactBoundary(meta.jsonlPath);
-    const compactAnchor = boundary?.anchor ?? meta.logicalParentUuid ?? null;
-    // A fork copies the parent's early records verbatim, so its first uuid is the anchor.
-    const anchorUuid = compactAnchor ?? findForkAnchorUuid(meta.jsonlPath);
-    if (anchorUuid) {
-      try { self = statSync(meta.jsonlPath); } catch { /* ignore */ }
-      if (self) {
-        const hit = findSessionContainingUuid(path.dirname(meta.jsonlPath), anchorUuid, meta.jsonlPath, self.birthtimeMs, boundary?.boundaryUuid);
-        if (hit) {
-          // No compact boundary at all → fork by construction; with one, the copied
-          // boundary uuid (hit.isFork) is what separates a fork from a continuation.
-          result.parentSessionId = hit.parentSessionId;
-          result.parentJsonlPath = hit.parentJsonlPath;
-          result.relation = (!compactAnchor || hit.isFork) ? 'fork' : 'compact';
-          parentIno = hit.parentIno;
-        }
-      }
-    }
-  }
-  result.isCompact = result.relation === 'compact';
-  result.isFork = result.relation === 'fork';
-  // No anchor yet means the head is not written; that "no parent" is not a verdict.
-  if (self) setParentVerdict(sessionId, meta, self, parentIno, result);
-  return result;
+  const parentPath = loadSessionMetadata()[sessionId]?.parentSessionPath;
+  const parent = inSessionRoots(parentPath) ? describeSessionFile(parentPath) : null;
+  return {
+    parentSessionId: parent?.sessionId || null,
+    parentJsonlPath: parent ? parentPath : null,
+    relation: parent ? 'fork' : 'none',
+    isCompact: false,
+    isFork: !!parent,
+  };
 }
 // #endregion
 
@@ -2939,8 +2203,8 @@ app.get('/api/sessions/:sessionId/agents/:agentId/messages', (req, res) => {
   const metadata = loadSessionMetadata();
   const meta = metadata[sessionId];
   if (!meta?.jsonlPath) return res.json({ messages: [], agentId });
-  const subagentJsonl = resolveSubagentJsonl(meta, sessionId, agentId);
-  if (!existsSync(subagentJsonl)) return res.json({ messages: [], agentId });
+  const subagentJsonl = resolveSubagentJsonl(sessionId, agentId);
+  if (!subagentJsonl) return res.json({ messages: [], agentId });
   const messages = readRecentMessages(subagentJsonl, limit);
   res.json({ messages, agentId });
 });
@@ -2954,7 +2218,11 @@ app.get('/api/sessions/:sessionId/agents/:agentId/messages/stream', (req, res) =
     res.status(404).json({ error: 'Session not found' });
     return;
   }
-  const subagentJsonl = resolveSubagentJsonl(meta, sessionId, agentId);
+  const subagentJsonl = resolveSubagentJsonl(sessionId, agentId);
+  if (!subagentJsonl) {
+    res.status(404).json({ error: 'Subagent transcript not found' });
+    return;
+  }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -3012,10 +2280,6 @@ async function sendSessionMessages(req, res) {
     hasMore = messages.length > limit;
     if (hasMore) messages = messages.slice(-limit);
   }
-  const compactedMsgs = messages.filter(m => m.systemLabel === 'Compacted');
-  const compactPromise = compactedMsgs.some(m => !m.compactSummary)
-    ? cachedByMtime(compactSummaryCache, jsonlPath, jsonlPath, () => readCompactSummaries(jsonlPath), [])
-    : null;
   const agentMessages = messages.filter(m => m.tool === 'Agent' && m.toolUseId);
   if (agentMessages.length) {
     const progressMap = await getProgressMap(jsonlPath);
@@ -3069,7 +2333,6 @@ async function sendSessionMessages(req, res) {
       }
     }
   }
-  if (compactPromise) fillCompactSummaries(compactedMsgs, await compactPromise);
   // The client keeps needing toolUseId when it builds a follow-up URL from it:
   // lazy-fetching a truncated tool result, or fetching each tool-result image.
   const clientNeedsToolUseId = (msg) => msg.toolResultTruncated || msg.toolResultImageCount;
@@ -3260,21 +2523,10 @@ function resolveSessionFolder(id) {
     const meta = loadSessionMetadata()[id];
     return meta ? meta.project || meta.cwd || null : null;
   }
-  try {
-    for (const dir of readdirSync(PROJECTS_DIR, { withFileTypes: true })) {
-      if (!dir.isDirectory()) continue;
-      const jsonlPath = path.join(PROJECTS_DIR, dir.name, `${id}.jsonl`);
-      if (!existsSync(jsonlPath)) continue;
-      let indexProject = null;
-      try {
-        const index = JSON.parse(readFileSync(path.join(PROJECTS_DIR, dir.name, 'sessions-index.json'), 'utf8'));
-        indexProject = (index.entries || []).find((e) => e.projectPath)?.projectPath || null;
-      } catch {}
-      const info = readSessionInfoFromJsonl(jsonlPath);
-      const folder = indexProject || info.projectPath || info.cwd;
-      if (folder) return folder;
-    }
-  } catch {}
+  const suffix = `_${id}.jsonl`;
+  const jsonlPath = listSessionFiles(SESSION_OPTS).find((f) => f.endsWith(suffix));
+  const header = jsonlPath && readSessionHeader(jsonlPath);
+  if (header?.id === id && header.cwd) return header.cwd;
   const meta = loadSessionMetadata()[id];
   return meta ? meta.project || meta.cwd || null : null;
 }
@@ -4566,34 +3818,21 @@ teamsWatcher.on('all', (event, filePath) => {
 
 console.log(`Watching for team changes in: ${TEAMS_DIR}`);
 
-// Also watch projects dir for metadata changes
-const projectsWatcher = chokidar.watch(PROJECTS_DIR, {
+const onSessionFileEvent = (event, filePath) => {
+  if (event !== 'add' && event !== 'change' && event !== 'unlink') return;
+  if (!filePath.endsWith('.jsonl')) return;
+  // add/unlink reshape the session set — promote to full rescan.
+  if (event === 'change') dirtyMetadataPaths.add(filePath);
+  else metadataNeedsFullScan = true;
+  broadcast({ type: 'metadata-update' });
+};
+
+const projectsWatchers = SESSION_ROOTS.map((root) => chokidar.watch(root.dir, {
   persistent: true,
   ignoreInitial: true,
-  depth: 2,
+  depth: root.flat ? 0 : 1,
   awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 }
-});
-
-projectsWatcher.on('all', (event, filePath) => {
-  if (event !== 'add' && event !== 'change' && event !== 'unlink') return;
-  if (filePath.endsWith('.jsonl')) {
-    if (event === 'unlink') {
-      loopInfoStateByPath.delete(filePath);
-    } else {
-      // Warm the incremental scan state so the next request does no IO.
-      try { refreshLoopInfoState(filePath); } catch (_) {}
-    }
-    // add/unlink reshape the session set — promote to full rescan.
-    if (event === 'change') dirtyMetadataPaths.add(filePath);
-    else metadataNeedsFullScan = true;
-    broadcast({ type: 'metadata-update' });
-  } else if (path.basename(filePath) === 'sessions-index.json') {
-    // Index holds description / created / customTitle that the targeted
-    // refresh doesn't touch — promote to full rescan.
-    metadataNeedsFullScan = true;
-    broadcast({ type: 'metadata-update' });
-  }
-});
+}).on('all', onSessionFileEvent));
 
 const plansWatcher = chokidar.watch(PLANS_DIR, {
   persistent: true,
@@ -4733,7 +3972,7 @@ async function cleanupAgentActivity() {
 // Dispatch markers, pane layouts, reviews, attachments, context status and worktrees: see docs/retention.md.
 async function runRetention() {
   try {
-    const scan = await scanTranscripts(PROJECTS_DIR);
+    const scan = scanSessionIds(SESSION_OPTS);
     const opts = { known: scan?.ids, maxAgeMs: retentionMs(PI_AGENT_DIR) };
     const markers = dispatched.prune(opts);
     const layouts = panes.prune(opts);
@@ -4760,13 +3999,10 @@ setTimeout(() => {
   setInterval(runRetention, CLEANUP_INTERVAL_MS);
 }, RETENTION_FIRST_RUN_MS);
 
-// Warm the metadata + loop-info caches in the background so the first user
+// Warm the metadata cache in the background so the first user
 // request lands warm. The cheap-probe in /api/sessions skips per-session
 // enrichment for inactive sessions, so we no longer drive a full self-request
 // here — that was 690× wasted work for an active-filter first hit.
-// Yields to the event loop periodically so any inbound request isn't starved.
-// A yield every N sessions does not bound the wait: one large transcript is a long sync read.
-const PREWARM_SLICE_MS = 10;
 // Started on the ready line, the full read of every transcript competes for disk and CPU with
 // the hub's other apps while they render, and slows their first render. It starts after the
 // first list is sent, or after the fallback when no client asks.
@@ -4780,22 +4016,10 @@ function startPrewarm() {
   setImmediate(prewarmCaches);
 }
 
-async function prewarmCaches() {
+function prewarmCaches() {
   const t0 = Date.now();
   try {
     const metadata = loadSessionMetadata();
-
-    let sliceStart = Date.now();
-    for (const meta of Object.values(metadata)) {
-      if (meta?.jsonlPath) {
-        try { refreshLoopInfoState(meta.jsonlPath); } catch {}
-      }
-      if (Date.now() - sliceStart >= PREWARM_SLICE_MS) {
-        await new Promise(r => setImmediate(r));
-        sliceStart = Date.now();
-      }
-    }
-
     console.log(`[prewarm] done in ${Date.now() - t0}ms (${Object.keys(metadata).length} sessions)`);
     persistSessionCache();
   } catch (e) {

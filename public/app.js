@@ -3857,6 +3857,7 @@ function getFilteredSessions() {
       (s.id && fuzzyMatch(s.id, searchQuery)) ||
       (s.project && fuzzyMatch(s.project, searchQuery)) ||
       (s.description && fuzzyMatch(s.description, searchQuery)) ||
+      (s.firstPrompt && fuzzyMatch(s.firstPrompt, searchQuery)) ||
       taskMatchIds.has(s.id) ||
       groupMatchIds.has(s.id);
 
@@ -12520,7 +12521,8 @@ function spMatches(session, query) {
     fuzzyMatch(session.name, query) ||
     fuzzyMatch(session.id, query) ||
     fuzzyMatch(session.project, query) ||
-    fuzzyMatch(session.gitBranch, query)
+    fuzzyMatch(session.gitBranch, query) ||
+    fuzzyMatch(session.firstPrompt, query)
   );
 }
 
