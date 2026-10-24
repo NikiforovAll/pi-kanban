@@ -464,7 +464,7 @@ describe('Parser: buildAgentProgressMap', () => {
 });
 
 describe('Parser: readSessionInfoFromJsonl', () => {
-  const CLAUDE_ONLY = ['slug', 'gitBranch', 'agentName', 'logicalParentUuid', 'compactBoundaryUuid', 'permissionMode', 'cacheTtl', 'scratchpadDir'];
+  const CLAUDE_ONLY = ['gitBranch', 'agentName', 'logicalParentUuid', 'compactBoundaryUuid', 'permissionMode', 'cacheTtl'];
 
   it('reads the header, the name and the first prompt', () => {
     const info = readSessionInfoFromJsonl(PI.chat);
@@ -500,10 +500,17 @@ describe('Parser: readSessionInfoFromJsonl', () => {
     assert.equal(readSessionInfoFromJsonl(long).title, `${'x'.repeat(59)}…`);
   }));
 
+  it('takes the scratchpad dir from the last entry the kanban extension recorded', () => withTmp((dir) => {
+    const pad = (d) => ({ type: 'custom', customType: 'pi-kanban.scratchpad', data: { dir: d } });
+    const p = writeTmp(dir, piSession([pad('C:\\t\\one'), piUser('hi'), { type: 'custom', customType: 'other', data: { dir: 'x' } }, pad('C:\\t\\two')]));
+    assert.equal(readSessionInfoFromJsonl(p).scratchpadDir, 'C:\\t\\two');
+    assert.equal(readSessionInfoFromJsonl(PI.tools).scratchpadDir, null);
+  }));
+
   it('returns null fields for a missing file and for a file without a pi header', () => {
     for (const p of ['/nonexistent/path.jsonl', CLAUDE_TRANSCRIPT]) {
       const info = readSessionInfoFromJsonl(p);
-      for (const k of ['projectPath', 'customTitle', 'sessionId', 'firstPrompt', 'title', 'lastReply', ...CLAUDE_ONLY]) assert.equal(info[k], null, `${p} ${k}`);
+      for (const k of ['projectPath', 'customTitle', 'sessionId', 'firstPrompt', 'title', 'lastReply', 'scratchpadDir', ...CLAUDE_ONLY]) assert.equal(info[k], null, `${p} ${k}`);
     }
   });
 

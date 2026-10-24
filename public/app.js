@@ -15456,11 +15456,15 @@ async function endAllTerminals() {
 //#endregion
 
 //#region ASK
-// The question the session in the embedded terminal asks with the ask tool; the tool call waits for
-// the answer. Hiding keeps the frame, so a half-filled card comes back as it was. Only an answer, a
-// skip or the agent's interrupt ends the question.
+// The question a session asks with the ask tool; the tool call waits for the answer. A session in the
+// embedded terminal asks by terminal id and the modal sits over the terminal. Any other session asks
+// by session id and the modal sits over the page while that session is in view. Hiding keeps the
+// frame, so a half-filled card comes back as it was. Only an answer, a skip or the agent's interrupt
+// ends the question.
 const ASK_MSG = 'pk-ask:';
-const askState = { terminalId: null, ask: null, frame: null, frameH: 0, hidden: false, busy: false, seq: 0 };
+// `base` is the ask route of the terminal or session in view, `terminal` whether it is a terminal's.
+const askState = { base: null, terminal: false, ask: null, frame: null, frameH: 0, hidden: false, busy: false, seq: 0 };
+let askHome = null;
 
 // Runs inside the card as source text, ahead of the card's own scripts. The JSON round trip makes
 // the answer cloneable, and a value that is not JSON throws in the card.
@@ -15480,17 +15484,38 @@ function isAskOnScreen() {
   return !!askState.ask && !askEl().hidden;
 }
 
+const terminalAskBase = (terminalId) => apiPath`/api/terminals/${terminalId}/ask`;
+const sessionAskBase = (sessionId) => apiPath`/api/sessions/${sessionId}/ask`;
+
 function syncAsk(tid) {
-  if (tid === askState.terminalId) return;
-  askState.terminalId = tid;
+  const sid = viewMode === 'session' ? currentSessionId : null;
+  const base = tid ? terminalAskBase(tid) : sid ? sessionAskBase(sid) : null;
+  if (base === askState.base) return;
+  Object.assign(askState, { base, terminal: !!tid });
   setAsk(null);
-  if (tid) loadAsk(tid);
+  placeAsk(!tid);
+  if (base) loadAsk(base);
 }
 
-async function loadAsk(tid) {
+// Moving a frame reloads it, so this runs only while no card is open.
+function placeAsk(onPage) {
+  const modal = askEl();
+  const chip = document.getElementById('ask-reopen');
+  askHome ??= { modal: modal.parentElement, chip: chip.parentElement, chipNext: chip.nextSibling };
+  if (onPage === modal.classList.contains('ask-page')) return;
+  if (onPage) document.body.append(modal, chip);
+  else {
+    askHome.modal.append(modal);
+    askHome.chip.insertBefore(chip, askHome.chipNext);
+  }
+  modal.classList.toggle('ask-page', onPage);
+  chip.classList.toggle('ask-page', onPage);
+}
+
+async function loadAsk(base) {
   const seq = ++askState.seq;
-  const data = await getJson(apiPath`/api/terminals/${tid}/ask`, null, { cache: 'no-store' });
-  if (seq !== askState.seq || tid !== askState.terminalId) return;
+  const data = await getJson(base, null, { cache: 'no-store' });
+  if (seq !== askState.seq || base !== askState.base) return;
   const a = data?.ask ?? null;
   if (a?.id !== askState.ask?.id) setAsk(a);
 }
@@ -15529,20 +15554,24 @@ function renderAsk() {
   layoutAsk();
 }
 
-// A full card fills the modal; a smaller one takes its content's height, up to the terminal's.
+// A full card fills the modal; a smaller one takes its content's height, up to the modal's.
 function layoutAsk() {
   const frame = askState.frame;
   const box = askEl().querySelector('.ask-box');
   if (!frame || askEl().hidden || box.dataset.size === 'full') return;
-  const host = document.getElementById('terminal-host');
   const chrome = box.querySelector('.ask-head').offsetHeight + box.querySelector('.ask-foot').offsetHeight + 2;
-  frame.style.height = `${Math.max(SHOW_MIN_H, Math.min(askState.frameH || SHOW_MIN_H, host.clientHeight - 32 - chrome))}px`;
+  frame.style.height = `${Math.max(SHOW_MIN_H, Math.min(askState.frameH || SHOW_MIN_H, askEl().clientHeight - 32 - chrome))}px`;
+}
+
+function focusAfterAsk() {
+  if (askState.terminal) focusTerminalPane();
+  else focusActivePane();
 }
 
 function hideAsk() {
   askState.hidden = true;
   renderAsk();
-  focusTerminalPane();
+  focusAfterAsk();
 }
 
 function reopenAsk() {
@@ -15553,11 +15582,12 @@ function reopenAsk() {
 
 async function endAsk(body) {
   const a = askState.ask;
-  const tid = askState.terminalId;
-  if (!a || !tid || askState.busy) return;
+  const { base, terminal } = askState;
+  if (!a || !base || askState.busy) return;
   askState.busy = true;
   try {
-    const res = await terminalFetch(apiPath`/api/terminals/${tid}/ask/${a.id}`, 'POST', body);
+    const url = `${base}/${encodeURIComponent(a.id)}`;
+    const res = terminal ? await terminalFetch(url, 'POST', body) : await api(url, { method: 'POST', body });
     if (res.status === 404) showToast('The question is no longer open');
     else if (!res.ok) {
       const out = await res.json().catch(() => ({}));
@@ -15565,7 +15595,7 @@ async function endAsk(body) {
     }
     if (askState.ask?.id !== a.id) return;
     setAsk(null);
-    focusTerminalPane();
+    focusAfterAsk();
   } catch {
     showToast('Failed to send the answer', 'error');
   } finally {
@@ -15577,16 +15607,25 @@ function answerAsk(data) {
   return endAsk({ status: 'answered', data });
 }
 
+// A terminal's events carry its terminalId; a session's carry only the sessionId.
+const askBaseOf = (d) =>
+  typeof d.terminalId === 'string'
+    ? terminalAskBase(d.terminalId)
+    : typeof d.sessionId === 'string'
+      ? sessionAskBase(d.sessionId)
+      : null;
+
 function onAskOpened(d) {
-  if (typeof d.terminalId !== 'string') return;
-  if (d.terminalId === askState.terminalId) return loadAsk(d.terminalId);
-  if (askState.terminalId || !wantsTerminal()) return;
+  const base = askBaseOf(d);
+  if (!base) return;
+  if (base === askState.base) return loadAsk(base);
+  if (typeof d.terminalId !== 'string' || askState.terminal || !wantsTerminal()) return;
   if (!terminalIds.has(currentSessionId)) showState.lookup = null;
   syncShowCard();
 }
 
 function onAskClosed(d) {
-  if (d.terminalId !== askState.terminalId || askState.ask?.id !== d.id) return;
+  if (askBaseOf(d) !== askState.base || askState.ask?.id !== d.id) return;
   if (d.status === 'cancelled') showToast('The agent stopped waiting for the answer');
   setAsk(null);
 }

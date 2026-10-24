@@ -1,16 +1,15 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { lib } from "./tools/board-api.js";
 import { linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
+import { registerScratchpad } from "./tools/scratchpad.js";
+import { registerShowAsk } from "./tools/show-ask.js";
 
 const extDir = fileURLToPath(new URL('.', import.meta.url));
-
-const requireLib = createRequire(import.meta.url);
-const lib = (name: string) => requireLib(resolvePath(extDir, "..", "lib", name));
 
 type Line = Record<string, unknown>;
 
@@ -327,6 +326,8 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	const url = `http://localhost:${port}`;
 
 	registerLiveState(pi);
+	registerScratchpad(pi);
+	registerShowAsk(pi);
 
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.toolName !== "todo") return;

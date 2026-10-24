@@ -42,8 +42,8 @@ const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace, isDefaultPiAg
 const { readTerminalConfig } = require('./lib/terminal');
 const { createTerminalClient } = require('./lib/terminal-client');
 const { createShowStore, mountShowRoutes, showBodyParser, SHOW_PATH } = require('./lib/show');
-const { createAskStore, mountAskRoutes, askBodyParser, ASK_PATH } = require('./lib/ask');
-const { readLiveSessions, isPidAlive, noteReplacedSessions } = require('./lib/live-sessions');
+const { createAskStore, mountAskRoutes, terminalAskRoutes, askBodyParser, ASK_PATH, SESSION_ASK_PATH, SESSION_ASK_ROUTES } = require('./lib/ask');
+const { readLiveSessions, isPidAlive, isSessionLive, noteReplacedSessions } = require('./lib/live-sessions');
 const { createProcStats } = require('./lib/proc-stats');
 const { createUserGroupStore } = require('./lib/user-groups');
 const { createSessionPinStore } = require('./lib/session-pins');
@@ -51,8 +51,7 @@ const { stampedJsonFile } = require('./lib/stamped-json-file');
 const { parseReviewSource, parseActionBody, formatActionMarkdown } = require('./lib/preview-action');
 const { createDispatchedStore, pruneSessionDirs, pruneContextStatus, pruneTaskMaps, retentionMs } = require('./lib/retention');
 const { createWorktreeStore } = require('./lib/worktrees');
-const { createScratchpadDirResolver, scratchpadRoot } = require('./lib/scratchpad-dir');
-const { readSettings } = require('./lib/claude-settings');
+const { createScratchpadDirResolver, defaultScratchpadRoot } = require('./lib/scratchpad-dir');
 const { readGitBranch, sessionGitBranch } = require('./lib/git-branch');
 const { createLinkedDocStore, canonicalPath, linkUrl } = require('./lib/linked-docs');
 const { createPaneStore, isOwnOrigin } = require('./lib/panes');
@@ -108,19 +107,10 @@ const TERMINALS_FILE = process.env.PK_TERMINALS_FILE ? path.resolve(process.env.
 const TEMP_ROOT = (() => {
   try { return realpathSync.native(os.tmpdir()); } catch { return os.tmpdir(); }
 })();
-// Harness-owned scratchpad root; the per-session dir under it is created lazily.
-// Used only for a transcript that does not record its scratchpad dir. Settings come first:
-// pi-kanban often runs under the hub or a tray, not in the shell where `claude` ran.
-const SCRATCHPAD_ROOT = (() => {
-  const root = scratchpadRoot({
-    platform: process.platform,
-    overrides: [readSettings(path.join(PI_AGENT_DIR, 'settings.json'))?.env?.CLAUDE_CODE_TMPDIR, process.env.CLAUDE_CODE_TMPDIR],
-    tmpdir: os.tmpdir(),
-    uid: process.getuid?.(),
-  });
-  // Claude Code resolves the root with realpath too: /private/tmp/claude-<uid> on macOS.
-  return realpathDeepest(root);
-})();
+// The kanban extension makes the per-session pad under this root and records it in the session.
+// Used only for a session that does not record its scratchpad dir.
+// The root may not exist yet, so its deepest existing parent gives the long form.
+const SCRATCHPAD_ROOT = realpathDeepest(defaultScratchpadRoot());
 
 // #endregion
 
@@ -507,6 +497,7 @@ app.param('taskId', (_req, res, next, val) => {
 
 app.use(SHOW_PATH, showBodyParser());
 app.use(ASK_PATH, askBodyParser());
+app.use(SESSION_ASK_PATH, askBodyParser());
 // Parse JSON bodies. A review of 50 comments at the field caps is about 450 kB.
 app.use(express.json({ limit: '1mb' }));
 // #endregion
@@ -763,7 +754,6 @@ function getSessionDisplayName(meta) {
 
 const getScratchpadDir = createScratchpadDirResolver({
   root: SCRATCHPAD_ROOT,
-  resolveWorktree: worktrees.resolve,
   // Transcripts record the 8.3 short form on Windows; path checks and the watcher need the long one.
   toLong: realpathDeepest,
 });
@@ -2155,7 +2145,7 @@ let savedTerminals = terminalsFile.load() || {};
 function saveTerminals() {
   const kept = new Set(Object.values(savedTerminals.terminalIds || {}));
   const showSessions = show.prune((id) => kept.has(id) || terminal.hasTerminal(id));
-  ask.prune((id) => terminal.hasTerminal(id));
+  ask.prune((id) => terminal.hasTerminal(id), 'terminal ended');
   terminalsFile.save({ ...savedTerminals, showSessions });
 }
 
@@ -2292,11 +2282,17 @@ mountShowRoutes(app, {
 const ask = createAskStore();
 mountAskRoutes(app, {
   store: ask,
-  authorized: (token) => terminal.authorized(token),
-  hasTerminal: (id) => terminal.hasTerminal(id),
+  ...terminalAskRoutes({
+    authorized: (token) => terminal.authorized(token),
+    hasTerminal: (id) => terminal.hasTerminal(id),
+  }),
   readPreviewFile,
   broadcast,
 });
+const sessionAsk = createAskStore();
+mountAskRoutes(app, { store: sessionAsk, ...SESSION_ASK_ROUTES, readPreviewFile, broadcast });
+// A pi process that dies mid-question never cancels it.
+setInterval(() => sessionAsk.prune((id) => isSessionLive(loadLiveSessions(), id), 'session ended'), 60_000).unref();
 
 // Served from node_modules, never a CDN: any script on this page can use the token.
 const XTERM_FILES = {

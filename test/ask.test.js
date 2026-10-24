@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
-const { createAskStore, mountAskRoutes, askBodyParser, ASK_PATH } = require('../lib/ask');
+const { createAskStore, mountAskRoutes, terminalAskRoutes, askBodyParser, ASK_PATH, SESSION_ASK_PATH, SESSION_ASK_ROUTES } = require('../lib/ask');
 
 const TOKEN = 't'.repeat(64);
 const TERMINAL = 'dddddddd-0000-0000-0000-000000000001';
@@ -18,8 +18,7 @@ function board() {
   app.use(ASK_PATH, askBodyParser());
   mountAskRoutes(app, {
     store,
-    authorized: (t) => t === TOKEN,
-    hasTerminal: (id) => id === TERMINAL,
+    ...terminalAskRoutes({ authorized: (t) => t === TOKEN, hasTerminal: (id) => id === TERMINAL }),
     readPreviewFile: async (abs) => {
       if (!fs.existsSync(abs)) throw Object.assign(new Error('File not found'), { status: 404 });
       return { content: fs.readFileSync(abs, 'utf8'), kind: abs.endsWith('.html') ? 'html' : 'markdown' };
@@ -124,8 +123,54 @@ describe('ask routes', () => {
 
   it('dismisses the questions of terminals that ended', async () => {
     const { body } = await open();
-    b.store.prune(() => false);
+    b.store.prune(() => false, 'terminal ended');
     assert.equal(b.store.current(TERMINAL), null);
     assert.deepEqual(await b.store.wait(body.id, 10), { status: 'dismissed', reason: 'terminal ended' });
+  });
+});
+
+describe('session ask routes', () => {
+  const B = 'bbbbbbbb-0000-0000-0000-000000000002';
+  const sessionUrl = (sessionId = A) => `/api/sessions/${sessionId}/ask`;
+  let root;
+  let card;
+  let events;
+  let api;
+
+  before(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-ask-session-'));
+    card = path.join(root, 'card.html');
+    fs.writeFileSync(card, '<button data-pk-action="ok">OK</button>');
+    events = [];
+    const app = express();
+    app.use(SESSION_ASK_PATH, askBodyParser());
+    mountAskRoutes(app, {
+      store: createAskStore(),
+      ...SESSION_ASK_ROUTES,
+      readPreviewFile: async (abs) => ({ content: fs.readFileSync(abs, 'utf8'), kind: 'html' }),
+      broadcast: (e) => events.push(e),
+    });
+    api = await listen(app);
+  });
+
+  after(() => {
+    api.server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('opens a question by session id with no token, and closes it on cancel', async () => {
+    const { status, body } = await api.call('POST', sessionUrl(), { sessionId: A, title: 'Go?', file: card }, null);
+    assert.equal(status, 200);
+    assert.deepEqual(events.at(-1), { type: 'ask:opened', sessionId: A, id: body.id });
+    assert.equal((await api.call('GET', sessionUrl(), undefined, null)).body.ask.id, body.id);
+    assert.equal((await api.call('GET', sessionUrl(B), undefined, null)).body.ask, null);
+    assert.equal((await api.call('DELETE', `${sessionUrl()}/${body.id}`, undefined, null)).status, 204);
+    assert.deepEqual(events.at(-1), { type: 'ask:closed', sessionId: A, id: body.id, status: 'cancelled' });
+    assert.deepEqual((await api.call('GET', `${sessionUrl()}/${body.id}/wait?ms=10`, undefined, null)).body, { status: 'cancelled' });
+  });
+
+  it('refuses a session id that is not a UUID or does not match the body', async () => {
+    assert.equal((await api.call('POST', sessionUrl('nope'), { sessionId: A, title: 'x', file: card }, null)).status, 400);
+    assert.equal((await api.call('POST', sessionUrl(B), { sessionId: A, title: 'x', file: card }, null)).status, 400);
   });
 });

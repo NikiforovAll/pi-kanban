@@ -1,103 +1,123 @@
-const { describe, it } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
-const { createScratchpadDirResolver, scratchpadRoot } = require('../lib/scratchpad-dir');
+const {
+  createScratchpadDirResolver, scratchpadRoot, defaultScratchpadRoot, scratchpadPath, recordedPadDir, prunePads, TMPDIR_ENV, SCRATCHPAD_ENTRY,
+} = require('../lib/scratchpad-dir');
 const { encodeProjectDirName } = require('../lib/board-dir');
 
-const ROOT = path.resolve('/tmp/claude');
-const PROJECTS = path.resolve('/home/.claude/projects');
+const ROOT = path.resolve('/tmp/pi-kanban');
 const ID = '64601a65-8a20-45e6-aa35-5211fcfa4350';
-const HUB = path.resolve('/dev/claude-code-hub');
-const SUB = path.join(HUB, 'pi-kanban');
-const SUB_WT = path.join(SUB, '.claude', 'worktrees', 'tree-highlight');
-
-const dirFor = (cwd) => path.join(ROOT, encodeProjectDirName(cwd), ID, 'scratchpad');
-const jsonlUnder = (cwd) => path.join(PROJECTS, encodeProjectDirName(cwd), `${ID}.jsonl`);
-
-// `dirs` maps a scratchpad dir to its entry count; a dir not listed does not exist.
-function resolver(dirs, worktrees = {}) {
-  return createScratchpadDirResolver({
-    root: ROOT,
-    resolveWorktree: (dir) => worktrees[dir] ?? null,
-    exists: (dir) => dir in dirs,
-    isEmpty: (dir) => !dirs[dir],
-  });
-}
+const CWD = path.resolve('/dev/pi-kanban');
+const DAY = 24 * 60 * 60 * 1000;
 
 describe('getScratchpadDir', () => {
-  it('returns null without a transcript', () => {
-    assert.equal(resolver({})(ID, { project: SUB }), null);
+  it('builds the pad from the session cwd when none was recorded', () => {
+    const get = createScratchpadDirResolver({ root: ROOT });
+    assert.equal(get(ID, { cwd: CWD }), path.join(ROOT, encodeProjectDirName(CWD), ID, 'scratchpad'));
+    assert.equal(get(ID, { project: CWD }), scratchpadPath(ROOT, CWD, ID));
   });
 
-  it('keys on the transcript dir for a session that stayed where it started', () => {
-    const get = resolver({});
-    assert.equal(get(ID, { project: SUB, jsonlPath: jsonlUnder(SUB) }), dirFor(SUB));
+  it('returns null without a cwd', () => {
+    assert.equal(createScratchpadDirResolver({ root: ROOT })(ID, {}), null);
   });
 
-  it('keys on the launch dir when EnterWorktree moved the transcript', () => {
-    const get = resolver({ [dirFor(SUB)]: 2, [dirFor(SUB_WT)]: 0 });
-    assert.equal(get(ID, { project: SUB, jsonlPath: jsonlUnder(SUB_WT) }), dirFor(SUB));
-  });
-
-  it('keys on the repo when the first cwd is already the worktree', () => {
-    const get = resolver({ [dirFor(SUB)]: 7 }, { [SUB_WT]: { repo: SUB } });
-    assert.equal(get(ID, { project: SUB_WT, jsonlPath: jsonlUnder(SUB_WT) }), dirFor(SUB));
-  });
-
-  it('keeps a by-project dir that holds files over the launch dir', () => {
-    const get = resolver({ [dirFor(SUB)]: 7, [dirFor(SUB_WT)]: 54 }, { [SUB_WT]: { repo: SUB } });
-    assert.equal(get(ID, { project: SUB_WT, jsonlPath: jsonlUnder(SUB_WT) }), dirFor(SUB_WT));
-  });
-
-  it('keys on the launch dir when the transcript sits under another project with no worktree', () => {
-    const cost = path.join(HUB, 'cost');
-    const get = resolver({ [dirFor(HUB)]: 1 });
-    assert.equal(get(ID, { project: HUB, jsonlPath: jsonlUnder(cost) }), dirFor(HUB));
-  });
-
-  it('stops probing once the by-project dir holds files', () => {
-    const dirs = { [dirFor(SUB)]: 7, [dirFor(SUB_WT)]: 54 };
-    const get = resolver(dirs);
-    const meta = { project: SUB, jsonlPath: jsonlUnder(SUB_WT) };
-    assert.equal(get(ID, meta), dirFor(SUB_WT));
-    dirs[dirFor(SUB_WT)] = 0;
-    assert.equal(get(ID, meta), dirFor(SUB_WT));
-  });
-
-  it('keeps the by-project path when no launch-keyed dir exists', () => {
-    const get = resolver({});
-    assert.equal(get(ID, { project: SUB, jsonlPath: jsonlUnder(SUB_WT) }), dirFor(SUB_WT));
-  });
-
-  it('takes the dir the transcript recorded, with its root in long form, over the convention', () => {
-    const root = path.resolve('/SHORT~1/claude');
-    const longRoot = path.resolve('/short-long/claude');
+  it('takes the recorded dir, with its root in long form, over the convention', () => {
+    const root = path.resolve('/SHORT~1/pi-kanban');
+    const longRoot = path.resolve('/short-long/pi-kanban');
     let calls = 0;
-    const get = createScratchpadDirResolver({
-      root: ROOT,
-      resolveWorktree: () => null,
-      toLong: (p) => (calls++, p === root ? longRoot : p),
-      exists: () => true,
-      isEmpty: () => false,
-    });
+    const get = createScratchpadDirResolver({ root: ROOT, toLong: (p) => (calls++, p === root ? longRoot : p) });
     const other = 'aaaaaaaa-8a20-45e6-aa35-5211fcfa4350';
     for (const id of [ID, other, ID]) {
-      const meta = { project: SUB, jsonlPath: jsonlUnder(SUB), scratchpadDir: path.join(root, 'x', id, 'scratchpad') };
+      const meta = { cwd: CWD, scratchpadDir: path.join(root, 'x', id, 'scratchpad') };
       assert.equal(get(id, meta), path.join(longRoot, 'x', id, 'scratchpad'));
     }
     assert.equal(calls, 1);
   });
 });
 
-describe('scratchpadRoot', () => {
-  it('follows Claude Code: /tmp on macOS, the OS temp dir elsewhere, claude-<uid> on Unix', () => {
-    assert.equal(scratchpadRoot({ platform: 'darwin', overrides: [], tmpdir: '/var/folders/x/T', uid: 501 }), '/tmp/claude-501');
-    assert.equal(scratchpadRoot({ platform: 'linux', overrides: [], tmpdir: '/tmp', uid: 1000 }), '/tmp/claude-1000');
-    assert.equal(scratchpadRoot({ platform: 'win32', overrides: [], tmpdir: 'C:\\Temp' }), 'C:\\Temp\\claude');
+describe('recordedPadDir', () => {
+  it('takes the last recorded pad and skips other entries', () => {
+    const pad = (dir) => ({ type: 'custom', customType: SCRATCHPAD_ENTRY, data: { dir } });
+    assert.equal(recordedPadDir([pad('/a'), { type: 'custom', customType: 'other', data: { dir: '/x' } }, pad('/b')]), '/b');
+    assert.equal(recordedPadDir([pad(42)]), null);
+    assert.equal(recordedPadDir([]), null);
+  });
+});
+
+describe('defaultScratchpadRoot', () => {
+  let saved;
+  beforeEach(() => { saved = process.env[TMPDIR_ENV]; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[TMPDIR_ENV];
+    else process.env[TMPDIR_ENV] = saved;
   });
 
-  it('takes the first absolute CLAUDE_CODE_TMPDIR and skips a relative one', () => {
-    assert.equal(scratchpadRoot({ platform: 'linux', overrides: [undefined, 'rel/dir', '/data/tmp/'], tmpdir: '/tmp', uid: 1000 }), '/data/tmp/claude-1000');
-    assert.equal(scratchpadRoot({ platform: 'win32', overrides: ['D:/tmp', 'E:\\t'], tmpdir: 'C:\\Temp' }), 'D:\\tmp\\claude');
+  it('takes an absolute override from the environment', () => {
+    process.env[TMPDIR_ENV] = path.resolve('/override');
+    assert.equal(path.dirname(defaultScratchpadRoot()), path.resolve('/override'));
+  });
+});
+
+describe('scratchpadRoot', () => {
+  it('sits in the OS temp dir, with the uid on Unix', () => {
+    assert.equal(scratchpadRoot({ platform: 'linux', tmpdir: '/tmp', uid: 1000 }), '/tmp/pi-kanban-1000');
+    assert.equal(scratchpadRoot({ platform: 'darwin', tmpdir: '/var/folders/x/T', uid: 501 }), '/var/folders/x/T/pi-kanban-501');
+    assert.equal(scratchpadRoot({ platform: 'win32', tmpdir: 'C:\\Temp' }), 'C:\\Temp\\pi-kanban');
+  });
+
+  it('takes an absolute override and skips a relative one', () => {
+    assert.equal(scratchpadRoot({ platform: 'linux', override: '/data/tmp/', tmpdir: '/tmp', uid: 1000 }), '/data/tmp/pi-kanban-1000');
+    assert.equal(scratchpadRoot({ platform: 'linux', override: 'rel/dir', tmpdir: '/tmp', uid: 1000 }), '/tmp/pi-kanban-1000');
+    assert.equal(scratchpadRoot({ platform: 'win32', override: 'D:/tmp', tmpdir: 'C:\\Temp' }), 'D:\\tmp\\pi-kanban');
+  });
+});
+
+describe('prunePads', () => {
+  let root;
+  const now = Date.now();
+  const OLD = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const FRESH = 'aaaaaaaa-0000-4000-8000-000000000002';
+  const LIVE = 'aaaaaaaa-0000-4000-8000-000000000003';
+  const TOUCHED = 'aaaaaaaa-0000-4000-8000-000000000004';
+
+  function pad(project, id, ageDays, file = 'notes.md') {
+    const dir = path.join(root, project, id, 'scratchpad');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, file), 'x');
+    const t = new Date(now - ageDays * DAY);
+    for (const p of [path.join(dir, file), dir, path.dirname(dir)]) fs.utimesSync(p, t, t);
+    return path.dirname(dir);
+  }
+
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-prune-')); });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it('removes old pads of sessions that are not live and keeps the rest', async () => {
+    const old = pad('C--a', OLD, 10);
+    const fresh = pad('C--a', FRESH, 1);
+    const live = pad('C--b', LIVE, 30);
+    const touched = pad('C--b', TOUCHED, 30);
+    const t = new Date(now - DAY);
+    fs.utimesSync(path.join(touched, 'scratchpad', 'notes.md'), t, t);
+    fs.mkdirSync(path.join(root, 'C--c', 'not-a-session'), { recursive: true });
+
+    const removed = await prunePads({ root, isLive: (id) => id === LIVE, now });
+
+    assert.deepEqual(removed, [old]);
+    assert.ok(!fs.existsSync(old));
+    for (const dir of [fresh, live, touched, path.join(root, 'C--c', 'not-a-session')]) assert.ok(fs.existsSync(dir), dir);
+  });
+
+  it('removes a project dir that the prune left empty', async () => {
+    pad('C--a', OLD, 10);
+    await prunePads({ root, isLive: () => false, now });
+    assert.ok(!fs.existsSync(path.join(root, 'C--a')));
+  });
+
+  it('returns nothing for a missing root', async () => {
+    assert.deepEqual(await prunePads({ root: path.join(root, 'missing'), isLive: () => false, now }), []);
   });
 });

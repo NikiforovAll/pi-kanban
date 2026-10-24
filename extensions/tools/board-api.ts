@@ -1,8 +1,13 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join as joinPath } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_PORT = 3460;
+
+const requireHere = createRequire(import.meta.url);
+// The board's CommonJS modules, shared with the extension.
+export const lib = (name: string) => requireHere(`../../lib/${name}`);
 
 export const BOARD_DOWN = 'The pi-kanban board is not running. Ask the user to start it with "pi-kanban".';
 
@@ -20,7 +25,7 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
-function readJson(file: string): any {
+export function readJson(file: string): any {
 	try {
 		return JSON.parse(readFileSync(file, "utf8"));
 	} catch {
@@ -75,3 +80,17 @@ export async function errorText(res: Response): Promise<string> {
 	} catch {}
 	return `pi-kanban answered HTTP ${res.status}`;
 }
+
+export async function okJson(pending: Promise<Response>): Promise<any> {
+	const res = await pending;
+	if (!res.ok) throw new Error(await errorText(res));
+	return res.status === 204 ? null : res.json();
+}
+
+export function sessionIdOf(ctx: ExtensionContext): string {
+	const id = ctx.sessionManager.getSessionId();
+	if (!id) throw new Error("This pi session has no id yet.");
+	return id;
+}
+
+export const toolText = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: undefined });

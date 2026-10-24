@@ -2,8 +2,8 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { Type } from "typebox";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { boardFetch, errorText, postJson } from "./board-api.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { boardFetch, okJson, postJson, sessionIdOf, toolText as text } from "./board-api.js";
 
 const { linkUrl } = createRequire(import.meta.url)("../../public/link-url.js") as { linkUrl: (v: unknown) => string | null };
 const isUrl = (target: string) => linkUrl(target) !== null;
@@ -20,20 +20,8 @@ export function resolveTarget(cwd: string, input: string): string {
 	return isAbsolute(native) ? resolvePath(native) : resolvePath(cwd, native);
 }
 
-async function okJson(pending: Promise<Response>): Promise<any> {
-	const res = await pending;
-	if (!res.ok) throw new Error(await errorText(res));
-	return res.json();
-}
-
 const boardJson = (path: string, init?: RequestInit) => okJson(boardFetch(path, init));
 const postBoardJson = (path: string, body: unknown) => okJson(postJson(path, body));
-
-function sessionIdOf(ctx: ExtensionContext): string {
-	const id = ctx.sessionManager.getSessionId();
-	if (!id) throw new Error("This pi session has no id yet.");
-	return id;
-}
 
 const panesPath = (sessionId: string, paneId?: string) =>
 	`/api/panes/${encodeURIComponent(sessionId)}${paneId ? `/${encodeURIComponent(paneId)}` : ""}`;
@@ -55,8 +43,6 @@ export async function previewDoc(target: string, sessionId: string | null): Prom
 	await postBoardJson("/api/preview", { path: target, sessionId });
 	return `Preview opened on the board: ${target}`;
 }
-
-const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: undefined });
 
 const TARGET = Type.String({ description: "An http(s) URL, or a file path: absolute, relative to the session cwd, or starting with ~" });
 
