@@ -1,7 +1,7 @@
 {
   "name": "pi-kanban",
-  "version": "0.0.0-dev",
-  "description": "Workspace for the pi coding agent — sessions, todos, subagents, and more.",
+  "version": "2.0.0",
+  "description": "Agent development environment for the pi coding agent: run pi in a browser terminal next to its todos, subagents, plans, and docs.",
   "main": "server.js",
   "bin": {
     "pi-kanban": "./server.js"
@@ -11,6 +11,7 @@
     "dev": "node --watch server.js",
     "test": "node --test test/*.test.js",
     "build:demo": "node scripts/build-demo.js",
+    "demo:record": "node scripts/record-demo.js",
     "preview:demo": "npm run build:demo && npx --yes http-server dist -p 8765 -c-1",
     "site:dev": "npm --prefix website run dev",
     "site:build": "npm --prefix website run build",
@@ -29,7 +30,8 @@
     "pi-package",
     "kanban",
     "dashboard",
-    "observability",
+    "terminal",
+    "ade",
     "sessions",
     "subagents"
   ],
@@ -40,8 +42,8 @@
     "public/",
     "skill-guides/",
     "extensions/",
-    "themes/",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "license": "MIT",
   "author": "nikiforovall",
