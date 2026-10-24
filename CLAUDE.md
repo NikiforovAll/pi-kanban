@@ -2,15 +2,30 @@
 
 ## Architecture
 
-pi-kanban is a **read-only observability dashboard** for the [pi coding agent](https://pi.dev). It reads pi's session JSONL files from `~/.pi/agent/sessions/**/*.jsonl` and renders sessions, todos, messages, and subagents. It does not mutate pi's state.
+pi-kanban is an agent development environment (ADE) for the [pi coding agent](https://pi.dev). The board runs pi sessions in a browser terminal and shows each session's todos, subagents, plan, and linked docs. It reads pi's session JSONL files from `~/.pi/agent/sessions/**/*.jsonl`. The pi tools it adds let the agent post cards, ask the user, add panes, and dispatch tasks to other sessions through the board.
 
-### Three runtime pieces
+### Runtime pieces
 
-1. **`server.js`** — Express server. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-sessions.js`, `lib/pi-transcript.js` and `lib/parsers.js`) plus markdown preview, "open in editor", and theme APIs.
+1. **`server.js`** — Express server and the `pi-kanban` bin. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-sessions.js`, `lib/pi-transcript.js` and `lib/parsers.js`), plus terminal, dispatch, show/ask, pane, preview, and "open in editor" APIs. With a subcommand (`pi-kanban doc|pane|session|group|task|project|dispatch|terminal|skills`), it runs `cli.js` against a running board instead.
 
-2. **`public/`** — vanilla HTML/CSS/JS frontend. **Everything lives in one file: `public/app.js` organized by `//#region` blocks. No bundler, no framework.
+2. **Board terminal** — on by default, `--no-terminal` turns it off. `lib/terminal.js` keeps one PTY per session and serves it over a WebSocket behind the Host, Origin, and token gates. The PTYs live in a forked host process (`lib/terminal-host.js`, driven over IPC by `lib/terminal-client.js`), so a closed socket does not end pi. The token goes to the browser in the URL fragment (`#t=...`). `public/terminal.html` and `public/terminal-frame.js` render it with xterm.
 
-3. **`extensions/kanban.ts`** — pi extension exposing the `/kanban` slash command (`start | stop | status | open web|app | session open | session pin | session sticky-pin | session unpin | session view-doc | session link-doc`). Spawns `server.js` as a child process on port 3460 and proxies pin/preview commands via HTTP. This is the entry point when installed via `pi install npm:pi-kanban`.
+3. **`public/`** — vanilla HTML/CSS/JS frontend. **Everything lives in one file: `public/app.js` organized by `//#region` blocks. No bundler, no framework. `public/themes.css` holds the color themes.
+
+4. **`extensions/kanban.ts`** — pi extension, the entry point when installed via `pi install npm:pi-kanban`. It does not start the board: the user installs it with `npm install -g pi-kanban` and runs `pi-kanban`. It registers the `/kanban` command: `open` (the default, opens the board URL with the token; not offered when pi runs in the board terminal) and `session open | pin | sticky-pin | unpin | view-doc | link-doc`, which POST to the board. It also registers the tools in `extensions/tools/`.
+
+### pi tools (`extensions/tools/`)
+
+- **`board-api.ts`** — finds the board (`PK_URL`, then the `server.json` beacon, then port 3460), wraps fetch, and loads the board's CommonJS `lib/` modules. A down board raises `BoardDownError`.
+- **`panes.ts`** — `pane_add`, `pane_rm`, `pane_list`, `link_doc`, `unlink_doc`, `preview_doc`, `bind_plan`.
+- **`show-ask.ts`** — `show` posts a card file: an overlay in the board terminal, else a pane tab. `ask` opens a modal and long-polls for the answer, with a pi TUI fallback when the board is down.
+- **`dispatch.ts`** — `dispatch_start`, `dispatch_list`, `dispatch_wait`, `dispatch_end`, and the worker's `dispatch_report`.
+- **`inbox.ts`** — long-polls `/api/sessions/:id/events` and delivers board messages (review comments, card answers, task moves) to pi as user messages. The ack rides on the next poll.
+- **`scratchpad.ts`** — a folder per session, given to pi in the system prompt and `$PI_SCRATCHPAD_DIR`, pruned 7 days after the session ends.
+
+### Board-mediated dispatch
+
+The parent never talks to the worker. `dispatch_start` POSTs `/api/dispatch` with the terminal token, and the board starts a new pi session in its terminal and records it as dispatched (with parent and group). The worker calls `dispatch_report` once, which POSTs `/api/dispatch/:session/report` (no token: the worker holds none, and `lib/net-guard.js` refuses cross-site requests). `lib/dispatch-reports.js` keeps the report on the dispatch marker, so it survives a late `dispatch_wait` poll, an ended worker terminal, or a board restart.
 
 ### Session parsing (`lib/pi-sessions.js`, `lib/pi-transcript.js`, `lib/parsers.js`)
 
@@ -21,7 +36,7 @@ pi stores sessions as JSONL files under `~/.pi/agent/sessions/<encoded-cwd>/<tim
 - All state lives in module-scope `let`s in `app.js`; localStorage persists user prefs (`theme`, `sidebar-collapsed`, `sidebar-width`, etc.).
 - `app.js` is organized by `//#region NAME` / `//#endregion` blocks (folded by VS Code). When editing, place new code in the matching region; when adding new functionality that doesn't fit any existing region, add a new region rather than appending to the bottom. Grep `^//#region` to list them.
 
-  Current regions, in order: `STATE`, `DOM`, `DATA_FETCHING`, `BULK_DELETE`, `SIDEBAR_SECTIONS`, `MESSAGE_PANEL`, `PINNING`, `MODALS`, `TOAST`, `TOOL_RENDERING`, `AGENTS`, `RENDERING`, `KANBAN`, `DRAG_DROP`, `KEYBOARD_NAV`, `TASK_DETAIL`, `HELP`, `SCRATCHPAD`, `STORAGE_MANAGER`, `KEYBOARD_SHORTCUTS`, `MARKDOWN_PREVIEW`, `SSE`, `CONTEXT_WINDOW`, `UTILS`, `FILTERS`, `EVENT_DELEGATION`, `THEME`, `SIDEBAR_LAYOUT`, `PREFERENCES`, `SESSION_INFO`, `PLAN`, `LAYOUT_SYNC`, `PWA`, `INIT`.
+  Current regions, in order: `STATE`, `DOM`, `DATA_FETCHING`, `SEARCH`, `SESSION_ACTIVITY`, `TIMINGS`, `AGENT_FETCHING`, `MESSAGE_PANEL`, `PINNING`, `MODALS`, `TOAST`, `TOOL_RENDERING`, `FINDINGS`, `AGENTS`, `RENDERING`, `KANBAN`, `DRAG_DROP`, `SESSION_GROUPS`, `SESSION_GROUPS_RENAME`, `SESSION_GROUPS_DND`, `SESSION_GROUPS_MENU`, `KEYBOARD_NAV`, `TASK_DETAIL`, `HELP`, `SCRATCHPAD`, `STORAGE_MANAGER`, `KEYBOARD_SHORTCUTS`, `REVIEW`, `MARKDOWN_PREVIEW`, `SSE`, `CONTEXT_WINDOW`, `UTILS`, `FILTERS`, `EVENT_DELEGATION`, `THEME`, `SIDEBAR_LAYOUT`, `SESSION_INFO`, `SESSION_PICKER`, `PROJECT_PICKER`, `PLAN`, `TOOL_STATS_MODAL`, `PANES`, `TERMINAL`, `ASK`, `SHOW`, `NEW_SESSION`, `PWA`, `INIT`, `LINKS`.
 
 ### Adding endpoints
 

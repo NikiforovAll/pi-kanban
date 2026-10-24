@@ -2,50 +2,85 @@
 
 [![npm version](https://img.shields.io/npm/v/pi-kanban.svg)](https://www.npmjs.com/package/pi-kanban)
 
-Web dashboard for the [pi coding agent](https://pi.dev/packages/pi-kanban?name=kanban) — sessions, todos, subagents, observability.
+Agent PI - Agent Development Environment (ADE) for the [pi coding agent](https://pi.dev/packages/pi-kanban?name=kanban).
 
-![pi-kanban dashboard](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster.png)
+![pi in the board terminal, with the session sidebar and a show card](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/website/public/shots/themes/pi-terminal-light.webp)
 
-## Documentation
+## What it is
 
-**[→ See the documentation](https://nikiforovall.blog/pi-kanban/)**
+pi-kanban runs pi sessions in a browser terminal and shows each session next to its work: todos as kanban columns, subagents, the plan, linked docs, and the full session log. The pi tools it adds let the agent show you cards, ask you questions, open files and pages as tabs, and hand tasks to new pi sessions.
 
-## Try it now
+- **Documentation:** https://nikiforovall.blog/pi-kanban/
+- **Live demo:** https://nikiforovall.blog/pi-kanban/demo/ (sample sessions, runs in your browser, no install)
 
-**[→ Open the live demo](https://nikiforovall.blog/pi-kanban/demo/)**
+## Install
 
-Click around a fully interactive dashboard with synthesized sessions, tasks, and subagents — no install. Toggle the theme, browse projects, expand a subagent's review, open the storage manager. Everything works in-browser.
-
-When you're ready to run it on your own pi sessions, install below.
-
-## Installation
+You need Node.js 20 or later and pi.
 
 ```sh
 pi install npm:pi-kanban
+npm install -g pi-kanban
 ```
 
-Start the board:
+The first command adds the `/kanban` command and the board tools to pi. The second installs the `pi-kanban` command, which runs the board.
+
+## Start the board
 
 ```sh
-npx pi-kanban
+pi-kanban
 ```
 
-Then use `/kanban open` in pi to open the board with its terminal token, and `/kanban session open | pin | sticky-pin | unpin | view-doc | link-doc` for session-scoped actions.
+The board listens on `127.0.0.1:3460` and prints its URL with the access token. Open that URL and click **+ New** to start pi in the board terminal. Start the board with `--no-terminal` to only watch sessions.
 
-### Companion pi extensions
+When pi runs in another terminal, run `/kanban open` in pi to open the board with its token. `/kanban session open | pin | sticky-pin | unpin | view-doc | link-doc` act on the current session.
 
-pi-kanban surfaces data produced by two other pi extensions. Install them alongside for the full experience:
+## The board
+
+- **Sidebar.** Sessions in groups and projects, with progress, pins, linked docs, and icons for a plan, a terminal, a dispatched session, or a question that waits for you.
+- **Terminal.** pi runs next to its board. The terminal keeps running when you close the browser tab.
+- **Board.** Pending, In Progress, and Completed columns for the selected session. Tabs next to it hold panes and show cards.
+- **New session.** Pick a folder or project, and set a name, a first prompt, the model, and the thinking level.
+- **Agents and session logs.** Subagents with model, status, and run time, and every prompt, reply, and tool call.
+- **Review.** Send review comments or card answers from the board. pi gets them as a user message.
+
+Press `?` on the board for the keyboard shortcuts.
+
+## pi tools
+
+| Tool | What it does |
+| --- | --- |
+| `show` | Post a markdown or HTML card. It shows over the board terminal, or as a tab when pi runs in another terminal. |
+| `ask` | Show an HTML question in a modal and wait for the answer. pi asks in its own prompt when the board is down. |
+| `dispatch_start`, `dispatch_wait`, `dispatch_list`, `dispatch_end` | Hand a task to a new pi session in the board terminal and get its report back |
+| `dispatch_report` | The worker's report, kept by the board until the parent reads it |
+| `pane_add`, `pane_rm`, `pane_list` | Add a URL or a local file as a tab next to the board |
+| `link_doc`, `unlink_doc`, `preview_doc` | Link a file or URL to the session, or open it in the preview |
+| `bind_plan` | Bind a markdown plan to the session |
+
+Each session also gets a scratchpad folder, given to pi in the system prompt and in `$PI_SCRATCHPAD_DIR`. The `pi-kanban` command talks to a running board too: run `pi-kanban help`.
+
+## Companion pi packages
+
+pi-kanban shows data that other pi packages write:
 
 ```sh
 pi install npm:pi-subagents
 pi install npm:@juicesharp/rpiv-todo
 ```
 
-- [`pi-subagents`](https://www.npmjs.com/package/pi-subagents) — spawns named subagent sessions; pi-kanban renders them under each parent session.
-- [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) — task tracking that pi-kanban displays as kanban columns.
-- [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) — pi-kanban surfaces these as interactive Q&A cards.
+- [`pi-subagents`](https://www.npmjs.com/package/pi-subagents) starts named subagent sessions. The board shows them under each parent session.
+- [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) tracks todos. The board shows them as columns.
+- [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) asks you questions. The board shows them as cards.
 
-## Demo
+## Security
 
+The board terminal runs commands as you, so the board is locked to your machine:
 
-![pi-kanban demo](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-demo.gif)
+- It listens on loopback (`127.0.0.1`) by default. `--host` changes this. Do not expose the board to a network you do not trust.
+- It refuses requests whose `Host` header is not local (`--allowed-hosts` adds names), and cross-site requests that change data.
+- Only the terminal and dispatch need the token. Anyone who can reach the board can read your pi session history, which is one more reason to keep it on loopback.
+- The terminal needs a random token. The board keeps it in the URL fragment (`#t=...`), which the browser never sends to a server. Do not share the board URL.
+
+## License
+
+MIT
