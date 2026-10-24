@@ -10088,8 +10088,6 @@ function getCtx(session) {
     compacts,
     usedTokens,
     modelName,
-    inputTokens: cw.total_input_tokens || 0,
-    outputTokens: cw.total_output_tokens || 0,
     markers,
   };
 }
@@ -10118,6 +10116,7 @@ function renderContextBar(session) {
 
 function formatCost(usd) {
   if (!usd) return '$0.00';
+  if (usd < 0.01) return '<$0.01';
   return `$${usd.toFixed(2)}`;
 }
 
@@ -10188,13 +10187,14 @@ function renderCacheTimer({ at, ttl, usage, model }) {
   return `<div class="stat-item" title="${escapeHtml(title)}"><span class="stat-label">Cache</span><span class="stat-value cache-timer" data-expires="${escapeHtml(expiresAt)}" data-expired-text="${escapeHtml(expiredText)}" style="color:${color}">${text}</span></div>`;
 }
 
-// The Cache row and the current-usage rows come from the transcript (session.cache); the rest needs the plugin's file.
+// The Cache row and the current-usage rows come from the last reply (session.cache), the totals,
+// cost and duration from the whole transcript (session.totals).
 function renderContextDetail(session, { tokens = true } = {}) {
   const ctx = getCtx(session);
   const reply = session.cache;
-  if (!ctx && !reply) return '';
+  const totals = session.totals;
+  if (!ctx && !reply && !totals) return '';
   const usage = reply?.usage;
-  const cost = session.contextStatus?.cost || {};
   const color = ctx && getContextColor(ctx.usedTokens, ctx.modelName);
   const title = ctx?.modelName || reply?.modelName || 'Context Window';
 
@@ -10207,9 +10207,9 @@ function renderContextDetail(session, { tokens = true } = {}) {
             <div class="stat-divider"></div>`
       : '';
   const totalRows =
-    tokens && ctx
-      ? `<div class="stat-item"><span class="stat-label">Total input</span><span class="stat-value">${formatTokens(ctx.inputTokens / 1000)}</span></div>
-            ${ctx.outputTokens ? `<div class="stat-item"><span class="stat-label">Total output</span><span class="stat-value">${formatTokens(ctx.outputTokens / 1000)}</span></div>` : ''}
+    tokens && totals
+      ? `<div class="stat-item"><span class="stat-label">Total input</span><span class="stat-value">${formatTokens(totals.input / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Total output</span><span class="stat-value">${formatTokens(totals.output / 1000)}</span></div>
             <div class="stat-divider"></div>`
       : '';
   const bar = ctx
@@ -10232,11 +10232,9 @@ function renderContextDetail(session, { tokens = true } = {}) {
           <div class="detail-context-stats">
             ${usageRows}
             ${totalRows}
-            ${ctx ? `<div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(cost.total_cost_usd)}">${formatCost(cost.total_cost_usd)}</span></div>` : ''}
+            ${totals ? `<div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(totals.costUsd)}">${formatCost(totals.costUsd)}</span></div>` : ''}
             ${reply ? renderCacheTimer(reply) : ''}
-            ${cost.total_duration_ms != null ? `<div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(cost.total_duration_ms)}</span></div>` : ''}
-            ${cost.total_api_duration_ms != null ? `<div class="stat-item"><span class="stat-label">API time</span><span class="stat-value">${formatDuration(cost.total_api_duration_ms)}</span></div>` : ''}
-            ${cost.total_lines_added != null ? `<div class="stat-item"><span class="stat-label">Lines</span><span class="stat-value"><span style="color:${CONTEXT_COLORS.green}">+${(cost.total_lines_added || 0).toLocaleString()}</span> / <span style="color:${CONTEXT_COLORS.red}">-${(cost.total_lines_removed || 0).toLocaleString()}</span></span></div>` : ''}
+            ${totals?.durationMs != null ? `<div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(totals.durationMs)}</span></div>` : ''}
           </div>
         </div>`;
 }

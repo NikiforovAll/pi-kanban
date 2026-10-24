@@ -1157,29 +1157,16 @@ async function runSessionViewCli(args) {
   const title = sessionTitle(s);
   const age = s.modifiedAt ? formatAge(Date.now() - new Date(s.modifiedAt).getTime()) : '-';
   const fmtTok = (n) => typeof n === 'number' ? (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)) : '-';
-  const fmtCost = (n) => typeof n === 'number' ? `$${n.toFixed(2)}` : '-';
+  const fmtCost = (n) => typeof n === 'number' ? (n > 0 && n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`) : '-';
   const lines = [];
   lines.push(`${s.id.slice(0, 8)} — ${title} [${status}]`);
   if (s.project) lines.push(`  ${path.basename(s.project)}${s.gitBranch ? ` · ${s.gitBranch}` : ''} · modified ${age} ago`);
   lines.push(`  Tasks: ${s.completed}/${s.taskCount}${s.inProgress ? ` (${s.inProgress} in progress)` : ''}${s.pending ? ` · ${s.pending} pending` : ''}`);
-  const ctx = s.contextStatus;
-  if (ctx) {
-    const cw = ctx.context_window || {};
-    const cost = ctx.cost || {};
-    const modelName = ctx.model?.display_name || ctx.model?.id || '-';
-    const modelExtras = [
-      ctx.effort?.level,
-      ctx.thinking?.enabled ? 'thinking' : null,
-      ctx.fast_mode ? 'fast' : null,
-    ].filter(Boolean).join(' · ');
-    lines.push(`  Model: ${modelName}${modelExtras ? ` (${modelExtras})` : ''}`);
-    if (cw.used_percentage != null) {
-      lines.push(`  Context: ${cw.used_percentage}% used · ${fmtTok(cw.total_input_tokens)} in${cw.total_output_tokens != null ? ` / ${fmtTok(cw.total_output_tokens)} out` : ''} · cache ${fmtTok(cw.current_usage?.cache_read_input_tokens)} read`);
-    }
-    const timing = cost.total_duration_ms != null
-      ? ` · ${cost.total_api_duration_ms != null ? formatAge(cost.total_api_duration_ms) : '-'} api / ${formatAge(cost.total_duration_ms)} total · +${cost.total_lines_added || 0}/-${cost.total_lines_removed || 0}`
-      : '';
-    lines.push(`  Cost: ${fmtCost(cost.total_cost_usd)}${timing}`);
+  if (s.cache?.modelName) lines.push(`  Model: ${s.cache.modelName}`);
+  const t = s.totals;
+  if (t) {
+    lines.push(`  Tokens: ${fmtTok(t.input)} in / ${fmtTok(t.output)} out · cache ${fmtTok(s.cache?.usage?.cache_read_input_tokens)} read`);
+    lines.push(`  Cost: ${fmtCost(t.costUsd)}${t.durationMs != null ? ` · ${formatAge(t.durationMs)} total` : ''}`);
   }
   if (s.jsonlPath) lines.push(`  Transcript: ${s.jsonlPath}`);
   console.log(lines.join('\n'));

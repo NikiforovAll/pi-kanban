@@ -508,6 +508,21 @@ describe('Parser: readSessionInfoFromJsonl', () => {
     assert.equal(readSessionInfoFromJsonl(PI.tools).scratchpadDir, null);
   }));
 
+  it('adds up cost and tokens over every reply and times the session from first to last entry', () => withTmp((dir) => {
+    const usage = (cost) => ({ input: 3, output: 10, cacheRead: 100, cacheWrite: 50, cost: { total: cost } });
+    const p = writeTmp(dir, piSession([
+      piUser('hi', { timestamp: '2026-01-01T00:00:05.000Z' }),
+      piReply(piText('a'), { id: 'a1', model: 'gpt-6-luna', usage: usage(0.25), timestamp: '2026-01-01T00:00:10.000Z' }),
+      piReply(piText('b'), { id: 'b1', parentId: 'e1', model: 'gpt-6-sol', usage: usage(0.5), timestamp: '2026-01-01T00:01:00.000Z' }),
+      { type: 'session_info', name: 'x', timestamp: '2026-01-01T00:01:30.000Z' },
+    ]));
+    assert.deepEqual(readSessionInfoFromJsonl(p).totals, { costUsd: 0.75, input: 6, output: 20, durationMs: 90_000 });
+  }));
+
+  it('has no totals before the first reply', () => withTmp((dir) => {
+    assert.equal(readSessionInfoFromJsonl(writeTmp(dir, piSession([piUser('hi')]))).totals, null);
+  }));
+
   it('returns null fields for a missing file and for a file without a pi header', () => {
     for (const p of ['/nonexistent/path.jsonl', CLAUDE_TRANSCRIPT]) {
       const info = readSessionInfoFromJsonl(p);

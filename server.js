@@ -330,6 +330,7 @@ function getContextFields(sessionId, meta) {
   return {
     contextStatus: contextStatusCache.get(sessionId) || null,
     cache: reply ? { ttl: meta.cacheTtl || null, ...reply, modelName: modelDisplayName(reply.model) } : null,
+    totals: meta?.totals || null,
   };
 }
 
@@ -683,6 +684,7 @@ function sessionMetadataOf(jsonlPath) {
       customTitle: info.customTitle,
       jsonlPath,
       lastReply: info.lastReply,
+      totals: info.totals,
       scratchpadDir: info.scratchpadDir,
       firstPrompt: info.firstPrompt,
       title: info.title,
