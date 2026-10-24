@@ -21,9 +21,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: website/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            website/package-lock.json
       - name: Build demo
-        run: node scripts/build-demo.js
+        run: |
+          npm ci --omit=optional --ignore-scripts
+          node scripts/build-demo.js
       - name: Build site
         run: |
           npm --prefix website ci --omit=dev
