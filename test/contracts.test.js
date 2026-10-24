@@ -493,10 +493,17 @@ describe('Parser: readSessionInfoFromJsonl', () => {
     assert.equal(readSessionInfoFromJsonl(p).firstPrompt, 'real prompt');
   }));
 
+  it('titles the session by the first line of the first prompt, cut short', () => withTmp((dir) => {
+    const short = writeTmp(dir, piSession([piUser('  Fix the build\r\nthen run tests')]));
+    assert.equal(readSessionInfoFromJsonl(short).title, 'Fix the build');
+    const long = writeTmp(dir, piSession([piUser('x'.repeat(80))]));
+    assert.equal(readSessionInfoFromJsonl(long).title, `${'x'.repeat(59)}…`);
+  }));
+
   it('returns null fields for a missing file and for a file without a pi header', () => {
     for (const p of ['/nonexistent/path.jsonl', CLAUDE_TRANSCRIPT]) {
       const info = readSessionInfoFromJsonl(p);
-      for (const k of ['projectPath', 'customTitle', 'sessionId', 'firstPrompt', 'lastReply', ...CLAUDE_ONLY]) assert.equal(info[k], null, `${p} ${k}`);
+      for (const k of ['projectPath', 'customTitle', 'sessionId', 'firstPrompt', 'title', 'lastReply', ...CLAUDE_ONLY]) assert.equal(info[k], null, `${p} ${k}`);
     }
   });
 

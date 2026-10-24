@@ -41,7 +41,6 @@ const { buildDecision, decisionFileName, isDecisionFile, approvalsFrom, boardRef
 const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace, isDefaultPiAgentDir } = require('./lib/board-dir');
 const { readTerminalConfig } = require('./lib/terminal');
 const { createTerminalClient } = require('./lib/terminal-client');
-const { AGENT_ID_RE } = require('./cli');
 const { createShowStore, mountShowRoutes, showBodyParser, SHOW_PATH } = require('./lib/show');
 const { createAskStore, mountAskRoutes, askBodyParser, ASK_PATH } = require('./lib/ask');
 const { readLiveSessions, isPidAlive, noteReplacedSessions } = require('./lib/live-sessions');
@@ -84,19 +83,11 @@ app.use(net.hostGuard);
 app.use(net.frameGuard);
 app.use(net.originGuard);
 
-function getArgUrl(argName, envName) {
-  return getArgValue(argName) || process.env[envName] || null;
-}
-
-const MARKETPLACE_URL = getArgUrl('marketplace-url', 'MARKETPLACE_URL');
-const COST_URL = getArgUrl('cost-url', 'COST_URL');
-const MEMORY_URL = getArgUrl('memory-url', 'MEMORY_URL');
 const PI_AGENT_DIR = resolvePiAgentDir();
 const PK_DIR = boardDir(PI_AGENT_DIR);
 const TASKS_DIR = path.join(PK_DIR, 'tasks');
 const SESSION_ROOTS = sessionRoots({ agentDir: PI_AGENT_DIR });
 const SESSION_OPTS = { roots: SESSION_ROOTS };
-const TEAMS_DIR = path.join(PK_DIR, 'teams');
 const PLANS_DIR = path.join(PK_DIR, 'plans');
 const SESSIONS_DIR = path.join(PK_DIR, 'live');
 const AGENT_ACTIVITY_DIR = path.join(PK_DIR, 'agent-activity');
@@ -342,17 +333,11 @@ function isGhostAgent(agent) {
   return (Date.now() - new Date(agent.startedAt).getTime()) >= AGENT_STALE_MS;
 }
 
-function getContextStatus(sessionId, meta) {
-  return contextStatusCache.get(sessionId) || (meta?.teamLeaderId ? contextStatusCache.get(meta.teamLeaderId) : null) || null;
-}
-
 function getContextFields(sessionId, meta) {
-  // A team dir has no transcript of its own; its lead's transcript has the requests.
-  const m = meta?.teamLeaderId ? sessionMetadataCache[meta.teamLeaderId] : meta;
-  const reply = m?.lastReply;
+  const reply = meta?.lastReply;
   return {
-    contextStatus: getContextStatus(sessionId, meta),
-    cache: reply ? { ttl: m.cacheTtl || null, ...reply, modelName: modelDisplayName(reply.model) } : null,
+    contextStatus: contextStatusCache.get(sessionId) || null,
+    cache: reply ? { ttl: meta.cacheTtl || null, ...reply, modelName: modelDisplayName(reply.model) } : null,
   };
 }
 
@@ -409,14 +394,14 @@ function resumedSince(markerPath, logMtime) {
   catch { return true; }
 }
 
-function checkAgentStatus(agentDir, stale, logMtime, isTeam) {
+function checkAgentStatus(agentDir, stale, logMtime) {
   const result = { hasActive: false, hasRunning: false, waitingForUser: null, unread: false };
   let names;
   try { names = readdirSync(agentDir); } catch { return result; }
   if (names.includes('_waiting.json')) result.waitingForUser = checkWaitingForUser(agentDir, logMtime);
   if (result.waitingForUser) result.hasActive = true;
   const stopped = names.includes('_stop.json') && !resumedSince(path.join(agentDir, '_stop.json'), logMtime);
-  if (stale && !isTeam) {
+  if (stale) {
     result.unread = stopped;
     return result;
   }
@@ -424,9 +409,8 @@ function checkAgentStatus(agentDir, stale, logMtime, isTeam) {
     for (const file of names.filter(f => f.endsWith('.jsonl') && !f.startsWith('_'))) {
       try {
         const agent = readAgentJsonl(path.join(agentDir, file));
-        // Idle agents never mark a session active (an idle teammate lingers and
-        // would pin the filter). Teams skip freshness so long-running teammates stay visible.
-        if (agent.status === 'active' && (isTeam || isAgentFresh(agent))) {
+        // Idle agents never mark a session active.
+        if (agent.status === 'active' && isAgentFresh(agent)) {
           result.hasActive = true;
           result.hasRunning = true;
         }
@@ -440,80 +424,11 @@ function checkAgentStatus(agentDir, stale, logMtime, isTeam) {
 
 // #endregion
 
-// #region TEAMS
-// isContained canonicalises both sides with realpath, which costs ~100x a plain
-// path.join. This is called once per session on the /api/sessions hot path, and
-// the verdict for a given name cannot change while TEAMS_DIR is fixed — so the
-// resolved path (or the null rejection) is memoized.
-const teamPathCache = new Map();
-const TEAM_PATH_CACHE_MAX = 1000;
-
-function teamConfigPath(teamName) {
-  if (typeof teamName !== 'string' || !teamName) return null;
-  if (teamPathCache.has(teamName)) return teamPathCache.get(teamName);
-  const candidate = path.join(TEAMS_DIR, teamName, 'config.json');
-  // TEAMS_DIR follows the pi agent dir, so containment is checked against
-  // the module-level constant rather than a hardcoded path.
-  const configPath = isContained(candidate, TEAMS_DIR) ? candidate : null;
-  if (teamPathCache.size >= TEAM_PATH_CACHE_MAX) teamPathCache.clear();
-  teamPathCache.set(teamName, configPath);
-  return configPath;
-}
-
-function isTeamSession(sessionId) {
-  const configPath = teamConfigPath(sessionId);
-  return !!configPath && existsSync(configPath);
-}
-
-const teamConfigCache = new Map();
-const TEAM_CACHE_TTL = 5000;
-
-function loadTeamConfig(teamName) {
-  const cached = teamConfigCache.get(teamName);
-  if (cached && Date.now() - cached.ts < TEAM_CACHE_TTL) return cached.data;
-  try {
-    const configPath = teamConfigPath(teamName);
-    if (!configPath || !existsSync(configPath)) return null;
-    const data = JSON.parse(readFileSync(configPath, 'utf8'));
-    teamConfigCache.set(teamName, { data, ts: Date.now() });
-    return data;
-  } catch {
-    return null;
-  }
-}
-
-function resolveSessionId(sessionId) {
-  const teamConfig = loadTeamConfig(sessionId);
-  return (teamConfig?.leadSessionId) ? teamConfig.leadSessionId : sessionId;
-}
-
+// #region LIVE_SESSIONS
 function sessionMetaFor(sessionId) {
-  const metadata = loadSessionMetadata();
-  return metadata[sessionId] || metadata[resolveSessionId(sessionId)];
+  return loadSessionMetadata()[sessionId];
 }
 
-// Recent Claude Code releases auto-create a single-member "self-team" for every
-// session: a teams/session-<id>/config.json whose only member is the "team-lead"
-// (the session itself). These are not real multi-agent teams — surfacing them
-// makes every solo session render a team badge, member panel, and (via the empty
-// team-named task dir) a shared-task-list link. Treat them as plain sessions.
-// As soon as a real teammate joins (members.length > 1) it becomes a true team again.
-function isAutoSelfTeam(cfg) {
-  if (!cfg || !Array.isArray(cfg.members)) return false;
-  const namedSession = typeof cfg.name === 'string' && cfg.name.startsWith('session-');
-  const soleLead = cfg.members.length === 0
-    || (cfg.members.length === 1 && cfg.members[0]?.agentType === 'team-lead');
-  return namedSession && soleLead;
-}
-
-// Claude Code 2.1.x stores a session's tasks in its self-team list (tasks/session-<id>/).
-// Usually `cfg.leadSessionId` is that session and already has a card. But a resumed /
-// continued session keeps writing to the original team's list while running under a new
-// session id, so `leadSessionId` points at the original (often a ghost with no card) and
-// the tasks can't be matched to the live session by id. The on-disk bridge is the
-// live-session registry (~/.claude/sessions/<pid>.json): the team's `createdAt` ≈ the
-// owning session's `startedAt` (both written at boot) and they share a cwd. Match on that.
-const SELF_TEAM_BOOT_WINDOW_MS = 60 * 1000;
 let liveSessionsCache = null;
 let lastLiveSessionsScan = 0;
 const LIVE_SESSIONS_TTL = 5000;
@@ -557,49 +472,6 @@ function hasVisibleLogActivity(sessionId, logAge) {
   return logAge <= SESSION_GRACE_MS || hasRecentLogActivity(sessionId, logAge);
 }
 
-// Given a self-team config, return the live interactive session id that owns it
-// (same cwd, startedAt within the boot window of the team's createdAt), or null.
-function resolveSelfTeamOwner(cfg) {
-  if (!cfg?.createdAt) return null;
-  const teamCwd = cfg.members?.[0]?.cwd;
-  if (!teamCwd) return null;
-  let best = null, bestDelta = Infinity;
-  for (const s of loadLiveSessions()) {
-    if (s.cwd !== teamCwd) continue;
-    const delta = Math.abs(s.startedAt - cfg.createdAt);
-    if (delta <= SELF_TEAM_BOOT_WINDOW_MS && delta < bestDelta) {
-      best = s.sessionId;
-      bestDelta = delta;
-    }
-  }
-  return best;
-}
-
-// Attach a team-named task dir's counts to a session card, preferring the most recently written
-// dir (see taskDirBeats — "latest wins"). A resumed session owns several team dirs: a stale
-// prior-boot dir plus the current run's dir; the older "most tasks wins" rule attached the stale
-// dir when it had more tasks than the live one. The incumbent's mtime comes from the path-cached
-// counts (every card.tasksDir was already passed through getTaskCounts by the caller, so this is a
-// cache hit, not disk I/O). Caller passes the already-computed candidate counts.
-function attachTeamTasks(card, teamTaskDir, teamName, counts) {
-  let curMtime = -1, curCount = -1;
-  if (card.tasksDir) {
-    const cur = getTaskCounts(card.tasksDir);
-    curMtime = taskDirMtime(cur);
-    curCount = cur.taskCount;
-  }
-  if (taskDirBeats(taskDirMtime(counts), counts.taskCount, curMtime, curCount)) {
-    Object.assign(card, {
-      taskCount: counts.taskCount,
-      completed: counts.completed,
-      inProgress: counts.inProgress,
-      pending: counts.pending,
-      tasksDir: teamTaskDir,
-      sharedTaskList: teamName,
-    });
-  }
-}
-
 // #endregion
 
 // #region SHARED_STATE
@@ -632,12 +504,6 @@ app.param('taskId', (_req, res, next, val) => {
   if (!isSafeId(val)) return res.status(400).json({ error: 'Invalid task ID' });
   next();
 });
-// Team names are directory names under TEAMS_DIR, so /api/teams/:name was a
-// straight traversal before this.
-app.param('name', (_req, res, next, val) => {
-  if (!isSafeId(val)) return res.status(400).json({ error: 'Invalid team name' });
-  next();
-});
 
 app.use(SHOW_PATH, showBodyParser());
 app.use(ASK_PATH, askBodyParser());
@@ -646,9 +512,6 @@ app.use(express.json({ limit: '1mb' }));
 // #endregion
 
 // #region STATIC
-
-// Under a hub, the hub hands over its SDK. Alone, public/vendor/claude-hub-sdk.js is a stub.
-if (process.env.HUB_SDK_SERVER) require(process.env.HUB_SDK_SERVER).mount(app);
 
 // app.js reads localStorage synchronously at startup, before any fetch could deliver the
 // namespace, so it is injected into the page instead of served from /hub-config.
@@ -727,37 +590,6 @@ function getCustomTaskDir(sessionId) {
     const dir = path.join(TASKS_DIR, taskListName);
     if (existsSync(dir)) return dir;
   }
-  // Check team-named task directory (teams store tasks under ~/.claude/tasks/<teamName>/).
-  // Match either the recorded leadSessionId, or — for 2.1.x self-teams whose lead is a
-  // team-lead agent id — the live interactive session that owns the team (see resolveSelfTeamOwner).
-  // A live session can own several team dirs at once: a stale dir from a prior boot of the same
-  // session id, plus the current run's dir (a resume creates a fresh self-team). Pick the most
-  // recently written dir ("latest wins") — the old "most tasks wins" rule picked the stale dir
-  // whenever a completed prior run had accumulated more tasks than the live one. taskCount breaks
-  // ties; empty dirs (no task mtime) lose, so a real dir still beats an empty self-team.
-  if (existsSync(TEAMS_DIR)) {
-    try {
-      let bestDir = null, bestMtime = -1, bestCount = -1;
-      for (const dir of readdirSync(TEAMS_DIR, { withFileTypes: true })) {
-        if (!dir.isDirectory()) continue;
-        const cfg = loadTeamConfig(dir.name);
-        if (!cfg) continue;
-        const owns = cfg.leadSessionId === sessionId
-          || (isAutoSelfTeam(cfg) && resolveSelfTeamOwner(cfg) === sessionId);
-        if (!owns) continue;
-        const teamTaskDir = path.join(TASKS_DIR, dir.name);
-        if (!existsSync(teamTaskDir)) continue;
-        const counts = getTaskCounts(teamTaskDir);
-        const mtime = taskDirMtime(counts);
-        if (taskDirBeats(mtime, counts.taskCount, bestMtime, bestCount)) {
-          bestMtime = mtime;
-          bestCount = counts.taskCount;
-          bestDir = teamTaskDir;
-        }
-      }
-      if (bestDir) return bestDir;
-    } catch (_) {}
-  }
   return null;
 }
 
@@ -773,9 +605,8 @@ function getTaskCounts(sessionPath) {
   if (cached) return cached;
 
   const { completed, inProgress, pending, newestTaskMtime } = countTaskDir(sessionPath);
-  // Directory mtime bumps when task files are added/removed, so it stays fresh even for an
-  // emptied dir (task list closed) that has no files left to date. Task-file mtime alone would
-  // report 0 for such a dir and lose "latest wins" to a stale prior-boot dir.
+  // Directory mtime bumps when task files are added/removed, so it dates an emptied dir
+  // (task list closed) that has no files left to date.
   let dirMtime = 0;
   try { dirMtime = statSync(sessionPath).mtimeMs; } catch (_) {}
 
@@ -783,22 +614,6 @@ function getTaskCounts(sessionPath) {
   const result = { taskCount, completed, inProgress, pending, newestTaskMtime, dirMtime };
   taskCountsCache.set(sessionPath, result);
   return result;
-}
-
-// Last-write recency of a getTaskCounts() result, in ms: the newer of the directory mtime (bumps
-// on add/remove, so it survives an emptied dir) and the newest task-file mtime (bumps on in-place
-// status edits, which don't touch the dir). An emptied current dir thus still ranks by when it was
-// cleared, letting it win "latest wins" over a stale prior-boot dir instead of reporting 0.
-function taskDirMtime(counts) {
-  const fileMtime = counts.newestTaskMtime ? counts.newestTaskMtime.getTime() : 0;
-  return Math.max(counts.dirMtime || 0, fileMtime);
-}
-
-// "Latest wins" ranking for two owned task dirs of the same session: more recently written wins,
-// taskCount breaks ties. Callers seed the incumbent with mtime/count -1 so the first candidate
-// always wins.
-function taskDirBeats(candMtime, candCount, curMtime, curCount) {
-  return candMtime > curMtime || (candMtime === curMtime && candCount > curCount);
 }
 
 // A promise from loadFn is cached as is, so concurrent callers share one read, and a newer
@@ -877,6 +692,7 @@ function sessionMetadataOf(jsonlPath) {
       lastReply: info.lastReply,
       scratchpadDir: info.scratchpadDir,
       firstPrompt: info.firstPrompt,
+      title: info.title,
       parentSessionPath: info.parentSessionPath,
       created: info.createdAt,
     },
@@ -913,33 +729,6 @@ function loadSessionMetadata() {
     console.error('Error loading session metadata:', e);
   }
 
-  // For team sessions with no JSONL match, resolve from team config + parent session
-  if (existsSync(TASKS_DIR)) {
-    const taskDirs = readdirSync(TASKS_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory());
-    for (const dir of taskDirs) {
-      if (!metadata[dir.name]) {
-        const teamConfig = loadTeamConfig(dir.name);
-        if (teamConfig) {
-          const parentMeta = teamConfig.leadSessionId ? metadata[teamConfig.leadSessionId] : null;
-          const leadMember = teamConfig.members?.find(m => m.agentId === teamConfig.leadAgentId) || teamConfig.members?.[0];
-          const project = parentMeta?.project || leadMember?.cwd || teamConfig.working_dir || null;
-
-          metadata[dir.name] = {
-            slug: teamConfig.description || dir.name,
-            project,
-            jsonlPath: parentMeta?.jsonlPath || null,
-            description: teamConfig.description || parentMeta?.description || null,
-            gitBranch: parentMeta?.gitBranch || null,
-            created: parentMeta?.created || null,
-            isTeamLeader: false,
-            teamLeaderId: teamConfig.leadSessionId || null
-          };
-        }
-      }
-    }
-  }
-
   sessionMetadataCache = metadata;
   lastMetadataRefresh = now;
   metadataNeedsFullScan = false;
@@ -960,10 +749,8 @@ function getPlanInfo(slug) {
   }
 }
 
-function getSessionDisplayName(_sessionId, meta) {
-  if (meta?.customTitle) return meta.customTitle;
-  if (meta?.slug) return meta.slug;
-  return null;
+function getSessionDisplayName(meta) {
+  return meta?.customTitle || meta?.title || null;
 }
 
 const getScratchpadDir = createScratchpadDirResolver({
@@ -980,7 +767,7 @@ function buildSessionObject(id, meta, overrides = {}) {
   const worktree = worktrees.resolve(meta.project);
   return {
     id,
-    name: getSessionDisplayName(id, meta),
+    name: getSessionDisplayName(meta),
     peerName: getPeerName(id),
     slug: meta.slug || null,
     project: meta.project || null,
@@ -996,8 +783,6 @@ function buildSessionObject(id, meta, overrides = {}) {
     pending: 0,
     createdAt: meta.created || null,
     modifiedAt: overrides.modifiedAt || new Date(0).toISOString(),
-    isTeam: false,
-    memberCount: 0,
     hasMessages: logStat.hasMessages,
     hasActiveAgents: false,
     hasRunningAgents: false,
@@ -1050,8 +835,7 @@ app.get('/api/sessions', async (req, res) => {
       for (const entry of entries) {
         if (entry.isDirectory() && isUUID(entry.name)) {
           const sessionPath = path.join(TASKS_DIR, entry.name);
-          const stat = statSync(sessionPath);
-          const { taskCount, completed, inProgress, pending, newestTaskMtime } = getTaskCounts(sessionPath);
+          const { taskCount, completed, inProgress, pending, newestTaskMtime, dirMtime } = getTaskCounts(sessionPath);
 
           // Get metadata for this session
           const meta = metadata[entry.name] || {};
@@ -1061,10 +845,7 @@ app.get('/api/sessions', async (req, res) => {
           const logAge = logMtime ? Date.now() - logMtime : Infinity;
           const stale = logAge > AGENT_STALE_MS;
 
-          const isTeam = isTeamSession(entry.name);
-          const teamConfig = isTeam ? loadTeamConfig(entry.name) : null;
-          const resolvedAgentDir = path.join(AGENT_ACTIVITY_DIR, teamConfig?.leadSessionId || entry.name);
-          const agentStatus = checkAgentStatus(resolvedAgentDir, stale, logMtime, isTeam);
+          const agentStatus = checkAgentStatus(path.join(AGENT_ACTIVITY_DIR, entry.name), stale, logMtime);
 
           // Cheap-probe: when filter=active, skip expensive enrichment for inactive non-pinned sessions.
           // Mirrors the post-filter predicate using only signals already computed above.
@@ -1079,13 +860,12 @@ app.get('/api/sessions', async (req, res) => {
           }
 
           // Use newest of: task file mtime, JSONL mtime, directory mtime
-          let modifiedAt = newestTaskMtime ? newestTaskMtime.toISOString() : stat.mtime.toISOString();
+          let modifiedAt = (newestTaskMtime || new Date(dirMtime)).toISOString();
           if (logMtime) {
             const jsonlMtime = new Date(logMtime).toISOString();
             if (jsonlMtime > modifiedAt) modifiedAt = jsonlMtime;
           }
 
-          const memberCount = teamConfig?.members?.length || 0;
           const planInfo = getPlanInfo(meta.slug);
 
           sessionsMap.set(entry.name, buildSessionObject(entry.name, meta, {
@@ -1095,8 +875,6 @@ app.get('/api/sessions', async (req, res) => {
             inProgress,
             pending,
             modifiedAt,
-            isTeam,
-            memberCount,
             hasActiveAgents: agentStatus.hasActive,
             hasRunningAgents: agentStatus.hasRunning,
             hasWaitingForUser: !!agentStatus.waitingForUser,
@@ -1133,7 +911,7 @@ app.get('/api/sessions', async (req, res) => {
             const logAge = logMtime ? Date.now() - logMtime : Infinity;
             const stale = logAge > AGENT_STALE_MS;
             const agentDir = path.join(AGENT_ACTIVITY_DIR, sessionId);
-            const agentStatus = checkAgentStatus(agentDir, stale, logMtime, false);
+            const agentStatus = checkAgentStatus(agentDir, stale, logMtime);
             let modifiedAt = info.updatedAt || new Date(0).toISOString();
             if (logMtime) {
               const jsonlMtime = new Date(logMtime).toISOString();
@@ -1165,9 +943,8 @@ app.get('/api/sessions', async (req, res) => {
         const logMtime = logStat.mtime;
         const logAge = logMtime ? Date.now() - logMtime : Infinity;
         const stale = logAge > AGENT_STALE_MS;
-        const metaIsTeam = isTeamSession(sessionId);
         const metaAgentDir = path.join(AGENT_ACTIVITY_DIR, sessionId);
-        const metaAgentStatus = checkAgentStatus(metaAgentDir, stale, logMtime, metaIsTeam);
+        const metaAgentStatus = checkAgentStatus(metaAgentDir, stale, logMtime);
 
         // Cheap-probe: no tasks here (metadata-only), so active = recent log OR live agent.
         if (activeFilter && !pinnedIds.has(sessionId) && !terminalIds.has(sessionId)) {
@@ -1212,88 +989,6 @@ app.get('/api/sessions', async (req, res) => {
         }
       } catch { /* ignore */ }
     }
-
-    // Enrich leader sessions with team info and remove team-named duplicates
-    const teamLeaderIds = new Set();
-    if (existsSync(TEAMS_DIR)) {
-      try {
-        for (const dir of readdirSync(TEAMS_DIR, { withFileTypes: true })) {
-          if (!dir.isDirectory()) continue;
-          const cfg = loadTeamConfig(dir.name);
-          if (!cfg?.leadSessionId) continue;
-          const leaderId = cfg.leadSessionId;
-          // Remove the team-named duplicate before bailing on self-teams. Otherwise an
-          // auto-created session-<uuid> self-team dir leaves a duplicate session card whose
-          // id (session-<uuid>) resolves no messages, so switching to it shows a stale log.
-          if (sessionsMap.has(dir.name) && dir.name !== leaderId) sessionsMap.delete(dir.name);
-          if (isAutoSelfTeam(cfg)) {
-            // Self-teams are normally noise with an empty team-named task dir. But 2.1.x stores a
-            // session's tasks in the self-team list (tasks/session-<id>/), so when it's non-empty
-            // the tasks would be silently orphaned. Recover them: attach to the owning card — the
-            // recorded leadSessionId when it has one, else the live session continuing it (resolved
-            // from the session registry), else a freshly-built fallback lead card.
-            const teamTaskDir = path.join(TASKS_DIR, dir.name);
-            if (!existsSync(teamTaskDir)) continue;
-            const counts = getTaskCounts(teamTaskDir);
-
-            const ownerCard = sessionsMap.get(leaderId) || sessionsMap.get(resolveSelfTeamOwner(cfg));
-            if (ownerCard) {
-              // Attach even when empty: a resumed session's freshly-emptied current dir (task list
-              // closed) must be allowed to win "latest wins" and suppress its stale prior-boot dir,
-              // otherwise the card resurfaces the previous tasks. attachTeamTasks ranks by recency.
-              attachTeamTasks(ownerCard, teamTaskDir, dir.name, counts);
-            } else {
-              // No owner card to attach to — don't fabricate one for an empty stale self-team
-              // (that is the original noise case the skip suppressed).
-              if (counts.taskCount === 0) continue;
-              const meta = metadata[leaderId] || {};
-              const logStat = getSessionLogStat(meta);
-              const logMtime = logStat.mtime;
-              const logAge = logMtime ? Date.now() - logMtime : Infinity;
-              const agentDir = path.join(AGENT_ACTIVITY_DIR, leaderId);
-              const agentStatus = checkAgentStatus(agentDir, logAge > AGENT_STALE_MS, logMtime, false);
-              const taskMtime = taskDirMtime(counts);
-              const card = buildSessionObject(leaderId, meta, {
-                _logStat: logStat,
-                name: getSessionDisplayName(leaderId, meta) || cfg.name || dir.name,
-                modifiedAt: new Date(Math.max(taskMtime, logMtime || 0)).toISOString(),
-                hasActiveAgents: agentStatus.hasActive,
-                hasRunningAgents: agentStatus.hasRunning,
-                hasWaitingForUser: !!agentStatus.waitingForUser,
-                unread: agentStatus.unread,
-              });
-              attachTeamTasks(card, teamTaskDir, dir.name, counts);
-              sessionsMap.set(leaderId, card);
-            }
-            continue;
-          }
-          const existing = sessionsMap.get(leaderId);
-          if (existing) {
-            existing.isTeam = true;
-            existing.teamName = dir.name;
-            existing.memberCount = cfg.members?.length || 0;
-            existing.name = existing.name || cfg.name || dir.name;
-            teamLeaderIds.add(leaderId);
-            // Attach team-named task directory if present.
-            // Prefer team task dir over an empty session-UUID task dir — when a team session has
-            // both a UUID-named dir (often empty: just .lock/.highwatermark) and a team-named dir
-            // holding the real tasks, the leader card otherwise shows 0/0.
-            const teamTaskDir = path.join(TASKS_DIR, dir.name);
-            if (existsSync(teamTaskDir)) {
-              attachTeamTasks(existing, teamTaskDir, dir.name, getTaskCounts(teamTaskDir));
-            }
-            // Re-check agent status with isTeam=true
-            const agentDir = path.join(AGENT_ACTIVITY_DIR, leaderId);
-            const logStat = getSessionLogStat(metadata[leaderId] || {});
-            const logAge = logStat.mtime ? Date.now() - logStat.mtime : Infinity;
-            const agentStatus = checkAgentStatus(agentDir, logAge > AGENT_STALE_MS, logStat.mtime, true);
-            existing.hasActiveAgents = agentStatus.hasActive;
-            existing.hasRunningAgents = agentStatus.hasRunning;
-          }
-        }
-      } catch (_) {}
-    }
-
 
     // Correlate plan sessions with their implementation sessions (same slug)
     const slugGroups = new Map();
@@ -1419,7 +1114,7 @@ app.get('/api/sessions/search', (req, res) => {
   const searchIds = idQ.length >= SESSION_SEARCH_MIN && /^[0-9a-f]+$/.test(idQ);
   const hits = [];
   for (const [id, meta] of Object.entries(loadSessionMetadata())) {
-    const name = getSessionDisplayName(id, meta);
+    const name = getSessionDisplayName(meta);
     if ((searchIds && id.replace(/-/g, '').includes(idQ)) || name?.toLowerCase().includes(text) || meta.firstPrompt?.toLowerCase().includes(text)) {
       hits.push({ id, mtime: getSessionLogStat(meta).mtime || 0 });
     }
@@ -1433,7 +1128,7 @@ app.get('/api/sessions/known', (_req, res) => {
   try {
     const known = new Map();
     for (const [id, meta] of Object.entries(loadSessionMetadata())) {
-      known.set(id, { id, project: meta.project || null, name: getSessionDisplayName(id, meta) });
+      known.set(id, { id, project: meta.project || null, name: getSessionDisplayName(meta) });
     }
     const add = (id, project = null) => {
       if (!known.has(id)) known.set(id, { id, project, name: null });
@@ -1712,9 +1407,8 @@ app.get('/api/sessions/:sessionId/pads', async (req, res) => {
 // in docs/session-scanning.md.
 app.get('/api/sessions/:sessionId/scratchpad-files', async (req, res) => {
   try {
-    const metadata = loadSessionMetadata();
-    const id = metadata[req.params.sessionId] ? req.params.sessionId : resolveSessionId(req.params.sessionId);
-    const meta = metadata[id];
+    const id = req.params.sessionId;
+    const meta = sessionMetaFor(id);
     const root = meta ? getScratchpadDir(id, meta) : null;
     if (!root) return res.json({ files: [] });
 
@@ -1839,14 +1533,6 @@ app.post('/api/scratchpad/open', (req, res) => {
 // #endregion
 
 // #region AGENT_ROUTES
-// API: Get team config
-app.get('/api/teams/:name', (req, res) => {
-  const config = loadTeamConfig(req.params.name);
-  if (!config) return res.status(404).json({ error: 'Team not found' });
-  config.configPath = path.join(TEAMS_DIR, req.params.name, 'config.json');
-  res.json(config);
-});
-
 // API: Get agents for a session
 // The resultUnavailable latch is persisted on the agent record. Bump this when
 // extractAgentResultFromTranscript finds more, so agents latched earlier rescan once.
@@ -1855,27 +1541,13 @@ const RESULT_SCAN = 3;
 const MODEL_SCAN = 2;
 
 app.get('/api/sessions/:sessionId/agents', async (req, res) => {
-  const sessionId = resolveSessionId(req.params.sessionId);
+  const sessionId = req.params.sessionId;
   const agentDir = path.join(AGENT_ACTIVITY_DIR, sessionId);
   if (!existsSync(agentDir)) return res.json({ agents: [], waitingForUser: null });
   try {
-    const metadata = loadSessionMetadata();
-    const meta = metadata[sessionId] || {};
+    const meta = sessionMetaFor(sessionId) || {};
     const logMtime = getSessionLogStat(meta).mtime;
     const sessionStale = logMtime ? (Date.now() - logMtime) > AGENT_STALE_MS : true;
-
-    let teamConfig = loadTeamConfig(req.params.sessionId);
-    if (!teamConfig && existsSync(TEAMS_DIR)) {
-      try {
-        for (const td of readdirSync(TEAMS_DIR, { withFileTypes: true })) {
-          if (!td.isDirectory()) continue;
-          const cfg = loadTeamConfig(td.name);
-          if (cfg && cfg.leadSessionId === sessionId) { teamConfig = cfg; break; }
-        }
-      } catch (_) {}
-    }
-    const isTeam = !!teamConfig;
-    const teamMemberNames = isTeam ? new Set(teamConfig.members.map(m => m.name)) : null;
 
     const files = listAgentFiles(agentDir);
     const agents = [];
@@ -1885,15 +1557,9 @@ app.get('/api/sessions/:sessionId/agents', async (req, res) => {
         if (isGhostAgent(agent)) continue;
         const agentTs = agent.updatedAt || agent.startedAt;
         const agentStale = !sessionStale && agentTs && (Date.now() - new Date(agentTs).getTime()) > AGENT_STALE_MS;
-        if (!isAgentFresh(agent) || sessionStale || agentStale) {
-          if (isAgentLive(agent)) {
-            const agentName = agentDisplayName(agent);
-            const isTeamMember = isTeam && agentName && teamMemberNames.has(agentName);
-            if (!isTeamMember) {
-              agent.status = 'stopped';
-              if (!agent.stoppedAt) agent.stoppedAt = agent.updatedAt || agent.startedAt;
-            }
-          }
+        if ((!isAgentFresh(agent) || sessionStale || agentStale) && isAgentLive(agent)) {
+          agent.status = 'stopped';
+          if (!agent.stoppedAt) agent.stoppedAt = agent.updatedAt || agent.startedAt;
         }
         agents.push(agent);
       } catch { /* skip invalid */ }
@@ -2035,52 +1701,14 @@ app.get('/api/sessions/:sessionId/agents', async (req, res) => {
     }
 
     for (const agent of dirty) persistAgent(agentDir, agent);
-    const teamColors = {};
-    if (teamConfig?.members) {
-      for (const m of teamConfig.members) {
-        if (m.name && m.color) teamColors[m.name] = m.color;
-      }
-      if (Object.keys(teamColors).length) {
-        for (const agent of agents) {
-          const name = agentDisplayName(agent);
-          if (name && teamColors[name]) agent.color = teamColors[name];
-        }
-      }
-    }
-
-    // Collapse teammate re-spawns: when a teammate goes idle and is later re-engaged,
-    // a fresh agentId is spawned. Hide older idle/stopped entries when a newer same-name
-    // teammate exists; never hide an `active` agent (parallel teammate work would vanish).
-    // Subagents (Explore, general-purpose, etc.) are not in teamMemberNames and bypass
-    // dedup entirely, so parallel siblings of the same subagent type remain visible.
-    let visibleAgents = agents;
-    if (teamMemberNames?.size) {
-      const groups = new Map();
-      for (const a of agents) {
-        const t = agentDisplayName(a);
-        if (!t || !teamMemberNames.has(t)) continue;
-        const list = groups.get(t) || [];
-        list.push(a);
-        groups.set(t, list);
-      }
-      const hidden = new Set();
-      for (const list of groups.values()) {
-        if (list.length < 2) continue;
-        list.sort((a, b) => new Date(b.startedAt || 0) - new Date(a.startedAt || 0));
-        for (const older of list.slice(1)) {
-          if (older.status === 'idle' || older.status === 'stopped') hidden.add(older.agentId);
-        }
-      }
-      if (hidden.size) visibleAgents = agents.filter(a => !hidden.has(a.agentId));
-    }
 
     const waitingForUser = checkWaitingForUser(agentDir, logMtime);
     // Attached after persistAgent so it stays response-only.
-    for (const agent of visibleAgents) {
+    for (const agent of agents) {
       const usage = byAgentId[agent.agentId]?.usage;
       if (usage) agent.usage = usage;
     }
-    res.json({ agents: visibleAgents, waitingForUser, teamColors });
+    res.json({ agents, waitingForUser });
   } catch {
     res.json({ agents: [], waitingForUser: null });
   }
@@ -2093,7 +1721,7 @@ function clearActivityMarker(sessionId, file) {
 
 app.post('/api/sessions/:sessionId/waiting/discard', (req, res) => {
   try {
-    clearActivityMarker(resolveSessionId(req.params.sessionId), '_waiting.json');
+    clearActivityMarker(req.params.sessionId, '_waiting.json');
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'Failed to discard waiting' });
@@ -2102,7 +1730,7 @@ app.post('/api/sessions/:sessionId/waiting/discard', (req, res) => {
 
 app.post('/api/sessions/:sessionId/read', (req, res) => {
   try {
-    clearActivityMarker(resolveSessionId(req.params.sessionId), '_stop.json');
+    clearActivityMarker(req.params.sessionId, '_stop.json');
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'Failed to mark session read' });
@@ -2114,7 +1742,7 @@ app.post('/api/sessions/:sessionId/read', (req, res) => {
 // the marker and leaves the decision, and a write for an ask that is already over
 // is accepted anyway (D13); cleanupAgentActivity's sweep removes both kinds.
 app.post('/api/sessions/:sessionId/waiting/respond', (req, res) => {
-  const sessionId = resolveSessionId(req.params.sessionId);
+  const sessionId = req.params.sessionId;
   const dir = path.join(AGENT_ACTIVITY_DIR, sessionId);
   let marker = null;
   try { marker = JSON.parse(readFileSync(path.join(dir, '_waiting.json'), 'utf8')); }
@@ -2134,7 +1762,7 @@ app.post('/api/sessions/:sessionId/waiting/respond', (req, res) => {
 });
 
 app.post('/api/sessions/:sessionId/agents/:agentId/stop', (req, res) => {
-  const sessionId = resolveSessionId(req.params.sessionId);
+  const sessionId = req.params.sessionId;
   const agentId = sanitizeAgentId(req.params.agentId);
   const agentFile = path.join(AGENT_ACTIVITY_DIR, sessionId, `${agentId}.jsonl`);
   if (!existsSync(agentFile)) return res.status(404).json({ error: 'Agent not found' });
@@ -2192,15 +1820,14 @@ function lookupParentSession(sessionId) {
 
 // #region MESSAGE_ROUTES
 app.get('/api/sessions/:sessionId/parent', (req, res) => {
-  res.json(lookupParentSession(resolveSessionId(req.params.sessionId)));
+  res.json(lookupParentSession(req.params.sessionId));
 });
 
 app.get('/api/sessions/:sessionId/agents/:agentId/messages', (req, res) => {
-  const sessionId = resolveSessionId(req.params.sessionId);
+  const sessionId = req.params.sessionId;
   const agentId = sanitizeAgentId(req.params.agentId);
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
-  const metadata = loadSessionMetadata();
-  const meta = metadata[sessionId];
+  const meta = sessionMetaFor(sessionId);
   if (!meta?.jsonlPath) return res.json({ messages: [], agentId });
   const subagentJsonl = resolveSubagentJsonl(sessionId, agentId);
   if (!subagentJsonl) return res.json({ messages: [], agentId });
@@ -2209,10 +1836,9 @@ app.get('/api/sessions/:sessionId/agents/:agentId/messages', (req, res) => {
 });
 
 app.get('/api/sessions/:sessionId/agents/:agentId/messages/stream', (req, res) => {
-  const sessionId = resolveSessionId(req.params.sessionId);
+  const sessionId = req.params.sessionId;
   const agentId = sanitizeAgentId(req.params.agentId);
-  const metadata = loadSessionMetadata();
-  const meta = metadata[sessionId];
+  const meta = sessionMetaFor(sessionId);
   if (!meta?.jsonlPath) {
     res.status(404).json({ error: 'Session not found' });
     return;
@@ -2282,8 +1908,7 @@ async function sendSessionMessages(req, res) {
   const agentMessages = messages.filter(m => m.tool === 'Agent' && m.toolUseId);
   if (agentMessages.length) {
     const progressMap = await getProgressMap(jsonlPath);
-    const resolvedSid = resolveSessionId(req.params.sessionId);
-    const agentDir = path.join(AGENT_ACTIVITY_DIR, resolvedSid);
+    const agentDir = path.join(AGENT_ACTIVITY_DIR, req.params.sessionId);
     for (const msg of agentMessages) {
       const entry = progressMap[msg.toolUseId];
       if (entry) {
@@ -2498,9 +2123,6 @@ app.get('/api/version', (_req, res) => {
 
 app.get('/api/config', (_req, res) => {
   res.json({
-    marketplaceUrl: MARKETPLACE_URL,
-    costUrl: COST_URL,
-    memoryUrl: MEMORY_URL,
     scratchAvailable: !!whichSync('scratch'),
     terminal: terminal.clientConfig(),
   });
@@ -2784,11 +2406,12 @@ app.get('/api/tasks/all', async (_req, res) => {
         }
       }
 
+      const sessionName = getSessionDisplayName(meta);
       for (const { task } of dirTasks[i]) {
         allTasks.push({
           ...task,
           sessionId: sessionDir.name,
-          sessionName: getSessionDisplayName(sessionDir.name, meta),
+          sessionName,
           project
         });
       }
@@ -3194,19 +2817,6 @@ app.post('/api/session/open', async (req, res) => {
   }
 });
 
-app.post('/api/session/cost', (req, res) => {
-  const { id, agent } = req.body || {};
-  if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id is required' });
-  if (agent !== undefined && (typeof agent !== 'string' || !AGENT_ID_RE.test(agent))) {
-    return res.status(400).json({ error: 'agent must be an agent-… id' });
-  }
-  broadcast({ type: 'session:cost', id, ...(agent && { agent }) });
-  const query = new URLSearchParams({ view: 'detail', session: id, ...(agent && { agent }) });
-  const costUrl = COST_URL;
-  // A page opens the Cost tab only under the hub.
-  res.json({ delivered: process.env.CLAUDE_HUB ? clients.size : 0, url: costUrl ? `${new URL(`?${query}`, costUrl)}` : null });
-});
-
 // #region SESSION_PINS
 function broadcastPins(changed) {
   for (const { id, state } of changed) broadcast({ type: 'session:pin', id, state });
@@ -3331,7 +2941,7 @@ function groupPeer(id) {
   return {
     ref: id,
     project: sessionProjectKey({ project: meta.project, worktree: worktrees.resolve(meta.project) }),
-    name: getSessionDisplayName(id, meta) || `Session ${id.slice(0, 8)}`,
+    name: getSessionDisplayName(meta) || `Session ${id.slice(0, 8)}`,
   };
 }
 app.post('/api/sessions/:id/group', groupRoute((b, p) =>
@@ -3760,7 +3370,7 @@ watcher.on('all', (event, filePath) => {
 });
 
 // Which sessions own a task directory. Usually the dir name IS the session id, but a
-// shared list or a team dir is one directory several sessions map onto -- so anything
+// shared list is one directory several sessions map onto -- so anything
 // addressing a session from a task path has to fan out the same way. One resolver for
 // both readers of that mapping: the SSE broadcast and the doorbell.
 // #endregion
@@ -3770,10 +3380,7 @@ function resolveSessionsForTaskDir(name) {
   if (isUUID(name)) return [name];
   const { listToSessions } = loadAllTaskMaps();
   const map = listToSessions[name];
-  if (map) return Object.keys(map);
-  // Fallback: check if name is a team name
-  const cfg = loadTeamConfig(name);
-  return cfg?.leadSessionId ? [cfg.leadSessionId] : [];
+  return map ? Object.keys(map) : [];
 }
 
 function broadcastToMappedSessions(taskListName, event, filePath) {
@@ -3798,24 +3405,6 @@ taskMapsWatcher.on('all', (event, filePath) => {
     broadcastToMappedSessions(taskListName, event, filePath);
   }
 });
-
-// Watch teams directory for config changes
-const teamsWatcher = chokidar.watch(TEAMS_DIR, {
-  persistent: true,
-  ignoreInitial: true,
-  depth: 3
-});
-
-teamsWatcher.on('all', (event, filePath) => {
-  if ((event === 'add' || event === 'change' || event === 'unlink') && filePath.endsWith('.json')) {
-    const relativePath = path.relative(TEAMS_DIR, filePath);
-    const teamName = relativePath.split(path.sep)[0];
-    teamConfigCache.delete(teamName);
-    broadcast({ type: 'team-update', teamName });
-  }
-});
-
-console.log(`Watching for team changes in: ${TEAMS_DIR}`);
 
 const onSessionFileEvent = (event, filePath) => {
   if (event !== 'add' && event !== 'change' && event !== 'unlink') return;
@@ -3887,19 +3476,6 @@ agentActivityWatcher.on('all', (event, filePath) => {
     }
     const unreadOnly = base === '_stop.json';
     broadcast({ type: 'agent-update', sessionId, unreadOnly });
-    // For team sessions, also broadcast with team name so frontend picks it up
-    if (existsSync(TEAMS_DIR)) {
-      try {
-        const teamDirs = readdirSync(TEAMS_DIR, { withFileTypes: true }).filter(d => d.isDirectory());
-        for (const td of teamDirs) {
-          const cfg = loadTeamConfig(td.name);
-          if (cfg && cfg.leadSessionId === sessionId) {
-            broadcast({ type: 'agent-update', sessionId: td.name, unreadOnly });
-            break;
-          }
-        }
-      } catch { /* ignore */ }
-    }
   }
 });
 
@@ -4040,8 +3616,7 @@ function prewarmCaches() {
     if (warning) console.log(warning);
     terminal.started.then((terminalReason) => {
       if (terminalReason && terminalReason !== 'disabled') console.log(`Terminal unavailable: ${terminalReason}`);
-      // Under the hub the hub owns the token and hands it to the iframe itself.
-      if (!terminalReason && !process.env.CLAUDE_HUB) {
+      if (!terminalReason) {
         console.log(`Terminal enabled - open http://localhost:${actualPort}/#t=${terminal.token}`);
       }
     });

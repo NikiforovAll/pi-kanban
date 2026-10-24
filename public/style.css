@@ -848,9 +848,8 @@ body::before {
   --zen-dot: color-mix(in srgb, var(--warning) 55%, var(--border));
 }
 
-/* The spacers fill the free space. Centered, they split it 1:2, so a growing panel moves the card up by a third of the growth, not a half. With no free space they are 0 and the list scrolls from the top. */
-.sessions-list.zen::after,
-.sessions-list.zen.zen-centered::before {
+/* The spacer fills the free space. With no free space it is 0 and the list scrolls from the top. */
+.sessions-list.zen::after {
   content: '';
   flex: 1 0 0;
 }
@@ -877,18 +876,9 @@ body::before {
 }
 
 /* The pattern glows out from the card. The glow has a fixed height, so it looks the same in a short space and a tall one. */
-.sessions-list.zen:not([data-zen-pattern='none'])::after,
-.sessions-list.zen.zen-centered:not([data-zen-pattern='none'])::before {
+.sessions-list.zen:not([data-zen-pattern='none'])::after {
   background: var(--zen-fill);
   mask-image: radial-gradient(110% 260px at 50% var(--zen-glow-y), rgb(0 0 0 / 0.9), transparent);
-}
-
-.sessions-list.zen.zen-centered::before {
-  --zen-glow-y: 100%;
-}
-
-.sessions-list.zen.zen-centered::after {
-  flex-grow: 2;
 }
 
 .sessions-list.zen > * {
@@ -1918,6 +1908,7 @@ body.booting .boot-splash {
 
 /* #region KANBAN */
 .kanban {
+  position: relative;
   flex: 1;
   display: flex;
   gap: 24px;
@@ -2841,20 +2832,6 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
   flex-shrink: 0;
 }
 
-.team-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.team-badge .member-count {
-  font-weight: 600;
-}
-
 .shared-tasklist-badge {
   display: inline-flex;
   align-items: center;
@@ -2891,7 +2868,7 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
 
 /* The boxes are wider than their 12px glyphs, so the leading icon would sit inset
    from the card text above it. Cancel that inset — but only when a boxed icon leads;
-   the pill badges and .team-badge have a different inset and must not be shifted. */
+   the pill badges have a different inset and must not be shifted. */
 .session-indicators > .team-info-btn:first-child,
 .session-indicators > .plan-indicator:first-child {
   margin-left: -3px;
@@ -2944,35 +2921,6 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
 /* #endregion */
 
 /* #region TEAM_MODAL */
-.team-member-card {
-  padding: 12px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 8px;
-}
-
-.team-member-card .member-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.team-member-card .member-detail {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  margin-top: 4px;
-}
-
-.team-member-card .member-tasks {
-  font-size: 11px;
-  color: var(--accent);
-  margin-top: 4px;
-}
-
 #team-modal .modal {
   max-width: 860px;
   max-height: 80vh;
@@ -3046,13 +2994,6 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
   color: color-mix(in srgb, var(--danger) 55%, var(--text-primary));
   border-color: color-mix(in srgb, var(--danger) 35%, transparent);
 }
-.team-modal-desc {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-style: italic;
-  margin-bottom: 16px;
-}
-
 .team-modal-meta {
   font-size: 11px;
   color: var(--text-muted);
@@ -3153,34 +3094,6 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
-}
-
-/* #endregion */
-
-/* #region OWNER_FILTER */
-.kanban {
-  position: relative;
-}
-
-.owner-filter-bar {
-  display: none;
-  position: absolute;
-  top: 24px;
-  right: 24px;
-  z-index: 2;
-}
-
-.owner-filter-bar.visible {
-  display: flex;
-  align-items: center;
-}
-
-.owner-filter-bar .filter-dropdown {
-  flex: none;
-  width: auto;
-  max-width: 180px;
-  font-size: 13px;
-  padding: 6px 10px;
 }
 
 /* #endregion */
@@ -4762,7 +4675,7 @@ body.show-resizing iframe {
   color: var(--accent);
 }
 
-.pane-view.frame-focus:not(.keys-bridged) .pane-keys {
+.pane-view.frame-focus .pane-keys {
   display: flex;
 }
 

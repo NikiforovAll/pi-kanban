@@ -247,7 +247,7 @@ describe('CLI help', () => {
     assert.match(top.stdout, /session\s+.+\(list, search, open/);
     assert.doesNotMatch(top.stdout, /--project <name>/);
     assert.match(top.stdout, /help <command> <subcommand>/);
-    for (const flag of ['--port', '--open', '--dir', '--enable-terminal', '--terminal-shell', '--host', '--allowed-hosts', '--<app>-url']) {
+    for (const flag of ['--port', '--open', '--dir', '--enable-terminal', '--terminal-shell', '--host', '--allowed-hosts']) {
       assert.ok(top.stdout.includes(`  ${flag}`) || top.stdout.includes(`, ${flag}`), `top help lists ${flag}`);
     }
     const noun = await runCli(['help', 'task'], env());

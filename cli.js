@@ -141,17 +141,6 @@ const COMMANDS = {
         examples: ['pi-kanban session open $CLAUDE_SESSION_ID'],
         run: runSessionOpenCli,
       },
-      cost: {
-        summary: 'Show a session (or one subagent) in the Cost app',
-        usage: 'pi-kanban session cost <id> [--agent <agent id>]',
-        flags: {
-          '<id>': 'Full session id, or a unique prefix',
-          '--agent <agent id>': 'A subagent of the session (agent-…), as claude-code-cost session prints it',
-        },
-        notes: 'Under the hub the board switches to the Cost tab. The command also prints the cost link, for a board that runs alone.',
-        examples: ['pi-kanban session cost 3fa9c1 --agent agent-a10ff42'],
-        run: runSessionCostCli,
-      },
       view: {
         summary: 'Show full session stats (metadata + context window + cost) and the transcript path',
         usage: 'pi-kanban session view <id> [--json]',
@@ -473,7 +462,6 @@ const SERVER_FLAGS = [
   ['--terminal-shell <shell>', 'PK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
   ['--host <addr>', 'HOST', 'Listen address (default 127.0.0.1)'],
   ['--allowed-hosts <list>', 'ALLOWED_HOSTS', 'Extra Host header values, comma-separated'],
-  ['--<app>-url <url>', '<APP>_URL', 'Link to app: marketplace, cost, memory'],
 ];
 
 function topHelp() {
@@ -949,29 +937,6 @@ async function runSessionOpenCli(args) {
     if (!await cliPostJson('/api/session/open', { id: resolved.id }, 'Open')) return 1;
     console.log(`Session opened: ${resolved.id}${resolved.customTitle ? ` (${resolved.customTitle})` : ''}`);
     return 0;
-  } catch (e) { reportCliError(e); return 1; }
-}
-
-const AGENT_ID_RE = /^agent-[\w-]+$/;
-
-async function runSessionCostCli(args) {
-  const entry = COMMANDS.session.verbs.cost;
-  const [idArg] = positionals(args, ['--agent']);
-  if (!idArg) {
-    printLeafHelp(entry);
-    return 1;
-  }
-  const agent = getArgValue(args, 'agent');
-  const agentGiven = args.some((a) => a === '--agent' || a.startsWith('--agent='));
-  if (agentGiven && !AGENT_ID_RE.test(agent || '')) return usageError(entry, '--agent takes an agent-… id.');
-  const resolved = await resolveSessionByIdOrPrefix(idArg);
-  if (!resolved) return 1;
-  try {
-    const out = await cliPostJson('/api/session/cost', { id: resolved.id, ...(agent && { agent }) }, 'Cost');
-    if (!out) return 1;
-    console.log(out.delivered ? 'Sent to the board: it opens the Cost tab.' : 'No hub board page is open to show it.');
-    if (out.url) console.log(`Cost view: ${out.url}`);
-    return out.delivered || out.url ? 0 : 1;
   } catch (e) { reportCliError(e); return 1; }
 }
 
@@ -1546,4 +1511,4 @@ async function runSkillsGetCli(args) {
   return 0;
 }
 
-module.exports = { runCli, topHelp, COMMANDS, SERVER_FLAGS, AGENT_ID_RE };
+module.exports = { runCli, topHelp, COMMANDS, SERVER_FLAGS };
