@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { getClaudeDir, displayPath } = require('./lib/claude-dir');
+const { getClaudeDir, boardDir, displayPath } = require('./lib/claude-dir');
 const { linkUrl } = require('./public/link-url');
 const { sessionProjectKey } = require('./public/project-match');
 // Help is auto-generated from this table — keep flags/usage in sync with `run` behavior.
@@ -466,16 +466,14 @@ function resolveCliCommand(argv) {
 
 // The website's reference/cli.md has the same table; change both.
 const SERVER_FLAGS = [
-  ['--port <n>', 'PORT', 'Port (default 3541)'],
+  ['--port <n>', 'PORT', 'Port (default 3460)'],
   ['--open', '', 'Open the board in the browser'],
-  ['--dir <path>', 'CLAUDE_CONFIG_DIR', 'Config dir (default ~/.claude); also for --install'],
+  ['--dir <path>', 'PI_CODING_AGENT_DIR', 'pi agent dir (default ~/.pi/agent)'],
   ['--enable-terminal', '', 'Turn on the embedded terminal'],
   ['--terminal-shell <shell>', 'CCK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
   ['--host <addr>', 'HOST', 'Listen address (default 127.0.0.1)'],
   ['--allowed-hosts <list>', 'ALLOWED_HOSTS', 'Extra Host header values, comma-separated'],
   ['--<app>-url <url>', '<APP>_URL', 'Link to app: marketplace, cost, memory'],
-  ['--install, --uninstall', '', 'Install or remove the plugin'],
-  ['--yes', '', 'With --install: no prompt'],
 ];
 
 function topHelp() {
@@ -494,8 +492,8 @@ function topHelp() {
   for (const [flag, env, desc] of SERVER_FLAGS) lines.push(`  ${flag.padEnd(flagPad)}${env.padEnd(envPad)}${desc}`);
   lines.push('\nCommand env:');
   lines.push('  CCK_URL               Server base URL, e.g. http://127.0.0.1:4795 (wins over PORT)');
-  lines.push('  PORT                  Server port (default: the one this config dir\'s server reports, else 3541)');
-  lines.push('  CLAUDE_CONFIG_DIR     Claude config dir whose board to use');
+  lines.push('  PORT                  Server port (default: the one this config dir\'s server reports, else 3460)');
+  lines.push('  PI_CODING_AGENT_DIR   pi agent dir whose board to use');
   lines.push('\nRun `claude-code-kanban help <command>` for its subcommands, and `help <command> <subcommand>` for flags and examples.');
   return lines.join('\n');
 }
@@ -550,14 +548,14 @@ function getArgValue(args, name) {
   return args[idx + 1] && !args[idx + 1].startsWith('--') ? args[idx + 1] : null;
 }
 
-// The hub runs one cck per config dir, each on its own port, so 3541 can be another dir's board.
-// The server's beacon in this config dir names the right one; PORT still wins when set.
-// A beacon left by a dead server means this dir's board is down: 3541 would be someone else's.
+// Each agent dir can run its own board on its own port, so 3460 can be another dir's board.
+// The server's beacon in this agent dir names the right one; PORT still wins when set.
+// A beacon left by a dead server means this dir's board is down: 3460 would be someone else's.
 // Returns null in that case.
 function cliPort() {
   if (process.env.PORT) return process.env.PORT;
   const beacon = readCckJson('server.json');
-  if (!beacon) return 3541;
+  if (!beacon) return 3460;
   return beacon.port && beacon.pid && isPidAlive(beacon.pid) ? beacon.port : null;
 }
 
@@ -573,7 +571,7 @@ function cliTargetPort() {
 }
 
 function readCckJson(name) {
-  try { return JSON.parse(fs.readFileSync(path.join(getClaudeDir(), '.cck', name), 'utf8')); } catch (_) { return null; }
+  try { return JSON.parse(fs.readFileSync(path.join(boardDir(getClaudeDir()), name), 'utf8')); } catch (_) { return null; }
 }
 
 // EPERM means the process exists but belongs to someone else.

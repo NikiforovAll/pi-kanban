@@ -44,7 +44,7 @@ const {
 } = require('./lib/parsers');
 const { inlineHtmlAssets, MIME_BY_EXT } = require('./lib/inline-assets');
 const { buildDecision, decisionFileName, isDecisionFile, approvalsFrom, boardRefusal } = require('./lib/approvals');
-const { getClaudeDir, getArgValue, storageNamespace, isDefaultClaudeDir } = require('./lib/claude-dir');
+const { getClaudeDir, boardDir, getArgValue,storageNamespace, isDefaultClaudeDir } = require('./lib/claude-dir');
 const { readTerminalConfig } = require('./lib/terminal');
 const { createTerminalClient } = require('./lib/terminal-client');
 const { AGENT_ID_RE } = require('./cli');
@@ -80,12 +80,12 @@ if (!require("./cli").runCli(process.argv)) {
 function startServer() {
 
 const app = express();
-const PORT = parseInt(getArgValue('port') || process.env.PORT || '3541', 10);
+const PORT = parseInt(getArgValue('port') || process.env.PORT || '3460', 10);
 
 // Mounted before express.json() so a rejected request never buffers a body, and
 // before the /api catch-all so no route escapes the check.
 // The board frames the terminal from its other loopback name, so Chrome runs it in its own process.
-const net = createNetGuard({ appName: 'Claude Task Kanban', selfFramedPaths: ['/terminal.html'] });
+const net = createNetGuard({ appName: 'pi-kanban', selfFramedPaths: ['/terminal.html'] });
 app.use(net.hostGuard);
 app.use(net.frameGuard);
 app.use(net.originGuard);
@@ -98,12 +98,13 @@ const MARKETPLACE_URL = getArgUrl('marketplace-url', 'MARKETPLACE_URL');
 const COST_URL = getArgUrl('cost-url', 'COST_URL');
 const MEMORY_URL = getArgUrl('memory-url', 'MEMORY_URL');
 const CLAUDE_DIR = getClaudeDir();
-const TASKS_DIR = path.join(CLAUDE_DIR, 'tasks');
-const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
-const TEAMS_DIR = path.join(CLAUDE_DIR, 'teams');
-const PLANS_DIR = path.join(CLAUDE_DIR, 'plans');
-const SESSIONS_DIR = path.join(CLAUDE_DIR, 'sessions');
-const CCK_DIR = path.join(CLAUDE_DIR, '.cck');
+const CCK_DIR = boardDir(CLAUDE_DIR);
+const TASKS_DIR = path.join(CCK_DIR, 'tasks');
+// TODO(port wave 1): point at path.join(CLAUDE_DIR, 'sessions') once lib/parsers reads pi JSONL.
+const PROJECTS_DIR = path.join(CCK_DIR, 'projects');
+const TEAMS_DIR = path.join(CCK_DIR, 'teams');
+const PLANS_DIR = path.join(CCK_DIR, 'plans');
+const SESSIONS_DIR = path.join(CCK_DIR, 'live');
 const AGENT_ACTIVITY_DIR = path.join(CCK_DIR, 'agent-activity');
 const CONTEXT_STATUS_DIR = path.join(CCK_DIR, 'context-status');
 const ATTACHMENTS_DIR = path.join(CCK_DIR, 'attachments');
@@ -4809,7 +4810,7 @@ async function prewarmCaches() {
     // mod cannot assume it -- publish the live one where it can read it.
     writeServerInfo(actualPort);
     writeTerminalToken(actualPort);
-    console.log(`Claude Task Kanban running at http://localhost:${actualPort}`);
+    console.log(`pi-kanban running at http://localhost:${actualPort}`);
     setInterval(() => reclaimServerInfo(actualPort), 30000).unref();
     migrateLegacyApprovalsConfig();
     const warning = net.exposureWarning();

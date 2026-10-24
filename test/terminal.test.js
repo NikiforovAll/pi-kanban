@@ -24,7 +24,7 @@ function startServer(extraArgs) {
   // under one (fs-event.c), which kills the server the first time it writes to .cck.
   const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'cck-term-')));
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js'), ...extraArgs], {
-    env: { ...process.env, PORT: '0', CLAUDE_CONFIG_DIR: dir, CCK_TERMINAL_TOKEN: TOKEN, CLAUDE_HUB: '' },
+    env: { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, CCK_TERMINAL_TOKEN: TOKEN, CLAUDE_HUB: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const port = new Promise((resolve, reject) => {
@@ -562,7 +562,7 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
   after(() => stopServer(srv));
 
   it('writes its token in a file named by its port', () => {
-    const file = path.join(srv.dir, '.cck', 'terminal-tokens', `${port}.json`);
+    const file = path.join(srv.dir, 'kanban', 'terminal-tokens', `${port}.json`);
     assert.equal(JSON.parse(readFileSync(file, 'utf8')).token, TOKEN);
   });
 

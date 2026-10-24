@@ -11,12 +11,12 @@ const SERVER = path.join(__dirname, '..', 'server.js');
 function tempConfigDir(beacon, token) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-cli-'));
   if (beacon) {
-    fs.mkdirSync(path.join(dir, '.cck'));
-    fs.writeFileSync(path.join(dir, '.cck', 'server.json'), JSON.stringify(beacon));
+    fs.mkdirSync(path.join(dir, 'kanban'));
+    fs.writeFileSync(path.join(dir, 'kanban', 'server.json'), JSON.stringify(beacon));
   }
   if (token) {
-    fs.mkdirSync(path.join(dir, '.cck', 'terminal-tokens'));
-    fs.writeFileSync(path.join(dir, '.cck', 'terminal-tokens', `${beacon.port}.json`), JSON.stringify({ pid: process.pid, token }));
+    fs.mkdirSync(path.join(dir, 'kanban', 'terminal-tokens'));
+    fs.writeFileSync(path.join(dir, 'kanban', 'terminal-tokens', `${beacon.port}.json`), JSON.stringify({ pid: process.pid, token }));
   }
   return dir;
 }
@@ -44,7 +44,7 @@ describe('CLI server resolution', () => {
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     try {
       const dir = tempConfigDir({ port: srv.address().port, pid: process.pid });
-      await runCli(['project', 'list', '--json'], { CLAUDE_CONFIG_DIR: dir });
+      await runCli(['project', 'list', '--json'], { PI_CODING_AGENT_DIR: dir });
       assert.deepEqual(hits, ['/api/projects']);
     } finally {
       srv.close();
@@ -59,7 +59,7 @@ describe('CLI server resolution', () => {
       const child = spawn(process.execPath, ['-e', '']);
       await new Promise((r) => child.on('exit', r));
       const dir = tempConfigDir({ port: srv.address().port, pid: child.pid });
-      const { code, stderr } = await runCli(['session', 'list'], { CLAUDE_CONFIG_DIR: dir });
+      const { code, stderr } = await runCli(['session', 'list'], { PI_CODING_AGENT_DIR: dir });
       assert.equal(code, 1);
       assert.match(stderr, /Cannot reach cck server for .+cck-cli-.+: its server\.json names a server that is no longer running/);
       assert.deepEqual(hits, []);
@@ -70,7 +70,7 @@ describe('CLI server resolution', () => {
 
   it('lets PORT win over a dead beacon', async () => {
     const dir = tempConfigDir({ port: 9, pid: 999999999 });
-    const { stderr } = await runCli(['session', 'list'], { CLAUDE_CONFIG_DIR: dir, PORT: '1' });
+    const { stderr } = await runCli(['session', 'list'], { PI_CODING_AGENT_DIR: dir, PORT: '1' });
     assert.match(stderr, /on port 1\b/);
   });
 
@@ -85,7 +85,7 @@ describe('CLI server resolution', () => {
     try {
       const dir = tempConfigDir({ port: 9, pid: 999999999 });
       const { code } = await runCli(['project', 'list', '--json'], {
-        CLAUDE_CONFIG_DIR: dir,
+        PI_CODING_AGENT_DIR: dir,
         CCK_URL: `http://127.0.0.1:${srv.address().port}/`,
       });
       assert.equal(code, 0);
@@ -107,14 +107,14 @@ describe('CLI server resolution', () => {
     try {
       const [ownerPort, pinnedPort] = boards.map((s) => s.address().port);
       const dir = tempConfigDir({ port: ownerPort, pid: process.pid });
-      const tokens = path.join(dir, '.cck', 'terminal-tokens');
+      const tokens = path.join(dir, 'kanban', 'terminal-tokens');
       fs.mkdirSync(tokens);
       for (const [port, token] of [[ownerPort, 'owner-token'], [pinnedPort, 'pinned-token']]) {
         fs.writeFileSync(path.join(tokens, `${port}.json`), JSON.stringify({ pid: process.pid, token }));
       }
       const start = ['dispatch', 'start', '--spec', 'x', '--cwd', dir];
-      assert.equal((await runCli(start, { CLAUDE_CONFIG_DIR: dir })).code, 0);
-      assert.equal((await runCli(start, { CLAUDE_CONFIG_DIR: dir, CCK_URL: `http://127.0.0.1:${pinnedPort}` })).code, 0);
+      assert.equal((await runCli(start, { PI_CODING_AGENT_DIR: dir })).code, 0);
+      assert.equal((await runCli(start, { PI_CODING_AGENT_DIR: dir, CCK_URL: `http://127.0.0.1:${pinnedPort}` })).code, 0);
       assert.deepEqual(seen, [{ port: ownerPort, token: 'owner-token' }, { port: pinnedPort, token: 'pinned-token' }]);
     } finally {
       for (const s of boards) s.close();
@@ -136,7 +136,7 @@ describe('CLI server resolution', () => {
     try {
       const dir = tempConfigDir({ port: srv.address().port, pid: process.pid }, 't');
       const argv = ['dispatch', 'start', '--spec', 'x', '--cwd', dir, '--name', 'a', '--', '--permission-mode', 'auto', '--worktree'];
-      assert.equal((await runCli(argv, { CLAUDE_CONFIG_DIR: dir })).code, 0);
+      assert.equal((await runCli(argv, { PI_CODING_AGENT_DIR: dir })).code, 0);
       assert.deepEqual(body.claudeArgs, ['--permission-mode', 'auto', '--worktree']);
       assert.equal(body.name, 'a');
       assert.equal(body.worktree, false);
@@ -161,7 +161,7 @@ describe('CLI server resolution', () => {
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     try {
       const dir = tempConfigDir({ port: srv.address().port, pid: process.pid }, 't');
-      const env ={ CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_SESSION_ID: parent };
+      const env ={ PI_CODING_AGENT_DIR: dir, CLAUDE_CODE_SESSION_ID: parent };
       const list = `GET /api/dispatch?parent=${parent}`;
 
       const byName = await runCli(['dispatch', 'end', '--name', 'api-worker'], env);
@@ -209,7 +209,7 @@ describe('CLI server resolution', () => {
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     try {
       const dir = tempConfigDir({ port: srv.address().port, pid: process.pid });
-      const mine = await runCli(['terminal', 'list'], { CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_SESSION_ID: self });
+      const mine = await runCli(['terminal', 'list'], { PI_CODING_AGENT_DIR: dir, CLAUDE_CODE_SESSION_ID: self });
       assert.equal(mine.code, 0);
       const lines = mine.stdout.trim().split('\n');
       assert.match(lines[0], /^SESSION\s+AGE\s+KIND\s+NAME\s+CWD$/);
@@ -219,10 +219,10 @@ describe('CLI server resolution', () => {
       assert.match(lines[4], /^aaaa1111-\S+\s+\S+\s+claude\s+/);
       assert.match(mine.stdout, /dispatch end <session>/);
 
-      const other = await runCli(['terminal', 'list'], { CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_SESSION_ID: '' });
+      const other = await runCli(['terminal', 'list'], { PI_CODING_AGENT_DIR: dir, CLAUDE_CODE_SESSION_ID: '' });
       assert.doesNotMatch(other.stdout, /yours|dispatch end/);
 
-      const json = await runCli(['terminal', 'list', '--json'], { CLAUDE_CONFIG_DIR: dir });
+      const json = await runCli(['terminal', 'list', '--json'], { PI_CODING_AGENT_DIR: dir });
       assert.deepEqual(JSON.parse(json.stdout).map((t) => t.id.slice(0, 8)), ['aaaa2222', 'aaaa3333', 'aaaa4444', 'aaaa1111']);
       assert.deepEqual([...new Set(seen)], ['GET /api/terminals']);
     } finally {
@@ -232,14 +232,14 @@ describe('CLI server resolution', () => {
 
   it('names the config dir when the server is unreachable', async () => {
     const dir = tempConfigDir();
-    const { code, stderr } = await runCli(['session', 'list'], { CLAUDE_CONFIG_DIR: dir, PORT: '1' });
+    const { code, stderr } = await runCli(['session', 'list'], { PI_CODING_AGENT_DIR: dir, PORT: '1' });
     assert.notEqual(code, 0);
     assert.match(stderr, /Cannot reach cck server for .+cck-cli-.+ on port 1\b/);
   });
 });
 
 describe('CLI help', () => {
-  const env = () => ({ CLAUDE_CONFIG_DIR: tempConfigDir(), PORT: '1' });
+  const env = () => ({ PI_CODING_AGENT_DIR: tempConfigDir(), PORT: '1' });
 
   it('lists commands at the top, verbs one level down, flags at the leaf', async () => {
     const top = await runCli(['--help'], env());
@@ -247,7 +247,7 @@ describe('CLI help', () => {
     assert.match(top.stdout, /session\s+.+\(list, search, open/);
     assert.doesNotMatch(top.stdout, /--project <name>/);
     assert.match(top.stdout, /help <command> <subcommand>/);
-    for (const flag of ['--port', '--open', '--dir', '--enable-terminal', '--terminal-shell', '--host', '--allowed-hosts', '--<app>-url', '--install', '--uninstall', '--yes']) {
+    for (const flag of ['--port', '--open', '--dir', '--enable-terminal', '--terminal-shell', '--host', '--allowed-hosts', '--<app>-url']) {
       assert.ok(top.stdout.includes(`  ${flag}`) || top.stdout.includes(`, ${flag}`), `top help lists ${flag}`);
     }
     const noun = await runCli(['help', 'task'], env());
@@ -267,7 +267,7 @@ describe('CLI help', () => {
 });
 
 describe('CLI argument parsing', () => {
-  const env = () => ({ CLAUDE_CONFIG_DIR: tempConfigDir(), PORT: '1' });
+  const env = () => ({ PI_CODING_AGENT_DIR: tempConfigDir(), PORT: '1' });
   const usage = (cmd) => new RegExp(`Usage: claude-code-kanban ${cmd}`);
 
   for (const [args, cmd] of [
@@ -339,7 +339,7 @@ describe('CLI argument parsing', () => {
     });
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     try {
-      const cliEnv = { CLAUDE_CONFIG_DIR: tempConfigDir(), PORT: String(srv.address().port) };
+      const cliEnv = { PI_CODING_AGENT_DIR: tempConfigDir(), PORT: String(srv.address().port) };
       const run = (args) => runCli(['pane', ...args, '--session', 'abcdef'], cliEnv);
       const [add, rm, list] = await Promise.all([run(['add', 'http://localhost:8228', '--title', 'Sideshow']), run(['rm', 'p1']), run(['list'])]);
       assert.equal(add.code, 0, add.stderr);
