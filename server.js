@@ -50,6 +50,8 @@ const { createSessionPinStore } = require('./lib/session-pins');
 const { stampedJsonFile } = require('./lib/stamped-json-file');
 const { parseReviewSource, parseActionBody, formatActionMarkdown } = require('./lib/preview-action');
 const { createDispatchedStore, pruneSessionDirs, pruneContextStatus, pruneTaskMaps, retentionMs } = require('./lib/retention');
+const { createDispatchReports, parseReport } = require('./lib/dispatch-reports');
+const { createModelCache, listPiModels } = require('./lib/pi-models');
 const { createWorktreeStore } = require('./lib/worktrees');
 const { createScratchpadDirResolver, defaultScratchpadRoot } = require('./lib/scratchpad-dir');
 const { readGitBranch, sessionGitBranch } = require('./lib/git-branch');
@@ -176,7 +178,7 @@ function writeServerInfo(port) {
   writeJsonAtomicOrLog(SERVER_INFO_FILE, { port, pid: process.pid });
 }
 
-// For `dispatch start`: a local process as the same user can already run claude itself,
+// For `dispatch start`: a local process as the same user can already run pi itself,
 // so handing it the token adds little. A browser still cannot read the file.
 // One file per port: two boards on one config dir each keep a token, so the CLI can
 // reach the board PK_URL names even when the other one owns server.json.
@@ -2167,7 +2169,9 @@ const terminal = createTerminalClient({
   isAllowedFolder,
   onChange: () => broadcast({ type: 'terminals-update', ids: terminal.ids(), awaitingTrust: terminal.awaitingTrust() }),
   onExit: (id) => {
-    if (dispatched.get(id)) broadcast({ type: 'dispatch-update' });
+    if (!dispatched.get(id)) return;
+    dispatchReports.notify(id);
+    broadcast({ type: 'dispatch-update' });
   },
   onRekey: (from, to) => {
     if (dispatched.move(from, to)) broadcast({ type: 'dispatch-update' });
@@ -2315,6 +2319,7 @@ app.get('/vendor/xterm/:file', (req, res) => {
 
 // #region DISPATCH
 const dispatched = createDispatchedStore(jsonFile(DISPATCHED_FILE));
+const dispatchReports = createDispatchReports({ dispatched, isRunning: (id) => terminal.isRunning(id) });
 
 const linkedDocs = createLinkedDocStore(jsonFile(LINKED_DOCS_FILE));
 
@@ -2329,13 +2334,13 @@ function withDispatchMarker(sessions) {
 // TERMINAL_TOKEN_FILE. The started session never holds it.
 app.post('/api/dispatch', terminalRoute(async (req, res) => {
   if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
-  const { cwd, spec, name, model, worktree, taskList, parent, group, claudeArgs } = req.body || {};
+  const { cwd, spec, name, model, thinking, parent, group, extraArgs } = req.body || {};
   if (typeof spec !== 'string' || !spec.trim()) return res.status(400).json({ error: 'spec is required' });
   if (parent != null && !(typeof parent === 'string' && isUUID(parent))) return res.status(400).json({ error: 'invalid parent' });
   if (group != null && !(typeof group === 'string' && group.trim())) return res.status(400).json({ error: 'group must be a group name, path or id' });
-  const started = await terminal.startNew({ cwd, name, model, worktree, taskList, prompt: spec.trim(), extraArgs: claudeArgs });
+  const started = await terminal.startNew({ cwd, name, model, thinking, prompt: spec.trim(), extraArgs });
   if (started.error) return res.status(started.status).json({ error: started.error });
-  dispatched.record(started.id, { parent, cwd: started.cwd, name, group, worktree });
+  dispatched.record(started.id, { parent, cwd: started.cwd, name, group });
   // Joined before dispatch-update, so the board places the session from its first frame. The
   // starter stays where it is: moving it would jump it under the user.
   let joined = null;
@@ -2363,6 +2368,36 @@ app.get('/api/dispatch', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const parent = typeof req.query.parent === 'string' && req.query.parent ? req.query.parent : null;
   res.json({ running: dispatched.running(terminal.isRunning, { parent }) });
+});
+
+// No token on the report routes: the worker holds none, and net-guard refuses a cross-site request.
+app.post('/api/dispatch/:session/report', (req, res) => {
+  const { text, error } = parseReport(req.body);
+  if (error) return res.status(400).json({ error });
+  const report = dispatchReports.post(req.params.session, text);
+  if (!report) return res.status(404).json({ error: 'not a dispatched session' });
+  broadcast({ type: 'dispatch-update' });
+  res.status(201).json(report);
+});
+
+app.get('/api/dispatch/:session/report', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const got = await dispatchReports.wait(req.params.session, Number(req.query.wait) || 0);
+  if (!got) return res.status(404).json({ error: 'not a dispatched session' });
+  res.json(got);
+});
+// #endregion
+
+// #region NEW_SESSION
+const piModels = createModelCache({ list: () => listPiModels({ env: { ...process.env, PI_CODING_AGENT_DIR: PI_AGENT_DIR } }) });
+
+// The New session dialog's model list: the models pi has auth for in this agent dir.
+app.get('/api/pi/models', async (_req, res) => {
+  try {
+    res.json({ models: await piModels() });
+  } catch (e) {
+    res.status(502).json({ error: `pi --list-models failed: ${e.message}` });
+  }
 });
 // #endregion
 

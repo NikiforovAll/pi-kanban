@@ -16419,11 +16419,10 @@ function initShowCard() {
 //#endregion
 
 //#region NEW_SESSION
-// claude writes no transcript until the first message, so until then the sidebar shows a
+// pi writes no transcript until the first message, so until then the sidebar shows a
 // placeholder built from the form. newSpecs holds one entry per such session; the entry
 // goes when the real session shows up in /api/sessions.
 const NEW_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/;
-const NEW_WORKTREE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const NS_MAX_MATCHES = 8;
 const PLUS_SVG =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
@@ -16460,7 +16459,6 @@ function placeholderSession(id, spec) {
     name: spec.name || (spec.forkOf && forkLabel(spec.forkOf)) || PLACEHOLDER_NAMES[spec.mode] || PLACEHOLDER_NAMES.new,
     dispatched: spec.mode === 'dispatch' ? { parent: spec.parent || null } : undefined,
     project: spec.cwd,
-    worktree: spec.worktree ? { repo: spec.cwd, name: spec.worktree === true ? 'new' : spec.worktree } : null,
     modifiedAt: new Date(spec.startedAt).toISOString(),
     hasMessages: true,
     hasRecentActivity: true,
@@ -16504,7 +16502,6 @@ async function loadDispatches() {
       mode: 'dispatch',
       cwd: r.cwd,
       name: r.name,
-      worktree: r.worktree,
       group: r.group,
       parent: r.parent,
       startedAt: r.startedAt,
@@ -16567,7 +16564,6 @@ async function restorePendingSessions() {
       newSpecs.set(t.id, {
         cwd: t.cwd,
         name: t.name,
-        worktree: t.worktree,
         mode: t.mode,
         edit: t.edit,
         forkOf: t.forkOf,
@@ -16627,16 +16623,29 @@ function showSessionTerminal(sessionId) {
   else fetchTasks(sessionId);
 }
 
+let newSessionModelsLoad = null;
+
+// Loaded once per page; a failed load leaves only Default and tries again on the next open.
+function loadNewSessionModels() {
+  newSessionModelsLoad ??= getJson('/api/pi/models').then((data) => {
+    if (!data?.models) {
+      newSessionModelsLoad = null;
+      return;
+    }
+    const select = document.getElementById('ns-model');
+    for (const m of data.models) select.add(new Option(`${m.provider}/${m.id}`));
+  });
+  return newSessionModelsLoad;
+}
+
 function openNewSession(folder, resume = false) {
   if (!terminalAvailable() || document.getElementById('new-session-modal').classList.contains('visible')) return;
   if (terminalPaneFocused()) leaveTerminalPane();
   ns.resume = resume;
   document.querySelector('.new-session-modal').classList.toggle('ns-resume', resume);
   document.getElementById('ns-title').textContent = resume ? 'Resume session' : 'New session';
-  for (const id of ['ns-name', 'ns-wt-name', 'ns-prompt']) document.getElementById(id).value = '';
-  document.getElementById('ns-wt').checked = false;
-  document.getElementById('ns-model').value = '';
-  document.getElementById('ns-effort').value = '';
+  for (const id of ['ns-name', 'ns-prompt', 'ns-model', 'ns-thinking']) document.getElementById(id).value = '';
+  loadNewSessionModels();
   clearNewSessionImages();
   document.getElementById('ns-stay').checked = store.getItem(NEW_SESSION_STAY_KEY) === 'true';
   document.getElementById('ns-edit').checked = store.getItem(NEW_SESSION_EDIT_KEY) === 'true';
@@ -16806,15 +16815,12 @@ function folderListOpen() {
 }
 
 function newSessionValues() {
-  const wtOn = document.getElementById('ns-wt').checked;
-  const wtName = document.getElementById('ns-wt-name').value.trim();
   const edit = !ns.resume && document.getElementById('ns-edit').checked;
   return {
     cwd: ns.folder,
     name: document.getElementById('ns-name').value.trim() || null,
-    worktree: wtOn ? wtName || true : false,
     model: document.getElementById('ns-model').value || null,
-    effort: document.getElementById('ns-effort').value || null,
+    thinking: document.getElementById('ns-thinking').value || null,
     prompt: document.getElementById('ns-prompt').value.trim() || null,
     edit,
     stay: !ns.resume && !edit && document.getElementById('ns-stay').checked,
@@ -16824,8 +16830,6 @@ function newSessionValues() {
 function newSessionProblem(v) {
   if (v.name && !NEW_NAME_RE.test(v.name))
     return 'Name: use letters, digits, spaces and . _ -, starting with a letter or digit.';
-  if (typeof v.worktree === 'string' && !NEW_WORKTREE_RE.test(v.worktree))
-    return 'Worktree name: use letters, digits and . _ -, starting with a letter or digit.';
   return '';
 }
 
@@ -16837,12 +16841,6 @@ function setNewSessionError(text) {
 
 function renderNewSessionForm() {
   const v = newSessionValues();
-  const wtOn = v.worktree !== false;
-  const wtInput = document.getElementById('ns-wt-name');
-  wtInput.disabled = !wtOn;
-  const hint = document.getElementById('ns-wt-hint');
-  hint.hidden = !wtOn;
-  hint.textContent = `.claude/worktrees/${typeof v.worktree === 'string' ? v.worktree : '<name chosen by Claude>'}`;
   document.getElementById('ns-stay').disabled = v.edit;
   const problem = newSessionProblem(v);
   setNewSessionError(problem);
@@ -17019,10 +17017,6 @@ function initNewSession() {
     const row = e.target.closest('.ns-option');
     if (row) pickFolderOption(Number(row.dataset.idx));
   });
-  document.getElementById('ns-wt').addEventListener('change', (e) => {
-    renderNewSessionForm();
-    if (e.target.checked) document.getElementById('ns-wt-name').focus();
-  });
   document
     .getElementById('ns-stay')
     .addEventListener('change', (e) => store.setItem(NEW_SESSION_STAY_KEY, String(e.target.checked)));
@@ -17030,7 +17024,7 @@ function initNewSession() {
     store.setItem(NEW_SESSION_EDIT_KEY, String(e.target.checked));
     renderNewSessionForm();
   });
-  for (const id of ['ns-name', 'ns-wt-name', 'ns-prompt', 'ns-model', 'ns-effort']) {
+  for (const id of ['ns-name', 'ns-prompt', 'ns-model', 'ns-thinking']) {
     document.getElementById(id).addEventListener('input', renderNewSessionForm);
   }
   if (SpeechRecognitionApi) {

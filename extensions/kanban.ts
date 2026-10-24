@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { lib } from "./tools/board-api.js";
 import { linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
+import { registerDispatch } from "./tools/dispatch.js";
 import { registerScratchpad } from "./tools/scratchpad.js";
-import { registerShowAsk } from "./tools/show-ask.js";
+import { ASK_CLOSE, ASK_OPEN, ASK_TOOL, type AskOpen, registerShowAsk } from "./tools/show-ask.js";
 
 const extDir = fileURLToPath(new URL('.', import.meta.url));
 
@@ -40,6 +41,7 @@ const piAgents = lib("pi-agents.js") as {
 		asyncComplete: (payload: unknown, now: string) => Promise<SessionLines>;
 	};
 };
+const { SESSION_ID_ENV } = lib("board-dir.js") as { SESSION_ID_ENV: string };
 
 let child: ChildProcess | null = null;
 let lastStderr = "";
@@ -282,19 +284,28 @@ function registerLiveState(pi: ExtensionAPI) {
 		publish(openPrompts ? "waiting" : "idle");
 	});
 
-	pi.on("ui_prompt_start", async (event) => {
+	function openPrompt(prompt: { kind: string; title?: string }, tool?: { toolName: string; args: unknown }) {
 		if (!session) return;
 		openPrompts++;
-		const marker = agentLog.promptMarker(event, [...toolsInFlight.values()].at(-1), session.cwd, now());
+		const marker = agentLog.promptMarker(prompt, tool, session.cwd, now());
 		inActivityDir("waiting", (dir) => agentLog.writeWaiting(dir, marker));
 		publish("waiting");
-	});
+	}
 
-	pi.on("ui_prompt_end", async () => {
+	function closePrompt() {
 		if (!session || openPrompts === 0 || --openPrompts > 0) return;
 		inActivityDir("waiting", agentLog.clearWaiting);
 		publish(running ? "busy" : "idle");
+	}
+
+	pi.on("ui_prompt_start", async (event) => openPrompt(event, [...toolsInFlight.values()].at(-1)));
+	pi.on("ui_prompt_end", async () => closePrompt());
+
+	pi.events.on(ASK_OPEN, (data) => {
+		const { title, args } = data as AskOpen;
+		openPrompt({ kind: "input", title }, { toolName: ASK_TOOL, args });
 	});
+	pi.events.on(ASK_CLOSE, () => closePrompt());
 
 	pi.on("tool_execution_start", async (event) => {
 		toolsInFlight.set(event.toolCallId, { toolName: event.toolName, args: event.args });
@@ -328,6 +339,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	registerLiveState(pi);
 	registerScratchpad(pi);
 	registerShowAsk(pi);
+	registerDispatch(pi);
 
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.toolName !== "todo") return;
@@ -343,6 +355,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (!sessionId) return;
+		process.env[SESSION_ID_ENV] = sessionId;
 		const branch = ctx.sessionManager.getBranch();
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];

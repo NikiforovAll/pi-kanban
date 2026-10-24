@@ -854,29 +854,13 @@ body::before {
   flex: 1 0 0;
 }
 
-/* Dots unless the hub's zenPattern setting names another pattern. Line patterns use a lighter color, because a line has more ink than a dot. */
 .sessions-list.zen {
-  --zen-line: color-mix(in srgb, var(--zen-dot) 50%, transparent);
   --zen-fill: radial-gradient(circle, var(--zen-dot) 1px, transparent 1.5px) 0 0 / 20px 20px;
   --zen-glow-y: 0;
 }
 
-.sessions-list.zen[data-zen-pattern='diagonal'] {
-  --zen-fill: repeating-linear-gradient(-45deg, var(--zen-line) 0 1px, transparent 1px 14px);
-}
-
-.sessions-list.zen[data-zen-pattern='rings'] {
-  --zen-fill: radial-gradient(circle, transparent 2.5px, var(--zen-line) 3px 3.5px, transparent 4px) 0 0 / 28px 28px;
-}
-
-.sessions-list.zen[data-zen-pattern='grid'] {
-  --zen-fill:
-    linear-gradient(var(--zen-line) 1px, transparent 1px) 0 0 / 24px 24px,
-    linear-gradient(90deg, var(--zen-line) 1px, transparent 1px) 0 0 / 24px 24px;
-}
-
 /* The pattern glows out from the card. The glow has a fixed height, so it looks the same in a short space and a tall one. */
-.sessions-list.zen:not([data-zen-pattern='none'])::after {
+.sessions-list.zen::after {
   background: var(--zen-fill);
   mask-image: radial-gradient(110% 260px at 50% var(--zen-glow-y), rgb(0 0 0 / 0.9), transparent);
 }
@@ -8861,17 +8845,9 @@ select.form-input option:checked {
   accent-color: var(--accent);
 }
 
-.ns-inline .form-input:disabled,
 .ns-check:has(input:disabled) {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.ns-hint {
-  margin-top: 4px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-muted);
 }
 
 .ns-body textarea.form-input {

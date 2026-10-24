@@ -62,6 +62,31 @@ export async function boardFetch(path: string, init?: RequestInit): Promise<Resp
 	}
 }
 
+// Read on every call: a restarted board writes a new token.
+export function terminalToken(): string {
+	const url = boardUrl();
+	if (!url) throw new BoardDownError();
+	const port = new URL(url).port;
+	const token = readJson(joinPath(kanbanDir(), "terminal-tokens", `${port}.json`))?.token;
+	if (typeof token === "string" && token) return token;
+	throw new Error(`No terminal token for the pi-kanban board on port ${port}. It must run with the terminal enabled.`);
+}
+
+// Both vars come from the board terminal's ptyEnv, so only a session started there has them.
+export function boardTerminalId(): string | null {
+	return (process.env.PK_URL && process.env.PK_TERMINAL_ID) || null;
+}
+
+// Under the board's 25 s cap on a long-poll, so each poll answers before the board gives up on it.
+export const POLL_MS = 20_000;
+
+export async function pollSettled<T extends { status: string }>(path: string, init: RequestInit = {}): Promise<T> {
+	for (;;) {
+		const got: T = await okJson(boardFetch(path, { cache: "no-store", ...init }));
+		if (got.status !== "pending") return got;
+	}
+}
+
 export function postJson(path: string, body: unknown, init: RequestInit = {}): Promise<Response> {
 	return boardFetch(path, {
 		...init,

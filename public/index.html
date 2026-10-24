@@ -778,16 +778,6 @@
           </div>
         </div>
         <div class="ns-row ns-extra">
-          <span class="ns-label">Worktree</span>
-          <div class="ns-field">
-            <div class="ns-inline">
-              <label class="ns-check"><input type="checkbox" id="ns-wt"> New worktree</label>
-              <input type="text" id="ns-wt-name" class="form-input" placeholder="Name (optional)" maxlength="64" autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false" disabled aria-label="Worktree name">
-            </div>
-            <div id="ns-wt-hint" class="ns-hint" hidden></div>
-          </div>
-        </div>
-        <div class="ns-row ns-extra">
           <span class="ns-label"></span>
           <div class="ns-field">
             <div class="ns-inline">
@@ -795,16 +785,14 @@
                 <legend><label for="ns-model">Model</label></legend>
                 <select id="ns-model" class="form-input">
                   <option value="">Default</option>
-                  <option value="fable">Fable</option>
-                  <option value="opus">Opus</option>
-                  <option value="sonnet">Sonnet</option>
-                  <option value="haiku">Haiku</option>
                 </select>
               </fieldset>
               <fieldset class="ns-notched">
-                <legend><label for="ns-effort">Effort</label></legend>
-                <select id="ns-effort" class="form-input">
+                <legend><label for="ns-thinking">Thinking</label></legend>
+                <select id="ns-thinking" class="form-input">
                   <option value="">Default</option>
+                  <option value="off">Off</option>
+                  <option value="minimal">Minimal</option>
                   <option value="low">Low</option>
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
@@ -819,7 +807,7 @@
       </div>
       <div class="modal-footer ns-footer">
         <label class="ns-check ns-stay" title="Start in the background and keep the current view"><input type="checkbox" id="ns-stay"> Stay here</label>
-        <label class="ns-check ns-edit" title="Open a shell in the folder with the claude command typed in. Press Enter to run it."><input type="checkbox" id="ns-edit"> Edit before run</label>
+        <label class="ns-check ns-edit" title="Open a shell in the folder with the pi command typed in. Press Enter to run it."><input type="checkbox" id="ns-edit"> Edit before run</label>
         <button type="button" class="btn btn-secondary" onclick="closeNewSession()">Cancel</button>
         <button type="button" id="ns-start" class="btn btn-primary" onclick="startNewSession()" disabled>Start</button>
       </div>

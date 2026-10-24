@@ -1,32 +1,11 @@
-import { join as joinPath } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { BoardDownError, boardFetch, kanbanDir, okJson, postJson, readJson, sessionIdOf, toolText as text } from "./board-api.js";
+import { BoardDownError, boardFetch, boardTerminalId, okJson, pollSettled, POLL_MS, postJson, sessionIdOf, terminalToken, toolText as text } from "./board-api.js";
 import { resolveTarget } from "./panes.js";
 
 type Shown = { title: string; key?: string | null; index: number; count: number; path?: string | null };
 type Answer = { status: "answered"; data: unknown } | { status: "dismissed" | "cancelled" | "gone" | "pending"; reason?: string };
-type Terminal = { id: string; port: string };
-
-// Under the board's 25 s cap, so a wait answers pending before the board gives up on it.
-const WAIT_MS = 20_000;
-
-// Both vars come from the board terminal's ptyEnv, so only a session started there has them.
-function boardTerminal(): Terminal | null {
-	const id = process.env.PK_TERMINAL_ID;
-	let port = "";
-	try {
-		port = new URL(process.env.PK_URL ?? "").port;
-	} catch {}
-	return port && id ? { id, port } : null;
-}
-
-// Read on every call: a restarted board writes a new token.
-function terminalToken(t: Terminal): string {
-	const token = readJson(joinPath(kanbanDir(), "terminal-tokens", `${t.port}.json`))?.token;
-	if (typeof token === "string" && token) return token;
-	throw new Error(`No terminal token for the pi-kanban board on port ${t.port}. It must run with the terminal enabled.`);
-}
+export type AskOpen = { title: string; args: unknown };
 
 export function shownText({ title, key, index, count, path }: Shown, claim: boolean): string {
 	const at = `"${title}" (${key ? `${key}, ` : ""}${index}/${count})`;
@@ -84,9 +63,9 @@ const OVERLAY_SHOW = {
 
 type ShowParams = { title: string; file?: string; kind?: "markdown" | "html"; key?: string; base?: string };
 
-async function showOnTerminal(t: Terminal, sessionId: string, p: ShowParams): Promise<string> {
-	const headers = { "x-terminal-token": terminalToken(t) };
-	const out = await okJson(postJson(`/api/terminals/${encodeURIComponent(t.id)}/show`, { sessionId, ...p }, { headers }));
+async function showOnTerminal(terminalId: string, sessionId: string, p: ShowParams): Promise<string> {
+	const headers = { "x-terminal-token": terminalToken() };
+	const out = await okJson(postJson(`/api/terminals/${encodeURIComponent(terminalId)}/show`, { sessionId, ...p }, { headers }));
 	return shownText(out, p.file == null);
 }
 
@@ -114,19 +93,25 @@ const ASK_GUIDELINES = [
 
 const INTERRUPTED = "Interrupted; the question was closed.";
 
+export const ASK_TOOL = "ask";
+
+// A board ask fires no UI prompt event, so the live state learns of it from these.
+export const ASK_OPEN = "kanban:ask-open";
+export const ASK_CLOSE = "kanban:ask-close";
+
 // The call waits until the user answers or skips. An abort closes the modal, because the run went on without it.
-async function askOnBoard(base: string, headers: Record<string, string>, body: object, title: string, signal?: AbortSignal): Promise<string> {
+async function askOnBoard(pi: ExtensionAPI, base: string, headers: Record<string, string>, body: object, open: AskOpen, signal?: AbortSignal): Promise<string> {
 	const { id } = await okJson(postJson(base, body, { headers, signal }));
 	const at = `${base}/${encodeURIComponent(id)}`;
+	pi.events.emit(ASK_OPEN, open);
 	try {
-		for (;;) {
-			const got: Answer = await okJson(boardFetch(`${at}/wait?ms=${WAIT_MS}`, { headers, signal }));
-			if (got.status !== "pending") return answerText(title, got);
-		}
+		return answerText(open.title, await pollSettled<Answer>(`${at}/wait?ms=${POLL_MS}`, { headers, signal }));
 	} catch (e) {
 		if (!signal?.aborted) throw e;
 		await boardFetch(at, { method: "DELETE", headers }).catch(() => {});
 		throw new Error(INTERRUPTED);
+	} finally {
+		pi.events.emit(ASK_CLOSE, open);
 	}
 }
 
@@ -139,7 +124,7 @@ async function askInTui(ctx: ExtensionContext, title: string, file: string, sign
 }
 
 export function registerShowAsk(pi: ExtensionAPI) {
-	const terminal = boardTerminal();
+	const terminal = boardTerminalId();
 	const show = terminal ? OVERLAY_SHOW : PANE_SHOW;
 
 	pi.registerTool({
@@ -158,7 +143,7 @@ export function registerShowAsk(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "ask",
+		name: ASK_TOOL,
 		label: "Ask",
 		description:
 			"Ask the user through an HTML card in a modal on the pi-kanban board, and wait for the answer, which comes back as the tool result: the data the card sent, as JSON, or a line that says the user skipped. Use it when the answer needs something to see or control: a preview, a diagram, sliders, a long form, a quiz sheet, a playground. Write the card to an HTML file in your scratchpad, then pass it as file.",
@@ -172,9 +157,9 @@ export function registerShowAsk(pi: ExtensionAPI) {
 			const body = { sessionId, title: params.title, file, size: params.size };
 			try {
 				const [base, headers] = terminal
-					? [`/api/terminals/${encodeURIComponent(terminal.id)}/ask`, { "x-terminal-token": terminalToken(terminal) }]
+					? [`/api/terminals/${encodeURIComponent(terminal)}/ask`, { "x-terminal-token": terminalToken() }]
 					: [`/api/sessions/${encodeURIComponent(sessionId)}/ask`, {}];
-				return text(await askOnBoard(base, headers, body, params.title, signal));
+				return text(await askOnBoard(pi, base, headers, body, { title: params.title, args: params }, signal));
 			} catch (e) {
 				if (e instanceof BoardDownError && ctx.hasUI) return text(await askInTui(ctx, params.title, file, signal));
 				throw e;

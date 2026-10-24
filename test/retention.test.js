@@ -36,19 +36,37 @@ const MONTH = 30 * DAY_MS;
 describe('createDispatchedStore', () => {
   it('records a marker with its starter and saves it', () => {
     const { s, writes } = store();
-    s.record('a', { parent: 'p', name: 'w', group: 'g', cwd: '/a', worktree: true });
-    assert.deepEqual(s.get('a'), { parent: 'p', at: 1_000_000_000, name: 'w', group: 'g', cwd: '/a', worktree: true });
+    s.record('a', { parent: 'p', name: 'w', group: 'g', cwd: '/a' });
+    assert.deepEqual(s.get('a'), { parent: 'p', at: 1_000_000_000, name: 'w', group: 'g', cwd: '/a', report: null });
     assert.equal(writes.length, 1);
+  });
+
+  it('keeps the last report of a marker and saves it', () => {
+    const { s, writes, clock } = store();
+    assert.equal(s.setReport('none', 'x'), null);
+    s.record('a', { parent: 'p' });
+    s.setReport('a', 'first');
+    clock.t += 5;
+    assert.deepEqual(s.setReport('a', 'done'), { text: 'done', at: 1_000_000_005 });
+    assert.deepEqual(s.get('a').report, { text: 'done', at: 1_000_000_005 });
+    assert.deepEqual(s.running(() => true).map((r) => [r.session, r.reportedAt, 'report' in r]), [['a', 1_000_000_005, false]]);
+    assert.equal(writes.length, 3);
   });
 
   it('loads valid entries and drops malformed ones', () => {
     const { s } = store({
       saved: {
         version: 1,
-        sessions: { ok: { parent: 'p', status: 'failed', at: 5 }, bad: { status: 'x' }, worse: null },
+        sessions: {
+          ok: { parent: 'p', status: 'failed', at: 5, report: { text: 7, at: 6 } },
+          told: { at: 5, report: { text: 'done', at: 6 } },
+          bad: { status: 'x' },
+          worse: null,
+        },
       },
     });
-    assert.deepEqual(s.get('ok'), { parent: 'p', at: 5, name: null, group: null, cwd: null, worktree: null });
+    assert.deepEqual(s.get('ok'), { parent: 'p', at: 5, name: null, group: null, cwd: null, report: null });
+    assert.deepEqual(s.get('told').report, { text: 'done', at: 6 });
     assert.equal(s.get('bad'), null);
     assert.equal(s.get('worse'), null);
   });
@@ -96,7 +114,7 @@ describe('createDispatchedStore', () => {
     s.record('s-1', { parent: 'p-1', cwd: '/a', name: 'one', group: 'g' });
     s.record('s-2', { parent: 'p-2', cwd: '/b' });
     assert.deepEqual(s.running(() => true, { parent: 'p-1' }), [
-      { session: 's-1', parent: 'p-1', cwd: '/a', name: 'one', group: 'g', worktree: null, startedAt: 1_000_000_000 },
+      { session: 's-1', parent: 'p-1', cwd: '/a', name: 'one', group: 'g', startedAt: 1_000_000_000, reportedAt: null },
     ]);
     assert.deepEqual(s.running((id) => id === 's-2').map((r) => r.session), ['s-2']);
   });
@@ -115,9 +133,9 @@ describe('createDispatchedStore', () => {
 
   it('lists a dispatch again after a restart resumes its terminal', () => {
     const before = store();
-    before.s.record('s-1', { parent: 'p-1', name: 'one', worktree: 'wt' });
+    before.s.record('s-1', { parent: 'p-1', name: 'one', cwd: '/a' });
     const { s } = store({ saved: before.writes.at(-1) });
-    assert.deepEqual(s.running(() => true).map((r) => [r.session, r.name, r.worktree]), [['s-1', 'one', 'wt']]);
+    assert.deepEqual(s.running(() => true).map((r) => [r.session, r.name, r.cwd]), [['s-1', 'one', '/a']]);
   });
 });
 

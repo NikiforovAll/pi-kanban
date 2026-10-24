@@ -121,7 +121,7 @@ describe('CLI server resolution', () => {
     }
   });
 
-  it('passes the args after -- to claude and keeps them out of its own flags', async () => {
+  it('passes the args after -- to pi and keeps them out of its own flags', async () => {
     let body;
     const srv = http.createServer((req, res) => {
       let raw = '';
@@ -135,11 +135,13 @@ describe('CLI server resolution', () => {
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     try {
       const dir = tempConfigDir({ port: srv.address().port, pid: process.pid }, 't');
-      const argv = ['dispatch', 'start', '--spec', 'x', '--cwd', dir, '--name', 'a', '--', '--permission-mode', 'auto', '--worktree'];
-      assert.equal((await runCli(argv, { PI_CODING_AGENT_DIR: dir })).code, 0);
-      assert.deepEqual(body.claudeArgs, ['--permission-mode', 'auto', '--worktree']);
+      const parent = '11111111-1111-4111-8111-111111111111';
+      const argv = ['dispatch', 'start', '--spec', 'x', '--cwd', dir, '--name', 'a', '--thinking', 'high', '--', '--tools', 'read', '--thinking'];
+      assert.equal((await runCli(argv, { PI_CODING_AGENT_DIR: dir, PI_KANBAN_SESSION_ID: parent })).code, 0);
+      assert.deepEqual(body.extraArgs, ['--tools', 'read', '--thinking']);
       assert.equal(body.name, 'a');
-      assert.equal(body.worktree, false);
+      assert.equal(body.thinking, 'high');
+      assert.equal(body.parent, parent);
     } finally {
       srv.close();
     }
@@ -161,7 +163,7 @@ describe('CLI server resolution', () => {
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     try {
       const dir = tempConfigDir({ port: srv.address().port, pid: process.pid }, 't');
-      const env ={ PI_CODING_AGENT_DIR: dir, CLAUDE_CODE_SESSION_ID: parent };
+      const env ={ PI_CODING_AGENT_DIR: dir, PI_KANBAN_SESSION_ID: parent };
       const list = `GET /api/dispatch?parent=${parent}`;
 
       const byName = await runCli(['dispatch', 'end', '--name', 'api-worker'], env);
@@ -209,17 +211,17 @@ describe('CLI server resolution', () => {
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     try {
       const dir = tempConfigDir({ port: srv.address().port, pid: process.pid });
-      const mine = await runCli(['terminal', 'list'], { PI_CODING_AGENT_DIR: dir, CLAUDE_CODE_SESSION_ID: self });
+      const mine = await runCli(['terminal', 'list'], { PI_CODING_AGENT_DIR: dir, PI_KANBAN_SESSION_ID: self });
       assert.equal(mine.code, 0);
       const lines = mine.stdout.trim().split('\n');
       assert.match(lines[0], /^SESSION\s+AGE\s+KIND\s+NAME\s+CWD$/);
       assert.match(lines[1], /^aaaa2222-\S+\s+\S+\s+dispatch \(yours\)\s+api-worker\s+C:\/b$/);
       assert.match(lines[2], /^aaaa3333-\S+\s+\S+\s+dispatch\s+-\s+C:\/c$/);
       assert.match(lines[3], /^aaaa4444-\S+\s+\S+\s+shell\s+/);
-      assert.match(lines[4], /^aaaa1111-\S+\s+\S+\s+claude\s+/);
+      assert.match(lines[4], /^aaaa1111-\S+\s+\S+\s+pi\s+/);
       assert.match(mine.stdout, /dispatch end <session>/);
 
-      const other = await runCli(['terminal', 'list'], { PI_CODING_AGENT_DIR: dir, CLAUDE_CODE_SESSION_ID: '' });
+      const other = await runCli(['terminal', 'list'], { PI_CODING_AGENT_DIR: dir, PI_KANBAN_SESSION_ID: '' });
       assert.doesNotMatch(other.stdout, /yours|dispatch end/);
 
       const json = await runCli(['terminal', 'list', '--json'], { PI_CODING_AGENT_DIR: dir });
@@ -316,7 +318,7 @@ describe('CLI argument parsing', () => {
   });
 
   it('doc list needs a session', async () => {
-    const { code, stderr } = await runCli(['doc', 'list'], { ...env(), PREVIEW_SESSION: '', CLAUDE_CODE_SESSION_ID: '' });
+    const { code, stderr } = await runCli(['doc', 'list'], { ...env(), PREVIEW_SESSION: '', PI_KANBAN_SESSION_ID: '' });
     assert.equal(code, 1);
     assert.match(stderr, /--session is required[\s\S]*help doc list/);
   });

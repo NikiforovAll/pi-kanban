@@ -1,11 +1,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { resolvePiAgentDir, boardDir, displayPath } = require('./lib/board-dir');
+const { resolvePiAgentDir, boardDir, displayPath, SESSION_ID_ENV } = require('./lib/board-dir');
 const { linkUrl } = require('./public/link-url');
 const { sessionProjectKey } = require('./public/project-match');
+const { dispatchLine, matchDispatches } = require('./lib/dispatch-reports');
 // Help is auto-generated from this table — keep flags/usage in sync with `run` behavior.
 const SESSION_FLAG = '--session <id>';
-const SESSION_FLAG_HELP = 'Session, full id or unique prefix (default: $PREVIEW_SESSION, else $CLAUDE_CODE_SESSION_ID)';
+const SESSION_FLAG_HELP = 'Session, full id or unique prefix (default: $PREVIEW_SESSION, else $PI_KANBAN_SESSION_ID)';
 
 const COMMANDS = {
   doc: {
@@ -48,11 +49,11 @@ const COMMANDS = {
         summary: 'Open a markdown or HTML file in the preview modal on connected browser tabs',
         usage: 'pi-kanban doc preview <file.md|file.html|url> [--session <id>]',
         flags: {
-          [SESSION_FLAG]: 'Switch focused session in the browser (does not link the file; default: $PREVIEW_SESSION). For a URL, the session it links to (default: $PREVIEW_SESSION, else $CLAUDE_CODE_SESSION_ID).',
+          [SESSION_FLAG]: 'Switch focused session in the browser (does not link the file; default: $PREVIEW_SESSION). For a URL, the session it links to (default: $PREVIEW_SESSION, else $PI_KANBAN_SESSION_ID).',
         },
         notes: 'The modal opens on the user\'s screen: the only command that does. HTML renders in a sandboxed iframe; local stylesheets, scripts and images are inlined. Relative paths resolve against the current dir. An http(s) URL is linked to the session instead, and the tab on screen shows an Open button.',
         examples: [
-          'pi-kanban doc preview ./notes.md --session $CLAUDE_SESSION_ID',
+          'pi-kanban doc preview ./notes.md --session $PI_KANBAN_SESSION_ID',
         ],
         run: runPreviewCli,
       },
@@ -138,7 +139,7 @@ const COMMANDS = {
         flags: {
           '<id>': 'Full session id, or a unique prefix',
         },
-        examples: ['pi-kanban session open $CLAUDE_SESSION_ID'],
+        examples: ['pi-kanban session open $PI_KANBAN_SESSION_ID'],
         run: runSessionOpenCli,
       },
       view: {
@@ -149,7 +150,7 @@ const COMMANDS = {
           '--json': 'Output JSON instead of formatted sections',
         },
         notes: 'To learn what a session did, read its transcript (a .jsonl file, newest lines last).',
-        examples: ['pi-kanban session view $CLAUDE_SESSION_ID'],
+        examples: ['pi-kanban session view $PI_KANBAN_SESSION_ID'],
         run: runSessionViewCli,
       },
       plan: {
@@ -170,7 +171,7 @@ const COMMANDS = {
           '--json': 'Output JSON ({agents, waitingForUser})',
         },
         notes: 'Needs the pi-kanban hooks in this config dir (pi-kanban --install); without them the list is empty.',
-        examples: ['pi-kanban session agents $CLAUDE_SESSION_ID'],
+        examples: ['pi-kanban session agents $PI_KANBAN_SESSION_ID'],
         run: runSessionAgentsCli,
       },
       pin: {
@@ -182,8 +183,8 @@ const COMMANDS = {
           '--unpin': 'Clear pin/sticky state',
         },
         examples: [
-          'pi-kanban session pin $CLAUDE_SESSION_ID --sticky',
-          'pi-kanban session pin $CLAUDE_SESSION_ID --unpin',
+          'pi-kanban session pin $PI_KANBAN_SESSION_ID --sticky',
+          'pi-kanban session pin $PI_KANBAN_SESSION_ID --unpin',
         ],
         run: runSessionPinCli,
       },
@@ -201,10 +202,10 @@ const COMMANDS = {
         },
         notes: 'The session leaves the group it was in. In a group that holds its project, it shows in that project\'s block.',
         examples: [
-          'pi-kanban session group $CLAUDE_SESSION_ID "Auth refactor"',
+          'pi-kanban session group $PI_KANBAN_SESSION_ID "Auth refactor"',
           'pi-kanban session group 3fa9c1 auth-refactor/swarm-1 --create',
-          'pi-kanban session group 3fa9c1 --with $CLAUDE_SESSION_ID --create',
-          'pi-kanban session group 3fa9c1 --parent $CLAUDE_SESSION_ID',
+          'pi-kanban session group 3fa9c1 --with $PI_KANBAN_SESSION_ID --create',
+          'pi-kanban session group 3fa9c1 --parent $PI_KANBAN_SESSION_ID',
         ],
         run: runSessionGroupCli,
       },
@@ -216,7 +217,7 @@ const COMMANDS = {
           '--json': 'Output JSON ({left, rev})',
         },
         notes: 'A session whose project is in a group still shows there; move the project on the board.',
-        examples: ['pi-kanban session ungroup $CLAUDE_SESSION_ID'],
+        examples: ['pi-kanban session ungroup $PI_KANBAN_SESSION_ID'],
         run: runSessionUngroupCli,
       },
     },
@@ -296,7 +297,7 @@ const COMMANDS = {
           '--json': 'Output JSON instead of a table',
         },
         examples: [
-          'pi-kanban task list $CLAUDE_SESSION_ID',
+          'pi-kanban task list $PI_KANBAN_SESSION_ID',
           'pi-kanban task list --all --status in_progress',
         ],
         run: runTaskListCli,
@@ -318,27 +319,26 @@ const COMMANDS = {
     },
   },
   dispatch: {
-    summary: 'Start, list and end Claude Code sessions for tasks in pi-kanban\'s terminal',
+    summary: 'Start, list and end pi sessions for tasks in pi-kanban\'s terminal',
     verbs: {
       start: {
-        summary: 'Start claude in pi-kanban\'s terminal with a task; prints the session id',
-        usage: 'pi-kanban dispatch start --cwd <dir> (--spec <text> | --spec-file <path>) [--name <n>] [--group <g>] [--model <m>] [--worktree [name]] [--task-list [id]] [--json] [-- <claude args>...]',
+        summary: 'Start pi in pi-kanban\'s terminal with a task; prints the session id',
+        usage: 'pi-kanban dispatch start --cwd <dir> (--spec <text> | --spec-file <path>) [--name <n>] [--group <g>] [--model <m>] [--thinking <level>] [--json] [-- <pi args>...]',
         flags: {
           '--cwd <dir>': 'Folder to run in (any existing folder, default: current dir)',
           '--spec <text>': 'The task, self-contained; sent as the first message',
           '--spec-file <path>': 'Read the task from a file',
-          '--name <n>': 'Session name; also its peer name for SendMessage',
+          '--name <n>': 'Session name',
           '--group <g>': 'Add it to this group: a name, path or id. The groups it makes are transient (see `help group list`)',
-          '--model <m>': 'fable, opus, sonnet or haiku',
-          '--worktree [name]': 'Run in a new git worktree',
-          '--task-list [id]': 'Use this task list instead of its own (default: this session\'s list), so its cards show on one board with yours. Off unless given',
+          '--model <m>': 'pi model pattern, provider/id (see `pi --list-models`)',
+          '--thinking <level>': 'off, minimal, low, medium, high, xhigh or max',
           '--json': 'Output JSON',
-          '-- <claude args>': 'Passed to claude as they are, e.g. --permission-mode auto. No quotes, % or control characters; pi-kanban sets --session-id, --name, --model and --worktree',
+          '-- <pi args>': 'Passed to pi as they are, e.g. --tools read,bash. No quotes, % or control characters; pi-kanban sets --session-id, --name, --model and --thinking',
         },
-        notes: 'Needs the terminal token, so it runs on the machine of the pi-kanban server. pi-kanban sends no report: say in the spec how the session reports back. Run `pi-kanban skills get dispatch` for how to write the spec.',
+        notes: 'Needs the terminal token, so it runs on the machine of the pi-kanban server. The session gets the dispatch_report tool and reports through the board; its starter reads the report with the dispatch_wait tool. Run `pi-kanban skills get dispatch` for how to write the spec.',
         examples: [
-          'pi-kanban dispatch start --cwd . --spec-file spec.md --name fix-login-redirect --group auth-refactor --model sonnet -- --permission-mode auto',
-          'pi-kanban dispatch start --cwd . --spec-file spec.md --name api-worker --task-list',
+          'pi-kanban dispatch start --cwd . --spec-file spec.md --name fix-login-redirect --group auth-refactor --thinking high',
+          'pi-kanban dispatch start --cwd . --spec "Run the tests and report the failures" --model codemie/gpt-6-luna',
         ],
         run: runDispatchStartCli,
       },
@@ -359,7 +359,7 @@ const COMMANDS = {
           '--name <n>': 'The session\'s --name from dispatch start',
           '--json': 'Output JSON',
         },
-        notes: 'Needs the terminal token, like dispatch start. The worktree stays.',
+        notes: 'Needs the terminal token, like dispatch start.',
         examples: ['pi-kanban dispatch end --name api-worker'],
         run: runDispatchEndCli,
       },
@@ -632,7 +632,7 @@ async function runPreviewCli(args) {
   }
   const url = linkUrl(filePathArg);
   if (url) return previewUrlCli(url, args);
-  // No $CLAUDE_CODE_SESSION_ID fallback: a session here switches the board's focus, and the
+  // No $PI_KANBAN_SESSION_ID fallback: a session here switches the board's focus, and the
   // agent must not move the board unless asked.
   const sessionArg = getArgValue(args, 'session') || process.env.PREVIEW_SESSION || null;
   const resolved = sessionArg && await resolveSessionByIdOrPrefix(sessionArg);
@@ -666,7 +666,7 @@ async function postDocLink(target, sessionId, { unlink = false, open = false } =
 
 // Resolved to the full id because the browser keys linked docs by it, so a prefix won't match.
 async function resolveSessionArg(entry, args, why) {
-  const sessionArg = getArgValue(args, 'session') || process.env.PREVIEW_SESSION || process.env.CLAUDE_CODE_SESSION_ID;
+  const sessionArg = getArgValue(args, 'session') || process.env.PREVIEW_SESSION || process.env[SESSION_ID_ENV];
   if (!sessionArg) {
     usageError(entry, `--session is required: ${why}`);
     return null;
@@ -1386,7 +1386,7 @@ function readTerminalToken() {
 async function runDispatchStartCli(argv) {
   const sep = argv.indexOf('--');
   const args = sep === -1 ? argv : argv.slice(0, sep);
-  const claudeArgs = sep === -1 ? [] : argv.slice(sep + 1);
+  const extraArgs = sep === -1 ? [] : argv.slice(sep + 1);
   const token = readTerminalToken();
   if (!token) return 1;
   let spec;
@@ -1398,23 +1398,15 @@ async function runDispatchStartCli(argv) {
   const hasGroup = args.some(a => a === '--group' || a.startsWith('--group='));
   const group = hasGroup ? getArgValue(args, 'group') || '' : null;
   if (hasGroup && !group.trim()) return usageError(COMMANDS.dispatch.verbs.start, '--group needs a group name, path or id');
-  const worktree = args.includes('--worktree') ? getArgValue(args, 'worktree') || true : false;
-  const hasTaskList = args.some(a => a === '--task-list' || a.startsWith('--task-list='));
-  const ownList = process.env.CLAUDE_CODE_TASK_LIST_ID || process.env.CLAUDE_CODE_SESSION_ID;
-  const taskList = hasTaskList ? getArgValue(args, 'task-list') || ownList || null : null;
-  if (hasTaskList && !taskList) {
-    return usageError(COMMANDS.dispatch.verbs.start, 'No task list id: pass --task-list <id> outside a Claude Code session');
-  }
   const body = {
     cwd: canonicalDir(getArgValue(args, 'cwd') || '.'),
     spec,
     name: getArgValue(args, 'name'),
     model: getArgValue(args, 'model'),
-    worktree,
-    taskList,
+    thinking: getArgValue(args, 'thinking'),
     group,
-    claudeArgs,
-    parent: process.env.CLAUDE_CODE_SESSION_ID || null,
+    extraArgs,
+    parent: process.env[SESSION_ID_ENV] || null,
   };
   try {
     const out = await cliPostJson('/api/dispatch', body, 'Dispatch', { 'x-terminal-token': token });
@@ -1428,11 +1420,9 @@ async function runDispatchStartCli(argv) {
 
 async function fetchDispatches(all) {
   const q = new URLSearchParams();
-  if (!all && process.env.CLAUDE_CODE_SESSION_ID) q.set('parent', process.env.CLAUDE_CODE_SESSION_ID);
+  if (!all && process.env[SESSION_ID_ENV]) q.set('parent', process.env[SESSION_ID_ENV]);
   return (await cliGetJson(`/api/dispatch?${q}`, 'Dispatch list')).running.sort((a, b) => b.startedAt - a.startedAt);
 }
-
-const dispatchLine = (r) => `${r.session}${r.name ? `  ${r.name}` : ''}${r.group ? `  [${r.group}]` : ''}`;
 
 async function runDispatchListCli(args) {
   try {
@@ -1456,7 +1446,7 @@ async function runDispatchEndCli(args) {
   const token = readTerminalToken();
   if (!token) return 1;
   try {
-    const matches = (await fetchDispatches(false)).filter(r => name ? r.name === name : r.session.startsWith(id));
+    const matches = matchDispatches(await fetchDispatches(false), name || id);
     if (!matches.length) {
       console.error(`No running dispatch matches "${name || id}". Run "pi-kanban dispatch list".`);
       return 1;
@@ -1476,7 +1466,7 @@ async function runDispatchEndCli(args) {
 
 function terminalKind(t, self) {
   if (t.dispatched) return self && t.dispatched.parent === self ? 'dispatch (yours)' : 'dispatch';
-  return t.mode === 'shell' ? 'shell' : 'claude';
+  return t.mode === 'shell' ? 'shell' : 'pi';
 }
 
 async function runTerminalListCli(args) {
@@ -1492,7 +1482,7 @@ async function runTerminalListCli(args) {
     console.log('No terminals.');
     return 0;
   }
-  const self = process.env.CLAUDE_CODE_SESSION_ID;
+  const self = process.env[SESSION_ID_ENV];
   printTable(['SESSION', 'AGE', 'KIND', 'NAME', 'CWD'], rows.map(t => [t.id, ageOf(t.startedAt), terminalKind(t, self), t.name || '-', t.cwd || '-']));
   if (rows.some(t => self && t.dispatched?.parent === self)) {
     console.log('\nEnd one of yours with `pi-kanban dispatch end <session>`. The user ends the others from the board.');
