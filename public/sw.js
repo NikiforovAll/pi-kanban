@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cc-kanban-v2';
+const CACHE_NAME = 'pi-kanban-v1';
 const PRECACHE_URLS = ['/', '/style.css', '/project-match.js', '/link-url.js', '/group-tree.js', '/app.js'];
 
 let cachePromise = null;
