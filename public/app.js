@@ -15713,7 +15713,7 @@ function hideTerminalPrompt() {
   document.getElementById('terminal-prompt').classList.remove('visible');
 }
 
-const TERMINAL_BOOT_VERBS = ['Waking Claude…', 'Clawding…', 'Warming up the terminal…', 'Summoning the session…'];
+const TERMINAL_BOOT_VERBS = ['Waking pi…', 'Computing digits of π…', 'Warming up the terminal…', 'Summoning the session…'];
 const TERMINAL_BOOT_MAX_MS = 15000;
 // The server answers `ready` as soon as the socket attaches, even before Claude draws, so a wait
 // this long is the connection: under the hub a loopback connect can hang until its timeout.
@@ -16091,12 +16091,12 @@ function formatTerminalProc(s) {
 
 async function pollTerminalProcStats() {
   if (!isOnScreen()) return;
-  let pi-kanban;
+  let pk;
   let host;
   const stats = await getJson('/api/terminals/stats', null, { cache: 'no-store' });
   if (!stats) return;
-  ({ pi-kanban, host, terminals: terminalProcStats } = stats);
-  const parts = [pi-kanban && `pi-kanban ${formatTerminalProc(pi-kanban)}`, host && `terminal host ${formatTerminalProc(host)}`];
+  ({ pk, host, terminals: terminalProcStats } = stats);
+  const parts = [pk && `pi-kanban ${formatTerminalProc(pk)}`, host && `terminal host ${formatTerminalProc(host)}`];
   document.getElementById('terminal-manager-stats').textContent = parts.filter(Boolean).join(' · ');
   for (const el of document.querySelectorAll('#terminal-manager-body [data-proc]')) {
     el.textContent = formatTerminalProc(terminalProcStats[el.dataset.proc]);
@@ -16428,7 +16428,7 @@ const askState = { terminalId: null, ask: null, frame: null, frameH: 0, hidden: 
 // Runs inside the card as source text, ahead of the card's own scripts. The JSON round trip makes
 // the answer cloneable, and a value that is not JSON throws in the card.
 function askBridge() {
-  window.pi-kanban = {
+  window.pk = {
     send: (data) => parent.postMessage({ type: 'pk-ask:send', data: JSON.parse(JSON.stringify(data ?? null)) }, '*'),
   };
 }
@@ -18188,7 +18188,7 @@ if (urlState.search) {
 }
 
 {
-  const verbs = ['Clawding…', 'Shuffling cards…', 'Herding tasks…', 'Waking sessions…', 'Sorting the board…'];
+  const verbs = ['Baking pi…', 'Shuffling cards…', 'Herding tasks…', 'Waking sessions…', 'Sorting the board…'];
   document.getElementById('boot-verb').textContent = pickRandom(verbs);
 }
 

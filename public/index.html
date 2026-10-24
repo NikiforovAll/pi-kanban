@@ -13,7 +13,7 @@
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#e8e6e3" media="(prefers-color-scheme: light)">
-  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
   <link rel="stylesheet" href="/fonts/fonts.css">
@@ -38,25 +38,22 @@
   </svg>
   <div id="offline-overlay" class="offline-overlay">
     <div class="offline-card">
-      <div class="clawd-sleep" aria-hidden="true">
-        <svg class="clawd clawd-asleep" viewBox="1 0 16 10" shape-rendering="crispEdges">
-          <rect x="3" y="0" width="12" height="2"/>
-          <rect x="3" y="2" width="2" height="2"/>
-          <rect x="5" y="2" width="1" height="1"/>
-          <rect x="6" y="2" width="6" height="2"/>
-          <rect x="12" y="2" width="1" height="1"/>
-          <rect x="13" y="2" width="2" height="2"/>
-          <rect x="1" y="4" width="16" height="2"/>
-          <rect x="3" y="6" width="12" height="2"/>
-          <rect x="4" y="8" width="1" height="2"/>
-          <rect x="6" y="8" width="1" height="2"/>
-          <rect x="11" y="8" width="1" height="2"/>
-          <rect x="13" y="8" width="1" height="2"/>
+      <div class="mascot-sleep" aria-hidden="true">
+        <svg class="mascot mascot-asleep" viewBox="1 0 16 10" shape-rendering="crispEdges">
+          <rect x="2" y="0" width="14" height="1"/>
+          <rect x="1" y="1" width="16" height="1"/>
+          <rect x="1" y="2" width="4" height="1"/>
+          <rect x="7" y="2" width="4" height="1"/>
+          <rect x="13" y="2" width="4" height="1"/>
+          <rect x="1" y="3" width="16" height="1"/>
+          <rect x="4" y="4" width="2" height="6"/>
+          <rect x="12" y="4" width="2" height="4"/>
+          <rect x="12" y="8" width="4" height="2"/>
         </svg>
-        <span class="clawd-zzz">z</span>
+        <span class="mascot-zzz">z</span>
       </div>
       <h2>Server Not Running</h2>
-      <p>The dashboard needs the Claude Code Kanban server to stream live task data. Start it with:</p>
+      <p>The dashboard needs the pi-kanban server to stream live task data. Start it with:</p>
       <code>pi-kanban</code>
       <button class="btn btn-primary" onclick="location.reload()">Retry Connection</button>
       <div class="offline-status" id="offline-status" aria-live="polite"></div>
@@ -200,21 +197,19 @@
     <!-- Main -->
     <main class="main">
       <div class="boot-splash" aria-hidden="true">
-        <svg class="clawd clawd-jump" viewBox="1 0 16 10" shape-rendering="crispEdges">
-          <g id="clawd-shape">
-            <rect x="3" y="0" width="12" height="2"/>
-            <rect x="3" y="2" width="2" height="2"/>
-            <rect x="6" y="2" width="6" height="2"/>
-            <rect x="13" y="2" width="2" height="2"/>
-            <rect x="1" y="4" width="16" height="2"/>
-            <rect x="3" y="6" width="12" height="2"/>
-            <rect x="4" y="8" width="1" height="2"/>
-            <rect x="6" y="8" width="1" height="2"/>
-            <rect x="11" y="8" width="1" height="2"/>
-            <rect x="13" y="8" width="1" height="2"/>
+        <svg class="mascot mascot-jump" viewBox="1 0 16 10" shape-rendering="crispEdges">
+          <g id="mascot-shape">
+            <rect x="2" y="0" width="14" height="1"/>
+            <rect x="1" y="1" width="5" height="2"/>
+            <rect x="7" y="1" width="4" height="2"/>
+            <rect x="12" y="1" width="5" height="2"/>
+            <rect x="1" y="3" width="16" height="1"/>
+            <rect x="4" y="4" width="2" height="6"/>
+            <rect x="12" y="4" width="2" height="4"/>
+            <rect x="12" y="8" width="4" height="2"/>
           </g>
         </svg>
-        <p id="boot-verb">Clawding…</p>
+        <p id="boot-verb">Baking pi…</p>
       </div>
       <div id="no-session" class="empty-state idle-board">
         <div class="idle-ghost" aria-hidden="true">
@@ -224,8 +219,8 @@
         </div>
         <div class="idle-glow" aria-hidden="true"><span></span><span></span></div>
         <div class="idle-content">
-          <div class="idle-clawd" aria-hidden="true">
-            <svg class="clawd" viewBox="1 0 16 10" shape-rendering="crispEdges"><use href="#clawd-shape"/></svg>
+          <div class="idle-mascot" aria-hidden="true">
+            <svg class="mascot" viewBox="1 0 16 10" shape-rendering="crispEdges"><use href="#mascot-shape"/></svg>
           </div>
           <p class="idle-title">Select a session to view tasks</p>
           <div class="idle-hint sp-hint"><kbd>↑</kbd><kbd>↓</kbd> move <span>·</span> <kbd>Enter</kbd> open <span>·</span> <kbd>?</kbd> shortcuts</div>
@@ -373,7 +368,7 @@
           </div>
           <div id="terminal-prompt" class="terminal-prompt"></div>
           <div id="terminal-boot" class="terminal-boot" aria-hidden="true">
-            <svg class="clawd clawd-jump" viewBox="1 0 16 10" shape-rendering="crispEdges"><use href="#clawd-shape"/></svg>
+            <svg class="mascot mascot-jump" viewBox="1 0 16 10" shape-rendering="crispEdges"><use href="#mascot-shape"/></svg>
             <p id="terminal-boot-verb"></p>
             <p class="terminal-boot-slow">Slow to connect. Press <kbd>R</kbd> to reconnect.</p>
           </div>

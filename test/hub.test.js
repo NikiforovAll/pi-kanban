@@ -10,7 +10,7 @@ const read = (file) => readFileSync(path.join(__dirname, '..', file), 'utf8');
 
 // Runs the vendored SDK and the page's HUB_INTEGRATION region against stub browser globals.
 async function loadShim({ enabled = true, costUrl = null, marketplaceUrl = null, memoryUrl = null } = {}) {
-  const region = /\/\/ #region HUB_INTEGRATION\n([\s\S]*?)\/\/ #endregion/.exec(read('public/app.js'))[1];
+  const region = /\/\/ #region HUB_INTEGRATION\r?\n([\s\S]*?)\/\/ #endregion/.exec(read('public/app.js'))[1];
   const listeners = { keydown: [], message: [], click: [], load: [] };
   const on = (type, fn) => listeners[type]?.push(fn);
   const posted = [];

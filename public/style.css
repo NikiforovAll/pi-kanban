@@ -405,33 +405,33 @@ body::before {
   border: 1px solid var(--border);
   border-radius: 12px;
 }
-.clawd-sleep {
+.mascot-sleep {
   position: relative;
   display: inline-block;
   margin-bottom: 1.5rem;
 }
 
-.clawd-asleep {
+.mascot-asleep {
   display: block;
-  animation: clawd-breathe 3s ease-in-out infinite;
+  animation: mascot-breathe 3s ease-in-out infinite;
 }
 
-.clawd-zzz {
+.mascot-zzz {
   position: absolute;
   top: -6px;
   right: -14px;
   color: var(--text-muted);
   font: 600 13px var(--mono, monospace);
-  animation: clawd-zzz 3s ease-out infinite;
+  animation: mascot-zzz 3s ease-out infinite;
 }
 
-@keyframes clawd-breathe {
+@keyframes mascot-breathe {
   50% {
     transform: scaleY(0.93);
   }
 }
 
-@keyframes clawd-zzz {
+@keyframes mascot-zzz {
   from {
     opacity: 0;
     transform: translate(0, 6px);
@@ -446,8 +446,8 @@ body::before {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .clawd-asleep,
-  .clawd-zzz {
+  .mascot-asleep,
+  .mascot-zzz {
     animation: none;
   }
 }
@@ -1004,7 +1004,7 @@ body.booting .boot-splash {
   animation: boot-fade 0.3s ease-out 0.15s both;
 }
 
-.clawd {
+.mascot {
   width: 64px;
   height: 40px;
   fill: #d97757;
@@ -1012,11 +1012,11 @@ body.booting .boot-splash {
   transform-origin: 50% 100%;
 }
 
-.clawd-jump {
-  animation: clawd-jump 0.9s ease-in-out infinite;
+.mascot-jump {
+  animation: mascot-jump 0.9s ease-in-out infinite;
 }
 
-@keyframes clawd-jump {
+@keyframes mascot-jump {
   0%,
   100% {
     transform: translateY(0) scale(1, 1);
@@ -1044,7 +1044,7 @@ body.booting .boot-splash {
 @media (prefers-reduced-motion: reduce) {
   .session-skeleton span,
   .msg-log-loading-row span,
-  .clawd-jump {
+  .mascot-jump {
     animation: none;
   }
 }
@@ -1811,18 +1811,18 @@ body.booting .boot-splash {
   gap: 10px;
 }
 
-.idle-clawd {
+.idle-mascot {
   position: relative;
   padding-bottom: 10px;
   margin-bottom: 6px;
 }
 
-.idle-clawd .clawd {
+.idle-mascot .mascot {
   display: block;
   animation: idle-float 3.2s ease-in-out infinite;
 }
 
-.idle-clawd::after {
+.idle-mascot::after {
   content: '';
   position: absolute;
   left: 50%;
@@ -1860,8 +1860,8 @@ body.booting .boot-splash {
 
 @media (prefers-reduced-motion: reduce) {
   .idle-glow span,
-  .idle-clawd .clawd,
-  .idle-clawd::after {
+  .idle-mascot .mascot,
+  .idle-mascot::after {
     animation: none;
   }
 }
