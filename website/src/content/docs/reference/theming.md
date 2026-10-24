@@ -1,78 +1,42 @@
 ---
 title: Theming
-description: Built-in themes, the 15 color tokens, and how to add your own theme.
+description: The light and dark modes and the 17 color themes of the board.
 ---
 
-pi-kanban ships with four built-in themes and supports user-defined themes. Themes are simple JSON files declaring 15 design-token colors; derived `*-dim` / `*-glow` variants are computed automatically.
+The board has a light and a dark mode, and 17 color themes. Each color theme has a light and a dark variant.
 
-## Built-in themes
+## Light and dark
 
-| ID                    | Mode  | Description                             |
-| --------------------- | ----- | --------------------------------------- |
-| `pi-light`            | light | pi.dev palette, light variant (default) |
-| `pi-dark`             | dark  | pi.dev palette, dark variant (default)  |
-| `kanban-default`      | light | Original kanban light theme             |
-| `kanban-dark-default` | dark  | Original kanban dark theme              |
+Press `T` or click the sun or moon button in the header to switch the mode. Until you pick one, the board follows the mode of your system.
 
-The dark/light toggle button switches between the configured light and dark themes.
+## Color themes
 
-## Configuring themes
+Click the palette button in the header and pick a theme:
 
-Configure themes via `~/.pi/agent/kanban/settings.json`:
+| ID            | Name          |
+| ------------- | ------------- |
+| `ember`       | Ember (default) |
+| `gruvbox`     | Gruvbox       |
+| `catppuccin`  | Catppuccin    |
+| `tokyo-night` | Tokyo Night   |
+| `solarized`   | Solarized     |
+| `dracula`     | Dracula       |
+| `nord`        | Nord          |
+| `rose-pine`   | Rosé Pine     |
+| `everforest`  | Everforest    |
+| `kanagawa`    | Kanagawa      |
+| `one-dark`    | One Dark      |
+| `night-owl`   | Night Owl     |
+| `monokai`     | Monokai Pro   |
+| `github`      | GitHub        |
+| `ayu`         | Ayu           |
+| `vitesse`     | Vitesse       |
+| `synthwave`   | Synthwave '84 |
 
-```json
-{
-  "themes": {
-    "light": "pi-light",
-    "dark": "pi-dark"
-  }
-}
-```
+A color theme changes the background, text, border, and accent colors. Status colors (success, warning, error) stay the same in every theme.
 
-## Environment variable overrides
+The terminal takes its colors from the theme too, so pi's output follows the mode. Cards from the `show` and `ask` tools read the same colors from CSS variables such as `--color-bg`, `--color-text`, and `--color-accent`.
 
-Take precedence over `settings.json`. Useful for one-off runs.
+## Where the choice is kept
 
-| Variable             | Effect                      |
-| -------------------- | --------------------------- |
-| `KANBAN_LIGHT_THEME` | Theme ID used in light mode |
-| `KANBAN_DARK_THEME`  | Theme ID used in dark mode  |
-| `KANBAN_THEME_DIR`   | User theme directory        |
-
-## Authoring a custom theme
-
-Drop a JSON file in `~/.pi/agent/kanban/themes/` (or your configured `KANBAN_THEME_DIR`):
-
-```json
-{
-  "name": "my-theme",
-  "displayName": "My Theme",
-  "mode": "dark",
-  "colors": {
-    "bgDeep": "#0d1116",
-    "bgSurface": "#161d27",
-    "bgElevated": "#212730",
-    "bgHover": "#252f3d",
-    "border": "#495059",
-    "textPrimary": "#ebe7e4",
-    "textSecondary": "#d5d8db",
-    "textTertiary": "#9fa4ab",
-    "textMuted": "#757d89",
-    "accent": "#6a9fcc",
-    "accentText": "#8fb6d8",
-    "success": "#4ade80",
-    "warning": "#fbbf24",
-    "plan": "#c084fc"
-  }
-}
-```
-
-Required fields: `name`, `mode` (`"light"` or `"dark"`), and all `colors.*` keys. Themes failing validation are skipped with a server-side warning.
-
-Reference it from `~/.pi/agent/kanban/settings.json`:
-
-```json
-{ "themes": { "dark": "my-theme" } }
-```
-
-Restart the server (`/kanban restart`) to pick up new themes.
+The board keeps the mode and the color theme in the browser's local storage (`theme` and `color-theme`). Each browser profile keeps its own choice. Nothing is written to disk on the server.

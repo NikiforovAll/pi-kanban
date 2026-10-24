@@ -9,7 +9,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'pi-kanban',
-			description: 'A live board for every pi coding agent session on your machine.',
+			description: 'An agent development environment for the pi coding agent: sessions, terminal, todos, and subagents in one board.',
 			favicon: '/favicon.svg',
 			head: [
 				{ tag: 'meta', attrs: { property: 'og:image', content: 'https://nikiforovall.blog/pi-kanban/og.png' } },

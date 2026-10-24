@@ -1,14 +1,14 @@
 ---
 title: Getting started
-description: Install pi-kanban as a pi package, start the board, and see your sessions live.
+description: Install pi-kanban as a pi package, start the board, and run pi sessions in it.
 ---
 
 import Shot from '../../kit/Shot.astro';
 import Lightbox from '../../kit/Lightbox.astro';
 
-pi-kanban shows your pi coding agent sessions in the browser. Each session gets a board with Pending, In Progress and Completed columns, a session log, and a list of its subagents.
+pi-kanban is an agent development environment for the pi coding agent. It runs pi sessions in a browser terminal and shows each session's todos, subagents, plan, and linked docs next to it. The pi tools it adds let the agent show you cards, ask you questions, and hand tasks to other sessions.
 
-<Shot themed="board" alt="The board with the session sidebar and the Pending, In Progress and Completed columns of one session" eager />
+<Shot themed="terminal" alt="A pi session in the board terminal, with the session sidebar on the left and a show card at the top right" eager />
 
 ## Requirements
 
@@ -19,23 +19,31 @@ pi-kanban shows your pi coding agent sessions in the browser. Each session gets 
 
 ```sh
 pi install npm:pi-kanban
+npm install -g pi-kanban
 ```
 
-This adds the `/kanban` command to pi.
+The first command adds the `/kanban` command and the board tools to pi. The second installs the `pi-kanban` command, which runs the board.
 
 ## Start the board
 
-Run these inside pi:
+Run this in a shell:
 
-```text
-/kanban start
-/kanban open web
+```sh
+pi-kanban
 ```
 
-The server runs on port 3460. Use pi as usual, and sessions, todos and subagents appear on the board. See the [user guide](../guides/user-guide/) for every `/kanban` command.
+The board listens on `127.0.0.1:3460` and prints its URL with the access token. Open that URL, then click **+ New** to start pi in the board terminal.
 
-:::note[Run it without pi packages]
-`npx pi-kanban` starts the board on its own, outside pi.
+When pi runs in another terminal, run this inside pi to open the board with its token:
+
+```text
+/kanban open
+```
+
+Sessions, todos, and subagents appear on the board as pi works. See the [user guide](../guides/user-guide/) for every command and flag.
+
+:::note[Security]
+The board listens on loopback only. The terminal needs a token that the board keeps in the URL fragment (`#t=...`), so the browser never sends it to a server. Do not share that URL.
 :::
 
 ## Fill the board

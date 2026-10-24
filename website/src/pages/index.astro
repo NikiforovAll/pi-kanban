@@ -15,40 +15,67 @@ const VIDEO = 'https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/ass
 const watch = [
   {
     title: 'Todos move as pi works',
-    body: 'Pending, in progress, completed. The session log beside the board shows every prompt, reply, and tool call in order. [Shift+L] opens it.',
+    body: 'Pending, in progress, completed. The agents log under the board lists every subagent, and the session log shows each prompt, reply, and tool call in order. [Ctrl+Shift+L] opens it.',
     shot: 'board',
-    alt: 'Board with three columns of todos and the session log open on the right',
+    alt: 'Board with three columns of todos, two document tabs, and the agents log',
   },
   {
-    title: 'Read what each subagent planned',
-    body: 'The agents log lists every subagent with its model, status, tool count, tokens, and run time. Open one to read its prompt and the full response, rendered as markdown.',
+    title: 'Run pi in the board',
+    body: 'Each session opens pi in a terminal next to its board. Close the browser tab and pi keeps running in the board server; open it again and you are back where you were. [Ctrl+`] shows or hides the terminal.',
+    shot: 'terminal',
+    alt: 'A pi session in the board terminal, with a show card over its top right corner',
+  },
+  {
+    title: 'Answer the agent in place',
+    body: 'The ask tool puts an HTML card in a modal: a form, a choice between two layouts, sliders over a preview. pi waits for your answer, and the sidebar counts the sessions that wait on you.',
+    shot: 'ask',
+    alt: 'An ask modal over the terminal with two layout choices and a Send button',
+  },
+  {
+    title: 'Start a session from the board',
+    body: 'Click + New or press [Ctrl+Alt+N]. Pick a folder from your projects, then give a name, a first prompt, a model, and a thinking level.',
+    shot: 'new-session',
+    alt: 'New session dialog with the folder field showing two matching projects',
+  },
+  {
+    title: 'Hand work to another session',
+    body: 'dispatch_start starts a worker session in the board terminal with a self-contained task. The worker sends one report with dispatch_report, and the parent session gets it from dispatch_wait.',
+    shot: 'dispatch',
+    alt: 'A dispatched load-test session and its log, which ends with the report it sent back',
+  },
+  {
+    title: 'Read what each subagent did',
+    body: 'Open a subagent from the agents log to read its prompt and the full response, rendered as markdown, with its model, status, and run time.',
     shot: 'subagent',
-    alt: 'A planner subagent with its checkout split plan, a component table, and the shared state shape',
-  },
-  {
-    title: 'Follow a review while it runs',
-    body: 'A running subagent streams into the same view. Watch a reviewer flag issues in the code while the parent session moves on.',
-    shot: 'review',
-    alt: 'A running reviewer subagent with its findings on a rate limiter',
+    alt: 'A scout subagent with its response about public routes',
   },
   {
     title: 'Find the session behind the work',
-    body: 'Session info shows the id, project, path, working folder, and branch, each with a copy button. [I] opens it for the selected session.',
+    body: 'Session info shows the id, plan, project, path, tasks folder, and scratchpad, each with a copy button, plus token use and linked documents. [I] opens it for the selected session.',
     shot: 'session-info',
-    alt: 'Session info modal with session id, project, path, branch, and copy buttons',
+    alt: 'Session info modal with session id, plan, paths, token use, and linked documents',
   },
   {
     title: 'Keep your hands on the keyboard',
-    body: 'Arrow keys or [J] and [K] move through todos, [Tab] switches between the sidebar and the board, [Shift+S] opens the storage manager, and [T] switches the theme. Press [?] for the full list.',
+    body: 'Arrow keys move through todos, [Tab] switches between the sidebar and the board, [\\] hides the sidebar, and [T] switches the theme. Press [?] for the full list.',
     shot: 'shortcuts',
-    alt: 'Keyboard shortcuts help with global, navigation, and action keys',
+    alt: 'Keyboard shortcuts help with board, session, and terminal tabs',
   },
 ];
 
+const tools = [
+  { name: 'show', body: 'Posts a markdown or HTML card: over the terminal, or as a board tab when pi runs elsewhere. The card refreshes on each save.' },
+  { name: 'ask', body: 'Asks through an HTML card in a modal and waits for the answer. Without a board, pi asks in its own prompt.' },
+  { name: 'dispatch_start, dispatch_wait, dispatch_report', body: 'Start a worker session, wait for its report, send a report back. dispatch_list and dispatch_end list and end workers.' },
+  { name: 'pane_add, pane_rm, pane_list', body: 'Add a URL or a local file as a tab next to the board, without switching to it.' },
+  { name: 'link_doc, unlink_doc, preview_doc', body: 'Link files and URLs to the session, or open a file in the preview modal now.' },
+  { name: 'bind_plan', body: 'Binds a markdown plan to the session. The card shows a plan icon and [P] opens it.' },
+];
+
 const setup = [
-  { title: 'Install the package', cmd: INSTALL, body: 'pi-kanban installs as a pi package and adds the /kanban command.' },
-  { title: 'Start the board', cmd: '/kanban start', body: 'Run it inside pi. The server starts on port 3460 and watches your pi sessions.' },
-  { title: 'Open it', cmd: '/kanban open web', body: 'Then use pi as usual. Sessions, todos, and subagents appear on the board.' },
+  { title: 'Install the package', cmd: INSTALL, body: 'It adds the /kanban command and the board tools to pi. Then run npm install -g pi-kanban to get the board command.' },
+  { title: 'Start the board', cmd: 'pi-kanban', body: 'Run it in a shell. The board listens on 127.0.0.1:3460 and prints its URL with the access token.' },
+  { title: 'Start pi', cmd: '+ New', body: 'Open the URL the board prints and click + New to run pi in the board terminal. For pi started in another terminal, run /kanban open in pi.' },
 ];
 
 const companions = [
@@ -59,8 +86,8 @@ const companions = [
 ---
 
 <SiteLayout
-  title="pi-kanban: a live board for the pi coding agent"
-  description="Watch every pi coding agent session on your machine: todos, subagents, and the session log, live in the browser."
+  title="pi-kanban: an agent development environment for pi"
+  description="Run pi coding agent sessions in the browser next to their todos, subagents, plans, and docs. The agent can show you cards, ask you questions, and hand work to other sessions."
   image="og.png"
 >
   <div class="page">
@@ -76,10 +103,11 @@ const companions = [
 
     <main>
       <section class="hero">
-        <h1>Watch every pi session from one board.</h1>
+        <h1>An agent development environment for pi.</h1>
         <p class="lede">
-          pi writes each session to disk as it works. pi-kanban reads those files and shows the todos, subagents, and
-          messages of every session, live in your browser. Nothing to configure per project.
+          pi-kanban runs your pi sessions in a browser terminal, next to their todos, subagents, plans, and docs. The
+          agent can show you a card, ask you a question, open a file beside the board, or hand a task to another session.
+          It all runs on your machine.
         </p>
         <div class="actions">
           <div class="cmd">
@@ -91,7 +119,7 @@ const companions = [
         </div>
 
         <figure class="hero-shot">
-          <Shot themed="board" alt="The pi-kanban board: session sidebar, todo columns, agents log, and session log" eager />
+          <Shot themed="terminal" alt="The pi-kanban board: session sidebar, and pi in the board terminal with a show card" eager />
           <figcaption>
             <p>The board in light and dark. Switch the mode at the top of the page and the screenshots follow.</p>
           </figcaption>
@@ -108,10 +136,10 @@ const companions = [
 
       <section class="half" aria-labelledby="watch">
         <div class="half-head">
-          <h2 id="watch">Watch</h2>
+          <h2 id="watch">Work</h2>
           <p>
-            pi-kanban watches <code>~/.pi/agent/sessions</code> and pushes each change to your browser. It reads session
-            files only and does not change them.
+            pi-kanban watches <code>~/.pi/agent/sessions</code> and pushes each change to your browser. The pi tools send
+            cards, panes, and reports to the board.
           </p>
           <p class="aside">The <a href={url('demo/')}>live demo</a> runs in your browser with sample sessions. No install.</p>
         </div>
@@ -128,6 +156,23 @@ const companions = [
             ))
           }
         </div>
+      </section>
+
+      <section class="half" aria-labelledby="tools">
+        <div class="half-head">
+          <h2 id="tools">Tools</h2>
+          <p>The package gives pi these tools. Each one talks to the board on your machine.</p>
+        </div>
+        <ul class="companions">
+          {
+            tools.map((t) => (
+              <li>
+                <code>{t.name}</code>
+                <p><Keys text={t.body} /></p>
+              </li>
+            ))
+          }
+        </ul>
       </section>
 
       <section class="half" aria-labelledby="extend">
@@ -160,7 +205,10 @@ const companions = [
             ))
           }
         </ol>
-        <p class="aside">Without pi packages, run <code>npx pi-kanban</code> to start the board on its own.</p>
+        <p class="aside">
+          The board listens on loopback only. Its access token travels in the URL fragment, so the browser never sends it
+          to a server.
+        </p>
       </section>
     </main>
 

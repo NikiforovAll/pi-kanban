@@ -2,6 +2,7 @@
 // Run `npm run build:demo` in the repo root first, then `npm run shots` here.
 import http from 'node:http';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -29,44 +30,71 @@ const server = http
   })
   .listen(PORT);
 
-const openSession = (id) => async (page) => {
+const { IDS } = createRequire(import.meta.url)('../../demo/seed.js');
+const { limiter: LIMITER, checkout: CHECKOUT, loadTest: LOAD_TEST } = IDS;
+
+const openSession = async (page, id) => {
   await page.click(`.session-item[data-session-id="${id}"]`);
   await page.waitForTimeout(600);
 };
 
+// `terminal` lists the sessions that open in the terminal; the others open on the board.
 const views = [
   {
     name: 'board',
     async run(page) {
-      await openSession('demo-0001-rate-limiter')(page);
-      await page.click('#message-toggle');
+      await openSession(page, LIMITER);
+    },
+  },
+  {
+    name: 'terminal',
+    terminal: [LIMITER],
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.waitForSelector('.terminal-frame');
+      await page.waitForTimeout(1500);
+    },
+  },
+  {
+    name: 'ask',
+    terminal: [CHECKOUT],
+    async run(page) {
+      await openSession(page, CHECKOUT);
+      await page.waitForTimeout(1500);
     },
   },
   {
     name: 'subagent',
     async run(page) {
-      await openSession('demo-0003-checkout-ui')(page);
-      await page.click('.agent-card:has-text("planner")');
+      await openSession(page, LIMITER);
+      await page.click('.agent-card:has-text("scout")');
     },
   },
   {
-    name: 'review',
+    name: 'dispatch',
     async run(page) {
-      await openSession('demo-0001-rate-limiter')(page);
-      await page.click('.agent-card:has-text("reviewer")');
+      await openSession(page, LOAD_TEST);
+      await page.click('#message-toggle');
+    },
+  },
+  {
+    name: 'new-session',
+    async run(page) {
+      await page.click('#new-session-btn');
+      await page.fill('#ns-folder', 'acme');
     },
   },
   {
     name: 'session-info',
     async run(page) {
-      await openSession('demo-0001-rate-limiter')(page);
-      await page.click('.session-item[data-session-id="demo-0001-rate-limiter"] .session-info-btn');
+      await openSession(page, LIMITER);
+      await page.click(`.session-item[data-session-id="${LIMITER}"] .team-info-btn`);
     },
   },
   {
     name: 'shortcuts',
     async run(page) {
-      await openSession('demo-0001-rate-limiter')(page);
+      await openSession(page, LIMITER);
       await page.click('[title^="Keyboard shortcuts"]');
     },
   },
@@ -80,7 +108,18 @@ try {
     for (const view of views) {
       if (only.length && !only.includes(view.name)) continue;
       const context = await browser.newContext({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1.5, colorScheme: mode, reducedMotion: 'reduce' });
-      await context.addInitScript((m) => localStorage.setItem('theme', m), mode);
+      await context.addInitScript(
+        ([m, terminal]) => {
+          // Headless Chromium draws xterm's WebGL canvas at a device scale of 1, so the terminal comes out cropped. Its DOM renderer does not.
+          const getContext = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
+            return type === 'webgl2' ? null : getContext.call(this, type, ...rest);
+          };
+          localStorage.setItem('theme', m);
+          localStorage.setItem('terminal-sessions', JSON.stringify(terminal));
+        },
+        [mode, view.terminal ?? []],
+      );
       const page = await context.newPage();
       await page.goto(`http://localhost:${PORT}/`);
       await page.waitForSelector('.session-item');

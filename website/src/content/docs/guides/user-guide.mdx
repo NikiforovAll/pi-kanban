@@ -1,94 +1,163 @@
 ---
 title: User guide
-description: A walkthrough of the dashboard and the /kanban commands.
+description: Start the board, run pi in it, and use the /kanban command, the pi tools, and the board views.
 ---
 
 import Shot from '../../../kit/Shot.astro';
 import Lightbox from '../../../kit/Lightbox.astro';
 
-A walkthrough of the dashboard and `/kanban` commands. For installation, see [Getting started](../../getting-started/). For plugging your own planning flow or themes in, see [Extensibility](../extensibility/).
+This guide covers the board, the terminal, and the tools pi gets from pi-kanban. For installation, see [Getting started](../../getting-started/). For plans and other packages, see [Extensibility](../extensibility/).
 
-## Slash commands
+## Start the board
 
-Run from inside pi:
+Install the board command once with `npm install -g pi-kanban`, then run the server in a shell:
 
-### Global commands
+```sh
+pi-kanban
+```
+
+It prints `pi-kanban running at http://localhost:3460` and the board URL with its access token.
+
+| Flag | Env var | What it does |
+| --- | --- | --- |
+| `--port <n>` | `PORT` | Port. Default 3460. When the port is taken, the server picks a free one. |
+| `--open` | | Open the board in the browser |
+| `--dir <path>` | `PI_CODING_AGENT_DIR` | pi agent dir. Default `~/.pi/agent`. |
+| `--no-terminal` | | Turn off the board terminal |
+| `--terminal-shell <shell>` | `PK_TERMINAL_SHELL` | `gitbash`, a program on `PATH`, or a path |
+| `--host <addr>` | `HOST` | Listen address. Default `127.0.0.1`. |
+| `--allowed-hosts <list>` | `ALLOWED_HOSTS` | Extra `Host` header values, comma-separated |
+
+A flag wins over its env var.
+
+## The /kanban command
+
+Run these inside pi. The session commands use the current session when you leave out `<id>`. `/kanban open` is for pi started in another terminal: a pi in the board terminal is already on the board.
 
 | Command | What it does |
-| ---------------------- | ---------------------------------------------------- |
-| `/kanban start` | Start the local server (port 3460) in the background |
-| `/kanban stop` | Stop the running server |
-| `/kanban restart` | Restart the server (picks up theme/config changes) |
-| `/kanban status` | Show whether the server is running |
-| `/kanban open web` | Open the dashboard in the default browser |
-| `/kanban open app` | Open in a standalone PWA window (if installed) |
-
-### Session commands
-
-All session commands default to the current session when `[<id>]` is omitted.
-
-| Command | What it does |
-| --------------------------------------- | ---------------------------------------------------- |
-| `/kanban session open [<id>]` | Open/focus a session in the dashboard |
+| --- | --- |
+| `/kanban` or `/kanban open` | Open the board in the browser, with the access token |
+| `/kanban session open [<id>]` | Open a session on the board |
 | `/kanban session pin [<id>]` | Pin a session |
 | `/kanban session sticky-pin [<id>]` | Sticky-pin a session |
 | `/kanban session unpin [<id>]` | Remove a pin |
-| `/kanban session view-doc <path> [<id>]` | Render a markdown file in the dashboard preview pane |
-| `/kanban session link-doc <path> [<id>]` | Add a document link to a session |
+| `/kanban session view-doc <file> [<id>]` | Open a file in the board preview |
+| `/kanban session link-doc <file> [<id>]` | Link a file to a session |
 
 ## Layout
 
-<Shot themed="board" alt="The board with the session sidebar, todo columns, agents log, and session log" eager />
+<Shot themed="board" alt="The board with the session sidebar, todo columns, document tabs, and the agents log" eager />
 
-- **Left sidebar** — session list grouped by project. Each row shows progress, age, pin state.
-- **Center** — kanban board (Pending / In Progress / Completed) for the selected session, populated from `@juicesharp/rpiv-todo`.
-- **Right** — Session Log: all messages, tool calls, subagent activity. Auto-scrolls; click a message to expand.
-- **Bottom strip** — recent subagent runs across sessions.
+- **Sidebar.** Sessions in groups and projects. Each card shows progress, age, pins, linked docs, and icons for a plan, a terminal, a dispatched session, or a question that waits for you. The pills at the top count the sessions that wait, the active sessions, and the open terminals.
+- **Board.** Pending, In Progress, and Completed columns for the selected session, from `@juicesharp/rpiv-todo`. Tabs next to **Board** hold panes and show cards.
+- **Agents log.** The subagents of the session, with model, status, and run time.
+- **Session log.** Every prompt, reply, and tool call. `Ctrl+Shift+L` opens it.
 
-## Sessions and projects
+## Terminal
 
-pi-kanban reads `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl` and groups sessions by their working directory.
+<Shot themed="terminal" alt="pi in the board terminal with a show card at the top right" />
+
+Each session can run pi in a terminal next to its board. Start the server with `--no-terminal` to turn this off and only watch sessions. The terminal keeps running in the server when you close the browser tab. ``Ctrl+` `` shows or hides it, and ``Alt+` `` moves the focus between the terminal and the page. ``Ctrl+Shift+` `` lists all terminals.
+
+The terminal needs the access token. The URL that the server prints carries it in the URL fragment (`#t=...`), and so does `/kanban open`.
+
+## New session
+
+<Shot themed="new-session" alt="New session dialog with the folder field and two matching projects" />
+
+Click **+ New** in the sidebar or press `Ctrl+Alt+N`. Type a folder, or pick one of your projects, then set:
+
+- **Name.** Optional. The board names the session after its first prompt when you leave it out.
+- **Prompt.** Optional. Sent as the first message. Paste or drop images to attach them.
+- **Model** and **Thinking.** The pi model and thinking level. **Default** uses pi's settings.
+- **Stay here.** Start the session in the background and keep the current view.
+- **Edit before run.** Open a shell in the folder with the pi command typed in. Press Enter to run it.
+
+`Ctrl+Alt+R` resumes an older session in the terminal.
+
+## Show and ask
+
+<Shot themed="ask" alt="An ask card with two layout choices over the terminal" />
+
+The `show` tool posts a markdown or HTML card. In the board terminal, the card shows over the top right corner of the terminal. When pi runs in another terminal, the card opens as a tab next to the board. The agent edits the card file, and the card refreshes on each save.
+
+The `ask` tool shows an HTML card in a modal and waits until you answer or skip. The answer goes back to pi as the tool result. While pi waits, the session card shows a question icon and the sidebar counts it as waiting. When the board is not running, pi asks in its own prompt.
+
+## Dispatch
+
+<Shot themed="dispatch" alt="A dispatched session and its log, which ends with its report" />
+
+Dispatch hands a task to a new pi session in the board terminal:
+
+1. The parent session calls `dispatch_start` with a self-contained task, and optionally a folder, name, model, thinking level, and group.
+2. The worker runs on its own. When it is done, it calls `dispatch_report` once.
+3. The parent calls `dispatch_wait` to get the report. `dispatch_list` lists the workers, and `dispatch_end` ends one.
+
+The board holds the report, so the parent gets it even when the worker's terminal has ended. Dispatch needs the board terminal.
+
+## Panes, docs, and plans
+
+| Tool | What it does |
+| --- | --- |
+| `pane_add`, `pane_rm`, `pane_list` | Add a URL or a local file as a tab next to the board, without switching to it |
+| `link_doc`, `unlink_doc` | Link a file or URL to the session. Linked docs show on the session card and in session info. |
+| `preview_doc` | Open a file in the preview modal now |
+| `bind_plan` | Bind a markdown plan to the session. `P` opens it. |
+
+## Scratchpad
+
+Each pi session gets a scratchpad folder for notes, scripts, and logs. pi gets its path in the system prompt and in `$PI_SCRATCHPAD_DIR`. `N` shows the scratchpad files on the board. The folder is deleted 7 days after the session ends.
+
+## Board messages to pi
+
+When you send review comments from the board (`Ctrl+Enter`) or answer a card, the board delivers them to pi as a user message. When pi is busy, the message waits until the current turn ends.
 
 ## Subagents
 
-When `pi-subagents` spawns a child session, pi-kanban nests it under its parent and renders the agent's lifecycle (start, tool use, completion) inline.
+When `pi-subagents` starts a child session, the board lists it in the agents log of its parent. Open one to read its prompt and response.
 
-<Shot themed="subagent" alt="A planner subagent with its prompt and response" />
+<Shot themed="subagent" alt="A scout subagent with its response" />
 
 ## Session info
 
-Click the info icon on any session for full metadata: model, token usage, cache hit rate, cost, duration, paths.
+Press `I` or click the info icon on a session card. It shows the session id, plan, project, paths, scratchpad, token use, and linked documents, each with a copy button.
 
-<Shot themed="session-info" alt="Session info modal with session id, project, path, and branch" />
+<Shot themed="session-info" alt="Session info modal with session id, plan, paths, token use, and linked documents" />
 
-## Storage manager
+## Command line
 
-The Storage Manager (toolbar icon) lists sessions, scratchpads, and linked docs with size accounting. Use it to clean orphaned docs or unlink stale references.
+The `pi-kanban` command also talks to a running board. The pi skills use it, and you can too:
 
-![Storage manager](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-storage-explorer.png)
+| Command | What it does |
+| --- | --- |
+| `pi-kanban doc` | Link documents to a session, or open the preview |
+| `pi-kanban pane` | Add, remove, and list panes |
+| `pi-kanban session` | List, search, open, and inspect sessions |
+| `pi-kanban group` | Read and change the sidebar groups |
+| `pi-kanban task` | List the tasks on the board |
+| `pi-kanban project` | List the projects the board knows |
+| `pi-kanban dispatch` | Start, list, and end dispatched sessions |
+| `pi-kanban terminal` | List the board terminals |
+| `pi-kanban skills` | Print a bundled skill guide |
 
-## Follow last message
-
-Pop out the latest assistant message in a floating window — useful for monitoring long-running runs while you work elsewhere.
-
-![Follow last message](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-follow-last-message.png)
-
-## Light mode
-
-The dark/light toggle switches between the two themes configured in settings. See [Theming](../../reference/theming/). The screenshots on this site follow the mode you pick at the top of the page.
+Run `pi-kanban help <command>` for the subcommands.
 
 ## Keyboard shortcuts
 
-Press `?` in the dashboard for the full list. Common ones:
+Press `?` on the board for the full list. Common ones:
 
-- `J` / `K` — next / previous todo in a column
-- `H` / `L` — move to the left / right column
-- `Tab` — switch focus between the sidebar and the board
-- `Shift+L` — toggle the session log
-- `I` — open session info
-- `T` — toggle dark/light
-- `Esc` — close a panel or cancel
+- `↑` / `↓` — next or previous item
+- `←` / `→` — left or right column
+- `Tab` — switch between the sidebar and the board
+- `Ctrl+Alt+N` — new session
+- ``Ctrl+` `` — show or hide the terminal
+- `Ctrl+Shift+L` — toggle the session log
+- `I` — session info
+- `P` — open the plan
+- `T` — switch between light and dark
+- `Shift+S` — storage manager
+- `Esc` — close a panel
 
-<Shot themed="shortcuts" alt="Keyboard shortcuts help with global, navigation, and action keys" />
+<Shot themed="shortcuts" alt="Keyboard shortcuts help with Board, Session, and Terminal tabs" />
 
 <Lightbox />
