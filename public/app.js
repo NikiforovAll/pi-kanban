@@ -3694,6 +3694,9 @@ function showAgentModal(agentId) {
   const chips = [];
   if (agent.agentId) chips.push(chip('id', escapeHtml(shortId), { cls: 'agent-chip-mono', title: agent.agentId }));
   chips.push(chip('', escapeHtml(agent.status), { cls: `agent-chip-status agent-chip-${agent.status}` }));
+  if (agent.stopReason) {
+    chips.push(chip('reason', escapeHtml(agent.stopReason), { cls: `agent-chip-${escapeHtml(agent.stopReason)}`, title: agent.error }));
+  }
   chips.push(chip('⏱', formatDuration(elapsed)));
   if (usageStats?.tokens != null) chips.push(chip('tokens', fmtTok(usageStats.tokens), { cls: 'agent-chip-mono' }));
   if (usageStats?.tools != null) chips.push(chip('tools', String(usageStats.tools), { cls: 'agent-chip-mono' }));
@@ -3712,7 +3715,8 @@ function showAgentModal(agentId) {
   let html = `<div class="agent-chips">${chips.join('')}</div>`;
 
   const promptText = stripTeammateWrapper(agentMsg?.agentPrompt || agent.prompt || null);
-  const responseText = agent.lastMessage ? stripAnsi(agent.lastMessage.trim()) : null;
+  const response = agent.lastMessage || agent.error;
+  const responseText = response ? stripAnsi(response.trim()) : null;
   _agentModalPromptText = promptText;
   _agentModalResponseText = responseText;
   const promptHtml = promptText ? renderMarkdown(promptText) : null;
