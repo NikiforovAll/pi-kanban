@@ -38,7 +38,7 @@ const {
 } = require('./lib/parsers');
 const { inlineHtmlAssets, MIME_BY_EXT } = require('./lib/inline-assets');
 const { buildDecision, decisionFileName, isDecisionFile, approvalsFrom, boardRefusal } = require('./lib/approvals');
-const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace, isDefaultPiAgentDir } = require('./lib/board-dir');
+const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace } = require('./lib/board-dir');
 const { readTerminalConfig } = require('./lib/terminal');
 const { createTerminalClient } = require('./lib/terminal-client');
 const { createShowStore, mountShowRoutes, showBodyParser, SHOW_PATH } = require('./lib/show');
@@ -201,8 +201,7 @@ function ownerPid(file) {
 }
 
 // A beacon that outlives its server sends the doorbell mod and the CLI to a closed
-// port. The hub spawns every sub-app on
-// an ephemeral port, so a stale beacon never comes back on its own — drop ours on
+// port. The next server can take another port, so a stale beacon never comes back on its own — drop ours on
 // the way out. Only when the file is still ours: a newer server on the same config
 // dir has already claimed it. The terminal token file goes the same way.
 function removeServerInfo() {
@@ -211,7 +210,7 @@ function removeServerInfo() {
   }
 }
 
-// A second server on the same config dir (a test hub, say) takes the beacon and removes it on
+// A second server on the same config dir (a test run, say) takes the beacon and removes it on
 // exit, which leaves this live server undiscoverable. A newer live owner keeps it.
 function reclaimServerInfo(port) {
   const pid = ownerPid(SERVER_INFO_FILE);
@@ -507,7 +506,7 @@ app.use(express.json({ limit: '1mb' }));
 // #region STATIC
 
 // app.js reads localStorage synchronously at startup, before any fetch could deliver the
-// namespace, so it is injected into the page instead of served from /hub-config.
+// namespace, so it is injected into the page instead of served from an endpoint.
 const STORAGE_NS = storageNamespace(PI_AGENT_DIR);
 const NS_DECL = 'window.__STORAGE_NS__ = null;';
 const RAW_INDEX = readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
@@ -2155,7 +2154,6 @@ const terminal = createTerminalClient({
   config: readTerminalConfig({ getArgValue }),
   net,
   piAgentDir: PI_AGENT_DIR,
-  isDefaultDir: isDefaultPiAgentDir(PI_AGENT_DIR),
   sessionsDir: SESSIONS_DIR,
   token: process.env.PK_TERMINAL_TOKEN,
   load: terminalsFile.load,
@@ -2163,7 +2161,7 @@ const terminal = createTerminalClient({
     savedTerminals = data;
     saveTerminals();
   },
-  // The project, not the last cwd: `claude --resume` finds a session under the
+  // The project, not the last cwd: `pi --session` finds a session id under the
   // project dir it started in, and cwd drifts into subdirectories.
   resolveCwd: resolveSessionFolder,
   isAllowedFolder,
@@ -2205,13 +2203,13 @@ app.post('/api/terminal/pick-folder', async (req, res) => {
 // The New session dialog's "Stay here": the PTY starts headless and the board keeps its view.
 app.post('/api/terminal/start', terminalRoute(async (req, res) => {
   if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
-  const { id, cwd, name, model, effort, worktree, prompt } = req.body || {};
-  const started = await terminal.startNew({ id, cwd, name, model, effort, worktree, prompt });
+  const { id, cwd, name, model, thinking, prompt } = req.body || {};
+  const started = await terminal.startNew({ id, cwd, name, model, thinking, prompt });
   if (started.error) return res.status(started.status).json({ error: started.error });
   res.status(201).json({ session: started.id, cwd: started.cwd });
 }));
 
-// The New session dialog's images. The prompt names the saved path, and claude reads the file.
+// The New session dialog's images. The prompt names the saved path, and pi reads the file.
 // The token check runs before the body parser, so a rejected upload is never buffered.
 const ATTACHMENT_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 app.post('/api/terminal/attachments/:session', (req, res, next) => {
@@ -2235,7 +2233,6 @@ app.post('/api/terminal/attachments/:session', (req, res, next) => {
   }
 });
 
-// The hub's eviction check reads this to keep a pool with live PTYs alive.
 app.get('/api/terminals', terminalRoute(async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const sessions = await terminal.sessions();
@@ -2250,10 +2247,10 @@ app.get('/api/terminals', terminalRoute(async (_req, res) => {
 const terminalProcStats = createProcStats();
 app.get('/api/terminals/stats', terminalRoute(async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  const { hostPid, claudePids } = await terminal.stats();
-  const byPid = await terminalProcStats([process.pid, hostPid, ...Object.values(claudePids)].filter(Boolean));
+  const { hostPid, piPids } = await terminal.stats();
+  const byPid = await terminalProcStats([process.pid, hostPid, ...Object.values(piPids)].filter(Boolean));
   const terminals = {};
-  for (const [id, pid] of Object.entries(claudePids)) if (byPid[pid]) terminals[id] = byPid[pid];
+  for (const [id, pid] of Object.entries(piPids)) if (byPid[pid]) terminals[id] = byPid[pid];
   res.json({ pk: byPid[process.pid] || null, host: byPid[hostPid] || null, terminals });
 }));
 
@@ -3117,8 +3114,8 @@ function paneRouteError(res, error, what) {
 async function resolvePaneTarget(target, base) {
   const url = linkUrl(target);
   if (url) {
-    if (isOwnOrigin(url, { boardPort, boardHosts, hubUrl: process.env.HUB_URL })) {
-      throw previewError(400, 'A pane cannot show the board or the hub itself', 'own_origin');
+    if (isOwnOrigin(url, { boardPort, boardHosts })) {
+      throw previewError(400, 'A pane cannot show the board itself', 'own_origin');
     }
     return { kind: 'url', target: url };
   }
@@ -3153,16 +3150,14 @@ app.patch('/api/panes/:sessionId', (req, res) => {
 });
 
 // Probes only a pane's own target, so the route cannot fetch an arbitrary URL. `ancestors` is
-// the comma-separated origins above the frame: the board's page origin, then the hub's. The CLI
-// has no page, so without it the board's own origin and HUB_URL stand in; under the hub the page
-// is on the proxy port, which agrees for 'self', 'none' and policies that name neither.
+// the comma-separated origins above the frame, starting with the board's page origin. The CLI
+// has no page, so without it the board's own origin stands in.
 app.get('/api/panes/:sessionId/:paneId/framing', async (req, res) => {
   try {
     const { sessionId, paneId } = req.params;
     const pane = panes.get(sessionId).panes.find((p) => p.id === paneId && p.kind === 'url');
     if (!pane) throw previewError(404, `No URL pane ${paneId} in session ${sessionId}`, 'no_pane');
-    const fallback = [`http://localhost:${boardPort}`, process.env.HUB_URL].filter(Boolean).join(',');
-    const ancestors = String(req.query.ancestors || fallback)
+    const ancestors = String(req.query.ancestors || `http://localhost:${boardPort}`)
       .split(',')
       .slice(0, 5)
       .filter((o) => parseOrigin(o));
@@ -3605,8 +3600,8 @@ setTimeout(() => {
 // enrichment for inactive sessions, so we no longer drive a full self-request
 // here — that was 690× wasted work for an active-filter first hit.
 // Started on the ready line, the full read of every transcript competes for disk and CPU with
-// the hub's other apps while they render, and slows their first render. It starts after the
-// first list is sent, or after the fallback when no client asks.
+// the first page load and slows it. It starts after the first list is sent, or after the
+// fallback when no client asks.
 const PREWARM_FALLBACK_MS = 5000;
 const SESSION_CACHE_SAVE_MS = 30000;
 const persistSessionCache = () => saveSessionCache((data) => writeJsonAtomicOrLog(SESSION_CACHE_FILE, data));
@@ -3655,8 +3650,8 @@ function prewarmCaches() {
   };
 
   loadSessionCache(SESSION_CACHE_FILE);
-  // Under the hub a child can end by TerminateProcess on Windows, where no exit handler runs,
-  // so the cache is also saved on a timer.
+  // Started as a child of the pi extension, the board can end by TerminateProcess on Windows,
+  // where no exit handler runs, so the cache is also saved on a timer.
   setInterval(persistSessionCache, SESSION_CACHE_SAVE_MS).unref();
   process.on('exit', persistSessionCache);
 

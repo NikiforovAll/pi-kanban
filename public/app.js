@@ -142,7 +142,7 @@ let focusZone = 'board'; // 'board' | 'sidebar'
 let appConfig = { scratchAvailable: false };
 const ASSISTANT_LABEL = 'pi';
 let runningTerminals = new Set();
-// Embedded sessions stuck on Claude Code's folder-trust dialog. No hook runs before it, so the server reads it off the screen.
+// Embedded sessions stuck on pi's folder-trust dialog. No hook runs before it, so the server reads it off the screen.
 let trustWaiting = new Set();
 let selectedSessionIdx = -1;
 let selectedSessionKbId = null;
@@ -5598,7 +5598,7 @@ function sgOpenMenu(x, y, kind, ref) {
   const canEnd = kind === 'session' && runningTerminals.has(ref);
   const actions =
     (canFork
-      ? '<button class="sg-menu-item" role="menuitem" data-sg-action="fork" title="claude --resume --fork-session">Fork</button>'
+      ? '<button class="sg-menu-item" role="menuitem" data-sg-action="fork" title="pi --fork">Fork</button>'
       : '') +
     (canEnd
       ? '<button class="sg-menu-item" role="menuitem" data-sg-action="end" title="Alt+Shift+`">End terminal</button>'
@@ -11115,11 +11115,9 @@ function reinitMermaidTheme() {
   });
 }
 
-// Keyed on the colors for the same reason as the terminal theme: under the hub a theme change
-// lands in two steps.
 new MutationObserver(reinitMermaidTheme).observe(document.body, {
   attributes: true,
-  attributeFilter: ['class', 'data-color-theme', 'style'],
+  attributeFilter: ['class', 'data-color-theme'],
 });
 
 const _agentTabTexts = {};
@@ -12676,34 +12674,24 @@ let paneLayoutSid = null;
 // Targets the server's probe found refusing framing, kept for the page's life; a reload asks again.
 const paneRefused = new Set();
 
-// Every origin above a pane's frame. Firefox has no ancestorOrigins, so under the hub there it
-// names the board only; a refused frame then shows the browser's own error.
-function paneAncestors() {
-  return [location.origin, ...(location.ancestorOrigins || [])];
-}
-
 function paneFrameable(pane) {
   return pane.kind !== 'url' || !paneRefused.has(pane.target);
 }
 
-// allow-scripts with allow-same-origin on the board's or the hub's origin would lift the sandbox.
-// The server refuses the board's own names, but under the hub the page is served from the
-// hub's proxy port, which only the page knows. Any loopback name reaches the same port.
+// allow-scripts with allow-same-origin on the board's origin would lift the sandbox. The server
+// refuses the names it knows; the page also knows the name it was opened under. Any loopback
+// name reaches the same port.
 const PANE_LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 function paneOwnOrigin(pane) {
   if (pane.kind !== 'url') return false;
   const u = new URL(pane.target);
-  const loopback = PANE_LOOPBACK.has(u.hostname);
-  return paneAncestors().some((origin) => {
-    const a = new URL(origin);
-    const host = a.hostname === u.hostname || (loopback && PANE_LOOPBACK.has(a.hostname));
-    return a.protocol === u.protocol && a.port === u.port && host;
-  });
+  const host = location.hostname === u.hostname || (PANE_LOOPBACK.has(u.hostname) && PANE_LOOPBACK.has(location.hostname));
+  return location.protocol === u.protocol && location.port === u.port && host;
 }
 
 async function probePaneFraming(sid, pane) {
-  const q = new URLSearchParams({ ancestors: paneAncestors().join(',') });
+  const q = new URLSearchParams({ ancestors: location.origin });
   const { frameable } = await paneRequest('GET', `${apiPath`/api/panes/${sid}/${pane.id}/framing`}?${q}`);
   if (frameable === false) paneRefused.add(pane.target);
   return frameable;
@@ -13474,7 +13462,7 @@ function unmountPane(sid, paneId) {
   view?.remove();
   paneFrames.delete(key);
   // Chrome leaves the window without focus when a focused frame is removed, so no key reaches
-  // the board until a click. Only when it had focus: under the hub, pi-kanban may be off screen.
+  // the board until a click. Only when it had focus, so the board does not take focus from another window.
   if (hadFocus) window.focus();
 }
 
@@ -14522,7 +14510,7 @@ function inPageField(e) {
 function terminalShortcut(e, probe = false) {
   const ctrlAlt = hubModDown(e);
   const ctrlShift = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
-  // Ctrl+_ is Claude Code's undo, so the zoom keys leave it to the terminal. An open ask card,
+  // Ctrl+_ is undo in pi, so the zoom keys leave it to the terminal. An open ask card,
   // which sits in the terminal pane, takes them for its own text zoom.
   const zoom = e.key === '_' ? undefined : zoomDelta(e);
   if (zoom !== undefined && termFrame.inited && (probe || (terminalPaneFocused() && !isAskOnScreen()))) {
@@ -14573,7 +14561,7 @@ async function swapToPreviousSession() {
   await revealSession(target);
 }
 
-// Esc belongs to Claude, so leaving the terminal without hiding it needs its own key.
+// Esc belongs to pi, so leaving the terminal without hiding it needs its own key.
 function toggleTerminalFocus() {
   if (!wantsTerminal()) {
     toggleTerminal();
@@ -14757,11 +14745,9 @@ function sendTerminalTheme() {
   postToTerminalFrame('theme', { options });
 }
 
-// Keyed on the colors, and style is watched, because under the hub a theme change lands in two
-// steps: the class flips while the old pick's inline vars are still on body, then the SDK swaps them.
 new MutationObserver(sendTerminalTheme).observe(document.body, {
   attributes: true,
-  attributeFilter: ['class', 'data-color-theme', 'style'],
+  attributeFilter: ['class', 'data-color-theme'],
 });
 
 function postToTerminalFrame(t, data) {
@@ -14940,8 +14926,8 @@ function terminalTheme() {
 function terminalThemeOptions() {
   return {
     theme: terminalTheme(),
-    // Claude Code on a dark theme (pinned, or output from before it saw the OSC 11 reply) draws
-    // fixed 256/truecolor values no palette reaches; 3 keeps them readable and still blue.
+    // A pi theme made for a dark background draws fixed 256/truecolor values no palette reaches;
+    // 3 keeps them readable and still blue.
     minimumContrastRatio: isLightTheme() ? 3 : 1,
   };
 }
@@ -14983,13 +14969,13 @@ function hideTerminalPrompt() {
 
 const TERMINAL_BOOT_VERBS = ['Waking pi…', 'Computing digits of π…', 'Warming up the terminal…', 'Summoning the session…'];
 const TERMINAL_BOOT_MAX_MS = 15000;
-// The server answers `ready` as soon as the socket attaches, even before Claude draws, so a wait
-// this long is the connection: under the hub a loopback connect can hang until its timeout.
+// The server answers `ready` as soon as the socket attaches, even before pi draws, so a wait
+// this long is the connection.
 const TERMINAL_SLOW_CONNECT_MS = 1500;
 let terminalBootTimer = null;
 let terminalSlowTimer = null;
 
-// A new PTY shows only a blinking cursor until Claude draws its first frame.
+// A new PTY shows only a blinking cursor until pi draws its first frame.
 function showTerminalBoot() {
   document.getElementById('terminal-boot-verb').textContent = pickRandom(TERMINAL_BOOT_VERBS);
   document.getElementById('terminal-boot').classList.add('visible');
@@ -15050,9 +15036,8 @@ window.addEventListener('beforeunload', (e) => {
   if (termState.attached && termState.shown) e.preventDefault();
 });
 
-// A config-dir switch in the hub reloads this page, and coming back should put the cursor where it was.
-// The hub's palette takes focus first and clears activeElement here, so the last focus inside this
-// page is tracked instead; focus leaving the frame keeps it.
+// A reload should put the cursor back where it was. The last focus inside this page is tracked,
+// and focus leaving the window keeps it.
 let terminalHadFocus = false;
 let passTerminalZoneOn = false;
 document.addEventListener('focusin', () => {
@@ -15064,43 +15049,15 @@ document.addEventListener('focusout', (e) => {
     if (document.hasFocus()) terminalHadFocus = terminalPaneFocused();
   });
 });
-// The hub hands focus back by focusing this frame after a palette closes, and focus does not
-// pass on into the nested terminal frame by itself. The hub makes this frame inert while the
-// palette is open, which can blur the terminal frame, so activeElement no longer says it had focus.
-// Without inert (the app launcher), activeElement stays the frame element while the frame has no focus.
-// Chrome fires this before focusin when a click or a focus() call in this page takes focus from the
-// frame, so it waits a task and gives way to whatever took focus.
-let boardPointerDown = false;
-document.addEventListener(
-  'pointerdown',
-  () => {
-    boardPointerDown = true;
-    passTerminalZoneOn = false;
-  },
-  true,
-);
-for (const type of ['pointerup', 'pointercancel']) {
-  document.addEventListener(type, () => (boardPointerDown = false), true);
-}
-window.addEventListener('focus', () => {
-  if (!terminalHadFocus || boardPointerDown) return;
-  setTimeout(() => {
-    const active = document.activeElement;
-    if (terminalHadFocus && termState.shown && (active === document.body || active === termFrame.el)) {
-      focusTerminalPane();
-    }
-  });
-});
-// A board with no session open passes the zone on, so a stop at an empty config dir keeps it. So does a
-// board whose session has no terminal for an inherited terminal zone, until the user picks a zone here.
+document.addEventListener('pointerdown', () => (passTerminalZoneOn = false), true);
+// A board with no session open passes the zone on. So does a board whose session has no terminal
+// for an inherited terminal zone, until the user picks a zone here.
 window.addEventListener('pagehide', () => {
   if (termState.attached && termState.shown && terminalHadFocus) tabStore.setItem(FOCUS_ZONE_KEY, 'terminal');
   else if (passTerminalZoneOn) return;
   else if (currentSessionId || focusZone === 'sidebar') tabStore.setItem(FOCUS_ZONE_KEY, focusZone);
 });
 
-// While the hub shows another app this frame cannot take focus, so terminalHadFocus lets the
-// window focus handler finish the restore when the hub focuses this frame.
 function restoreTerminalFocus(zone, sessionId) {
   if (zone !== 'terminal') return;
   if (!wantsTerminalFor(sessionId)) {
@@ -15167,9 +15124,8 @@ async function openTerminal(sessionId, mode, attempt = 0) {
       ...(spec?.mode === mode && {
         cwd: spec.cwd,
         name: spec.name,
-        worktree: spec.worktree,
         model: spec.model,
-        effort: spec.effort,
+        thinking: spec.thinking,
         prompt: spec.prompt,
         edit: spec.edit,
         forkOf: spec.forkOf,
@@ -15203,7 +15159,7 @@ function terminalOpenMode(sessionId) {
   return newSpecs.get(sessionId)?.mode ?? 'auto';
 }
 
-// The server moved the PTY to the session picked in `claude --resume`; reattaching under that id
+// The server moved the PTY to the session picked in `pi --resume`; reattaching under that id
 // replays the same screen, and the placeholder gives way to the real card.
 function adoptPickedSession(oldId, id) {
   const focused = terminalPaneFocused();
@@ -15291,7 +15247,7 @@ function onTerminalMessage(sessionId, msg, tail = '') {
 }
 
 // Detaching first means no exit message reaches the pane, so no Resume prompt shows before the board.
-// Terminal mode must go too: left on, opening the session again reconnects in 'auto' and resumes claude.
+// Terminal mode must go too: left on, opening the session again reconnects in 'auto' and resumes pi.
 async function closeTerminalSession(id = termState.sessionId) {
   exitTerminalMode(id);
   await terminalFetch(apiPath`/api/terminals/${id}`, 'DELETE').catch(() => {});
@@ -15308,7 +15264,7 @@ function exitTerminalMode(id) {
 }
 
 // An end from another tab or `dispatch end` must clear terminal mode here too, or focusing the
-// session reconnects in 'auto' and resumes claude. The mode set is shared by same-origin tabs, so the
+// session reconnects in 'auto' and resumes pi. The mode set is shared by same-origin tabs, so the
 // tab that ended it may have cleared it already while this tab still shows its pane.
 function onTerminalEnded(id) {
   if (id === termState.sessionId || terminalModes().has(id)) exitTerminalMode(id);
@@ -15317,7 +15273,7 @@ function onTerminalEnded(id) {
 
 function openTerminalManager() {
   if (!terminalAvailable()) return;
-  // Esc typed in xterm goes to Claude, so the modal would not close on it.
+  // Esc typed in xterm goes to pi, so the modal would not close on it.
   if (terminalPaneFocused()) leaveTerminalPane();
   document.getElementById('terminal-manager-modal').classList.add('visible');
   renderTerminalManager();

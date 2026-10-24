@@ -24,13 +24,13 @@ When you're ready to run it on your own pi sessions, install below.
 pi install npm:pi-kanban
 ```
 
-Then use `/kanban start | stop | restart | status | open web|app` for global controls, and `/kanban session open | pin | sticky-pin | unpin | view-doc | link-doc` for session-scoped actions.
-
-Or run standalone:
+Start the board:
 
 ```sh
 npx pi-kanban
 ```
+
+Then use `/kanban open` in pi to open the board with its terminal token, and `/kanban session open | pin | sticky-pin | unpin | view-doc | link-doc` for session-scoped actions.
 
 ### Companion pi extensions
 

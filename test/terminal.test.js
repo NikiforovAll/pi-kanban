@@ -5,7 +5,7 @@ const { mkdtempSync, readFileSync, realpathSync, rmSync } = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { createTerminalService, shellArgs, claudeCommand, readTerminalConfig, resolveShell, claudeArgsFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
+const { createTerminalService, shellArgs, piCommand, readTerminalConfig, resolveShell, piArgsFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
 
 let WebSocket = null;
 let ptyAvailable = false;
@@ -24,7 +24,7 @@ function startServer(extraArgs) {
   // under one (fs-event.c), which kills the server the first time it writes to .pi-kanban.
   const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pk-term-')));
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js'), ...extraArgs], {
-    env: { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, PK_TERMINAL_TOKEN: TOKEN, CLAUDE_HUB: '' },
+    env: { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, PK_TERMINAL_TOKEN: TOKEN },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const port = new Promise((resolve, reject) => {
@@ -136,59 +136,60 @@ function sessionOnce(port, hello, until) {
 }
 
 describe('shellArgs', () => {
-  it('keeps pwsh open after claude exits', () => {
-    assert.deepEqual(shellArgs('C:/x/pwsh.exe', ['--resume', SESSION]), ['-NoLogo', '-NoExit', '-Command', `claude --resume ${SESSION}`]);
+  it('keeps pwsh open after pi exits', () => {
+    assert.deepEqual(shellArgs('C:/x/pwsh.exe', ['--session', SESSION]), ['-NoLogo', '-NoExit', '-Command', `pi --session ${SESSION}`]);
   });
-  it('execs the same POSIX shell after claude exits', () => {
-    assert.deepEqual(shellArgs('/bin/zsh', ['--resume', SESSION]), ['-c', `claude --resume ${SESSION}; exec "$0"`, '/bin/zsh']);
+  it('execs the same POSIX shell after pi exits', () => {
+    assert.deepEqual(shellArgs('/bin/zsh', ['--session', SESSION]), ['-c', `pi --session ${SESSION}; exec "$0"`, '/bin/zsh']);
   });
   it('starts a bare shell in shell mode', () => {
     assert.deepEqual(shellArgs('cmd.exe', null), []);
   });
-  it('starts Git Bash as a login shell, before and after claude', () => {
+  it('starts Git Bash as a login shell, before and after pi', () => {
     const bash = 'C:/Program Files/Git/bin/bash.exe';
     assert.deepEqual(shellArgs(bash, null), ['--login', '-i']);
-    assert.deepEqual(shellArgs(bash, ['--resume', SESSION]), ['--login', '-i', '-c', `claude --resume ${SESSION}; exec bash --login -i`]);
+    assert.deepEqual(shellArgs(bash, ['--session', SESSION]), ['--login', '-i', '-c', `pi --session ${SESSION}; exec bash --login -i`]);
   });
   it('quotes an argument with a space for each shell family', () => {
     const args = ['--name', 'Fix login'];
-    assert.equal(shellArgs('pwsh.exe', args)[3], "claude --name 'Fix login'");
-    assert.equal(shellArgs('cmd.exe', args)[1], 'claude --name "Fix login"');
+    assert.equal(shellArgs('pwsh.exe', args)[3], "pi --name 'Fix login'");
+    assert.equal(shellArgs('cmd.exe', args)[1], 'pi --name "Fix login"');
   });
 });
 
 describe('new session options', () => {
-  it('builds the claude flags, with the optional worktree value last', () => {
-    const spec = parseNewSpec({ cwd: '/p', name: ' Fix login ', worktree: 'fix-login', model: 'haiku', effort: 'xhigh' });
-    assert.deepEqual(claudeArgsFor('new', SESSION, spec),
-      ['--session-id', SESSION, '--name', 'Fix login', '--model', 'haiku', '--effort', 'xhigh', '-w', 'fix-login']);
-    assert.deepEqual(claudeArgsFor('new', SESSION, parseNewSpec({ cwd: '/p', worktree: true })), ['--session-id', SESSION, '-w']);
-    assert.deepEqual(claudeArgsFor('new', SESSION, parseNewSpec({ cwd: '/p' })), ['--session-id', SESSION]);
+  it('builds the pi flags', () => {
+    const spec = parseNewSpec({ cwd: '/p', name: ' Fix login ', model: 'codemie/gpt-6-luna:high', thinking: 'xhigh' });
+    assert.deepEqual(piArgsFor('new', SESSION, spec),
+      ['--session-id', SESSION, '--name', 'Fix login', '--model', 'codemie/gpt-6-luna:high', '--thinking', 'xhigh']);
+    assert.deepEqual(piArgsFor('new', SESSION, parseNewSpec({ cwd: '/p' })), ['--session-id', SESSION]);
   });
-  it('forks under its own id, which claude takes only with --fork-session', () => {
+  it('resumes a transcript under its own id', () => {
+    const OLD = 'cccccccc-0000-0000-0000-000000000003';
+    assert.deepEqual(piArgsFor('new', SESSION, parseNewSpec({ cwd: '/p', resume: OLD })), ['--session', OLD]);
+    assert.deepEqual(piArgsFor('resume', SESSION), ['--session', SESSION]);
+  });
+  it('forks under its own id', () => {
     const PARENT = 'bbbbbbbb-0000-0000-0000-000000000002';
     const spec = parseNewSpec({ forkOf: PARENT });
     assert.equal(spec.cwd, null);
-    assert.deepEqual(claudeArgsFor('new', SESSION, spec), ['--resume', PARENT, '--fork-session', '--session-id', SESSION]);
+    assert.deepEqual(piArgsFor('new', SESSION, spec), ['--fork', PARENT, '--session-id', SESSION]);
     assert.equal(parseNewSpec({ forkOf: 'x; rm -rf ~' }), 'session to fork');
-    assert.match(parseNewSpec({ forkOf: PARENT, worktree: true }), /^worktree/);
   });
   it('names the field that fails its charset', () => {
     assert.equal(parseNewSpec({}), 'folder');
     assert.equal(parseNewSpec({ cwd: '/p', name: "x'; rm -rf ~" }), 'name');
     assert.equal(parseNewSpec({ cwd: '/p', name: '-x' }), 'name');
-    assert.equal(parseNewSpec({ cwd: '/p', worktree: '../up' }), 'worktree name');
-    assert.equal(parseNewSpec({ cwd: '/p', worktree: 1 }), 'worktree name');
     assert.equal(parseNewSpec({ cwd: '/p', model: 'opus; x' }), 'model');
-    assert.equal(parseNewSpec({ cwd: '/p', effort: 'ultra' }), 'effort');
-    assert.equal(parseNewSpec({ cwd: '/p', taskList: '../up' }), 'task list id');
-    assert.equal(parseNewSpec({ cwd: '/p', taskList: 'a/b' }), 'task list id');
+    assert.equal(parseNewSpec({ cwd: '/p', model: '-x' }), 'model');
+    assert.equal(parseNewSpec({ cwd: '/p', model: 42 }), 'model');
+    assert.equal(parseNewSpec({ cwd: '/p', thinking: 'ultra' }), 'thinking level');
   });
-  it('keeps a task list id off the command line', () => {
-    const spec = parseNewSpec({ cwd: '/p', taskList: SESSION });
-    assert.equal(spec.taskList, SESSION);
-    assert.deepEqual(claudeArgsFor('new', SESSION, spec), ['--session-id', SESSION]);
-    assert.equal(parseNewSpec({ cwd: '/p' }).taskList, null);
+  it('refuses an extra arg that sets a flag pi-kanban owns', () => {
+    for (const flag of ['--session', '--fork', '--session-id=x', '--thinking', '--mode', '-p']) {
+      assert.match(parseNewSpec({ cwd: '/p', extraArgs: [flag] }), /pi-kanban sets/);
+    }
+    assert.deepEqual(parseNewSpec({ cwd: '/p', extraArgs: ['--offline'] }).extraArgs, ['--offline']);
   });
   it('takes edit only as true, and strips control characters from its prompt', () => {
     assert.equal(parseNewSpec({ cwd: '/p', edit: true }).edit, true);
@@ -197,15 +198,15 @@ describe('new session options', () => {
     assert.equal(parseNewSpec({ cwd: '/p', prompt: 'a\x03b' }).prompt, 'a\x03b');
   });
   it('builds the command line an edit terminal types', () => {
-    const args = claudeArgsFor('new', SESSION, parseNewSpec({ cwd: '/p', name: 'Fix login', model: 'opus' }));
-    assert.equal(claudeCommand('pwsh.exe', args), `claude --session-id ${SESSION} --name 'Fix login' --model opus`);
-    assert.equal(claudeCommand('cmd.exe', args), `claude --session-id ${SESSION} --name "Fix login" --model opus`);
+    const args = piArgsFor('new', SESSION, parseNewSpec({ cwd: '/p', name: 'Fix login', model: 'codemie/luna' }));
+    assert.equal(piCommand('pwsh.exe', args), `pi --session-id ${SESSION} --name 'Fix login' --model 'codemie/luna'`);
+    assert.equal(piCommand('cmd.exe', args), `pi --session-id ${SESSION} --name "Fix login" --model "codemie/luna"`);
   });
-  it('puts the prompt first and quotes it for each shell family', () => {
-    const args = ['--session-id', SESSION, '-w'];
-    const text = "it's $HOME `x` ’q’ \"d\"\nnext";
-    assert.equal(claudeCommand('pwsh.exe', args, text), `claude 'it''s $HOME \`x\` ’’q’’ "d"\nnext' --session-id ${SESSION} -w`);
-    assert.equal(claudeCommand('/bin/zsh', args, text), `claude 'it'\\''s $HOME \`x\` ’q’ "d"\nnext' --session-id ${SESSION} -w`);
+  it('puts the prompt last, after --, and quotes it for each shell family', () => {
+    const args = ['--session-id', SESSION];
+    const text = "-it's $HOME `x` ’q’ \"d\"\nnext";
+    assert.equal(piCommand('pwsh.exe', args, text), `pi --session-id ${SESSION} -- '-it''s $HOME \`x\` ’’q’’ "d"\nnext'`);
+    assert.equal(piCommand('/bin/zsh', args, text), `pi --session-id ${SESSION} -- '-it'\\''s $HOME \`x\` ’q’ "d"\nnext'`);
   });
 });
 
@@ -240,7 +241,7 @@ describe('edit before run', () => {
     p.emit('prompt> ');
     await until(() => p.written.length > 0);
     await wait(150);
-    assert.deepEqual(p.written, [`\x1b[200~claude 'line one\rline two' --session-id ${A} --name 'Fix login'\x1b[201~`]);
+    assert.deepEqual(p.written, [`\x1b[200~pi --session-id ${A} --name 'Fix login' -- 'line one\rline two'\x1b[201~`]);
     assert.equal(t.list()[0].edit, true);
     t.shutdown();
   });
@@ -255,7 +256,7 @@ describe('edit before run', () => {
     t.shutdown();
   });
 
-  it('refuses a paste until the typed command runs claude', async () => {
+  it('refuses a paste until the typed command runs pi', async () => {
     const live = [];
     const { t, pty } = service(live);
     await t.startNew({ id: A, cwd: os.tmpdir(), edit: true });
@@ -274,7 +275,7 @@ describe('edit before run', () => {
     const { t, pty } = service([], 'bash', (id) => (id === PARENT ? os.tmpdir() : null));
     const r = await t.startNew({ id: A, forkOf: PARENT, cwd: '/elsewhere' });
     assert.equal(r.cwd, os.tmpdir());
-    assert.ok(pty.spawned[0].args.join(' ').includes(`--resume ${PARENT} --fork-session --session-id ${A}`));
+    assert.ok(pty.spawned[0].args.join(' ').includes(`--fork ${PARENT} --session-id ${A}`));
     assert.equal(t.list()[0].forkOf, PARENT);
     const missing = await t.startNew({ id: SESSION, forkOf: 'cccccccc-0000-0000-0000-000000000003' });
     assert.equal(missing.status, 404);
@@ -313,7 +314,7 @@ async function startWithPrompt(id, overrides, spec) {
 
 describe('folder trust dialog', () => {
   const A = 'aaaaaaaa-0000-0000-0000-000000000001';
-  const DIALOG = '\x1b[?2004hDo you trust the files in this folder?\r\n❯ 1. Yes, I trust this folder\r\n  2. No, exit\r\n';
+  const DIALOG = '\x1b[?2004hTrust project folder?\r\n→ Trust\r\n  Do not trust\r\n';
   const INPUT_BOX = '\x1b[2J\x1b[H\x1b[?2004h> ';
 
   async function started() {
@@ -337,7 +338,7 @@ describe('folder trust dialog', () => {
     t.shutdown();
   });
 
-  it('holds the prompt while claude restarts its screen with paste mode off after the answer', async () => {
+  it('holds the prompt while pi redraws its screen with paste mode off after the answer', async () => {
     const { t, p } = await started();
     p.emit(DIALOG);
     await until(() => awaiting(t));
@@ -421,10 +422,10 @@ describe('prompt submit', () => {
 });
 
 describe('resume picker', () => {
-  it('opens claude\'s own picker', () => {
-    assert.deepEqual(claudeArgsFor('pick', SESSION), ['--resume']);
+  it('opens pi\'s own picker', () => {
+    assert.deepEqual(piArgsFor('pick', SESSION), ['--resume']);
   });
-  it('finds the claude the PTY started by folder and start time, skipping claimed ones', () => {
+  it('finds the pi the PTY started by folder and start time, skipping claimed ones', () => {
     const cwd = __dirname;
     const pty = { cwd, startedAt: 10_000 };
     const live = [
@@ -457,91 +458,67 @@ describe('resolveShell', () => {
 });
 
 describe('ptyEnv', () => {
-  it('pins the session to this board with PK_URL', () => {
-    const env = ptyEnv({ piAgentDir: '/c', isDefaultDir: false, pkUrl: 'http://127.0.0.1:4795' });
-    assert.equal(env.PK_URL, 'http://127.0.0.1:4795');
-    assert.equal(env.CLAUDE_CONFIG_DIR, '/c');
-    assert.equal(env.PORT, undefined);
-  });
-
-  it('sets TERM_PROGRAM to the hub or the board, replacing an inherited one', () => {
-    const saved = { hub: process.env.CLAUDE_HUB, tp: process.env.TERM_PROGRAM };
-    process.env.TERM_PROGRAM = 'vscode';
+  function withEnv(vars, fn) {
+    const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, vars);
     try {
-      delete process.env.CLAUDE_HUB;
-      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).TERM_PROGRAM, 'pi-kanban');
-      process.env.CLAUDE_HUB = '1';
-      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).TERM_PROGRAM, 'claude-code-hub');
+      fn();
     } finally {
-      for (const [k, v] of [['CLAUDE_HUB', saved.hub], ['TERM_PROGRAM', saved.tp]]) {
+      for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
     }
+  }
+
+  it('pins the session to this board with PK_URL and to the board agent dir', () => {
+    const env = ptyEnv({ piAgentDir: '/c', pkUrl: 'http://127.0.0.1:4795' });
+    assert.equal(env.PK_URL, 'http://127.0.0.1:4795');
+    assert.equal(env.PI_CODING_AGENT_DIR, '/c');
+    assert.equal(env.PORT, undefined);
+  });
+
+  it('sets TERM_PROGRAM to the board, replacing an inherited one', () => {
+    withEnv({ TERM_PROGRAM: 'vscode' }, () => {
+      assert.equal(ptyEnv({ piAgentDir: '/c' }).TERM_PROGRAM, 'pi-kanban');
+    });
   });
 
   it('names the terminal with PK_TERMINAL_ID and drops an inherited one', () => {
     const TID = 'dddddddd-0000-0000-0000-000000000001';
-    assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true, pkUrl: 'http://127.0.0.1:1', terminalId: TID }).PK_TERMINAL_ID, TID);
-    const saved = process.env.PK_TERMINAL_ID;
-    process.env.PK_TERMINAL_ID = TID;
-    try {
-      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).PK_TERMINAL_ID, undefined);
-    } finally {
-      if (saved === undefined) delete process.env.PK_TERMINAL_ID;
-      else process.env.PK_TERMINAL_ID = saved;
-    }
+    assert.equal(ptyEnv({ piAgentDir: '/c', pkUrl: 'http://127.0.0.1:1', terminalId: TID }).PK_TERMINAL_ID, TID);
+    withEnv({ PK_TERMINAL_ID: TID }, () => {
+      assert.equal(ptyEnv({ piAgentDir: '/c' }).PK_TERMINAL_ID, undefined);
+    });
   });
 
   it('drops an inherited PK_URL when the port is not known yet', () => {
-    const saved = process.env.PK_URL;
-    process.env.PK_URL = 'http://127.0.0.1:1';
-    try {
-      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).PK_URL, undefined);
-    } finally {
-      if (saved === undefined) delete process.env.PK_URL;
-      else process.env.PK_URL = saved;
-    }
+    withEnv({ PK_URL: 'http://127.0.0.1:1' }, () => {
+      assert.equal(ptyEnv({ piAgentDir: '/c' }).PK_URL, undefined);
+    });
   });
 
-  it('drops an inherited task list, so sharing one stays opt-in', () => {
-    const saved = process.env.CLAUDE_CODE_TASK_LIST_ID;
-    process.env.CLAUDE_CODE_TASK_LIST_ID = 'inherited';
-    try {
-      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).CLAUDE_CODE_TASK_LIST_ID, undefined);
-    } finally {
-      if (saved === undefined) delete process.env.CLAUDE_CODE_TASK_LIST_ID;
-      else process.env.CLAUDE_CODE_TASK_LIST_ID = saved;
-    }
-  });
-
-  it("drops the parent session's effort level", () => {
-    const saved = process.env.CLAUDE_EFFORT;
-    process.env.CLAUDE_EFFORT = 'max';
-    try {
-      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).CLAUDE_EFFORT, undefined);
-    } finally {
-      if (saved === undefined) delete process.env.CLAUDE_EFFORT;
-      else process.env.CLAUDE_EFFORT = saved;
-    }
+  it('drops the subagent marker of a parent pi', () => {
+    withEnv({ PI_SUBAGENT_CHILD: '1' }, () => {
+      assert.equal(ptyEnv({ piAgentDir: '/c' }).PI_SUBAGENT_CHILD, undefined);
+    });
   });
 });
 
 describe('readTerminalConfig', () => {
-  it('is off by default and turns on from the flag or the hub block', () => {
+  it('is off by default and turns on from the flag or the PK_TERMINAL block', () => {
     assert.equal(readTerminalConfig({ argv: [], env: {} }).enabled, false);
     assert.equal(readTerminalConfig({ argv: [], env: {} }).maxSessions, 30);
     assert.equal(readTerminalConfig({ argv: ['--enable-terminal'], env: {} }).enabled, true);
-    const c = readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"enabled":true,"maxSessions":2,"noFlicker":false}' } });
+    const c = readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"enabled":true,"maxSessions":2}' } });
     assert.equal(c.enabled, true);
     assert.equal(c.maxSessions, 2);
-    assert.equal(c.noFlicker, false);
   });
   it('restores terminals unless the block turns it off', () => {
     assert.equal(readTerminalConfig({ argv: [], env: {} }).restore, true);
     assert.equal(readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"restore":false}' } }).restore, false);
   });
-  it('takes the shell from the flag, then the env var, then the hub block', () => {
+  it('takes the shell from the flag, then the env var, then the PK_TERMINAL block', () => {
     const env = { PK_TERMINAL: '{"shell":"pwsh"}', PK_TERMINAL_SHELL: 'gitbash' };
     assert.equal(readTerminalConfig({ argv: [], env }).shell, 'gitbash');
     assert.equal(readTerminalConfig({ argv: [], env, getArgValue: () => 'cmd' }).shell, 'cmd');
@@ -751,7 +728,7 @@ describe('terminal restore', () => {
     assert.deepEqual(t.list().map((s) => s.id), [A]);
     await until(() => t.list().length === 2 && store.data.sessions.length === 2);
     assert.deepEqual(t.list().map((s) => s.id).sort(), [A, B]);
-    assert.ok(pty.spawned.every((p) => p.args.join(' ').includes('--resume')));
+    assert.ok(pty.spawned.every((p) => p.args.join(' ').includes('--session ')));
     assert.deepEqual(store.data.sessions.sort(), [A, B]);
 
     const saves = store.saves;
@@ -775,15 +752,15 @@ describe('terminal restore', () => {
     t.shutdown();
   });
 
-  it('finds a resumed claude by the transcript id and marks the terminal when claude exits', async () => {
+  it('finds a resumed pi by the transcript id and marks the terminal when pi exits', async () => {
     const FRESH = 'aaaaaaaa-0000-0000-0000-000000000006';
     const live = [{ pid: 4242, sessionId: B, startedAt: Date.now() + 1000 }];
     const { t } = service(false, null, { live });
     assert.equal((await t.startNew({ id: FRESH, cwd: os.tmpdir(), resume: B })).id, FRESH);
-    await until(() => t.claudePids()[FRESH] === 4242, 'claude pid');
-    assert.equal(t.list()[0].claudeExited, false);
+    await until(() => t.piPids()[FRESH] === 4242, 'pi pid');
+    assert.equal(t.list()[0].piExited, false);
     live.length = 0;
-    await until(() => t.list()[0].claudeExited, 'claude exit');
+    await until(() => t.list()[0].piExited, 'pi exit');
     t.shutdown();
   });
 
@@ -793,8 +770,8 @@ describe('terminal restore', () => {
     const rekeys = [];
     const { t, store } = service(true, null, { live, rekeys });
     assert.equal((await t.startNew({ id: FRESH, cwd: os.tmpdir() })).id, FRESH);
-    await until(() => t.claudePids()[FRESH] === 4242);
-    assert.equal(t.claudePids()[FRESH], 4242);
+    await until(() => t.piPids()[FRESH] === 4242);
+    assert.equal(t.piPids()[FRESH], 4242);
     const tid = t.list()[0].terminalId;
     live[0] = { ...live[0], sessionId: UNKNOWN };
     await wait(SAVE_MS * 4);
@@ -803,7 +780,7 @@ describe('terminal restore', () => {
     await until(() => t.list()[0].id === B);
     assert.equal(t.list()[0].id, B);
     assert.equal(t.list()[0].terminalId, tid);
-    assert.equal(t.list()[0].claudeExited, false);
+    assert.equal(t.list()[0].piExited, false);
     assert.deepEqual(rekeys, [[FRESH, B]]);
     await until(() => store.data?.sessions?.[0] === B);
     assert.deepEqual(store.data.sessions, [B]);
@@ -815,17 +792,6 @@ describe('terminal restore', () => {
     const r = await t.startNew({ cwd: os.tmpdir(), resume: ELSEWHERE });
     assert.equal(r.status, 409);
     assert.equal(pty.spawned.length, 0);
-    t.shutdown();
-  });
-
-  it('resumes a terminal with the task list it was saved with, and saves only valid ones', async () => {
-    const { t, pty, store } = service(true, { sessions: [A, B], taskLists: { [A]: 'shared-list', [B]: '../up', [UNKNOWN]: 'x' } });
-    t.restore();
-    await until(() => t.list().length === 2 && store.saves > 0);
-    const envOf = (id) => pty.spawned.find((p) => p.args.join(' ').includes(id)).env;
-    assert.equal(envOf(A).CLAUDE_CODE_TASK_LIST_ID, 'shared-list');
-    assert.equal(envOf(B).CLAUDE_CODE_TASK_LIST_ID, undefined);
-    assert.deepEqual(store.data.taskLists, { [A]: 'shared-list' });
     t.shutdown();
   });
 
@@ -848,36 +814,36 @@ describe('terminal restore', () => {
     t.shutdown();
   });
 
-  it('stops restoring a terminal whose claude exited to its shell, and resumes when claude is back', async () => {
+  it('stops restoring a terminal whose pi exited to its shell, and resumes when pi is back', async () => {
     const live = [];
     const { t, store } = service(true, { sessions: [A] }, { live });
     t.restore();
     await until(() => t.list().length === 1);
     live.push({ sessionId: A, pid: 4242, startedAt: Date.now() });
-    await until(() => t.claudePids()[A] === 4242);
+    await until(() => t.piPids()[A] === 4242);
     assert.equal(t.paste(A, 'hi'), true);
 
     live.length = 0;
     await until(() => store.data.sessions.length === 0);
-    assert.deepEqual(t.claudePids(), {});
+    assert.deepEqual(t.piPids(), {});
     assert.equal(t.paste(A, 'hi'), false);
     assert.deepEqual(t.list().map((s) => s.id), [A]);
 
     live.push({ sessionId: A, pid: 4343, startedAt: Date.now() });
     await until(() => store.data.sessions.length === 1);
     assert.deepEqual(store.data.sessions, [A]);
-    assert.equal(t.claudePids()[A], 4343);
+    assert.equal(t.piPids()[A], 4343);
     t.shutdown();
   });
 
-  it('counts a crashed claude as gone, and a claude with no entry yet as starting', async () => {
+  it('counts a crashed pi as gone, and a pi with no entry yet as starting', async () => {
     const live = [];
     const dead = new Set();
     const { t, store } = service(true, { sessions: [A, B] }, { live, dead });
     t.restore();
     await until(() => t.list().length === 2);
     live.push({ sessionId: B, pid: 5000, startedAt: Date.now() });
-    await until(() => t.claudePids()[B] === 5000);
+    await until(() => t.piPids()[B] === 5000);
 
     dead.add(5000);
     await until(() => store.data.sessions.length === 1);
@@ -889,11 +855,11 @@ describe('terminal restore', () => {
     const live = [{ sessionId: A, pid: 6000, startedAt: Date.now() }];
     const { t, store } = service(true, { sessions: [A] }, { live });
     t.restore();
-    await until(() => t.claudePids()[A] === 6000);
+    await until(() => t.piPids()[A] === 6000);
     live[0] = { ...live[0], sessionId: B };
     await wait(SAVE_MS * 4);
     assert.deepEqual(store.data.sessions, [B]);
-    assert.equal(t.claudePids()[B], 6000);
+    assert.equal(t.piPids()[B], 6000);
     t.shutdown();
   });
 

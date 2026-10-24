@@ -78,7 +78,7 @@ describe('terminalClaims', () => {
   ].join('\n');
 
   function claimsFor(shortcut) {
-    const context = vm.createContext({ terminalShortcut: shortcut, hub: { forwards: () => false } });
+    const context = vm.createContext({ terminalShortcut: shortcut });
     vm.runInContext(src, context);
     return new Set(context.terminalClaims().map(claimSig));
   }
@@ -303,18 +303,6 @@ describe('createTerminalFrame', () => {
       meta: false,
     });
     assert.equal(term.keyFilter(ev({ ctrlKey: true, key: 'l', code: 'KeyL' })), true);
-  });
-
-  it('hands back a hub key the way the SDK names it', () => {
-    const { comboOf } = require('./vendor/claude-hub-sdk.js');
-    const w = stubWindow({ ClaudeHub: { comboOf } });
-    w.send(init);
-    w.send({ type: 'pk-term:claims', keys: [], forward: ['ctrl+alt+a'] });
-    const term = w.terms[0];
-    const ev = (e) => ({ type: 'keydown', preventDefault() {}, ...press({ ctrlKey: true, altKey: true, ...e }) });
-    assert.equal(term.keyFilter(ev({ key: 'a', code: 'KeyA' })), false);
-    assert.equal(term.keyFilter(ev({ key: 'ф', code: 'KeyA' })), false);
-    assert.equal(term.keyFilter(ev({ key: 'q', code: 'KeyA' })), true);
   });
 
   it('hands a claimed key to the board when the frame has focus but xterm does not', () => {

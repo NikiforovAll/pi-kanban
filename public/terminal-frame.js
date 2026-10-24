@@ -25,9 +25,6 @@
 
   const isClaimed = (claims, e) => keySigs(e).some((s) => claims.has(s));
 
-  // Hub keys are matched the way the SDK matches them, so a layout that moves a key agrees on both sides.
-  const handsBack = (claims, forward, comboOf, e) => (!!comboOf && forward.has(comboOf(e))) || isClaimed(claims, e);
-
   function parentOriginOf(hash) {
     const m = /[#&]p=([^&]*)/.exec(hash || '');
     if (!m) return null;
@@ -100,9 +97,7 @@
       ackPending: 0,
       ackTimer: null,
       claims: new Set(),
-      forward: new Set(),
     };
-    const comboOf = win.ClaudeHub?.comboOf;
 
     function up(t, data) {
       if (parentOrigin) win.parent.postMessage({ ...data, type: MSG + t }, parentOrigin);
@@ -123,7 +118,7 @@
       term.refresh(0, term.rows - 1);
     }
 
-    // The fit addon measures 0×0 while the board's pane (or the hub's iframe) is display:none.
+    // The fit addon measures 0×0 while the board's pane is display:none.
     function fit() {
       if (!state.fit || !host.offsetWidth || !host.offsetHeight) return;
       try {
@@ -152,7 +147,7 @@
     }
 
     function forwardClaimed(e) {
-      if (!handsBack(state.claims, state.forward, comboOf, e)) return false;
+      if (!isClaimed(state.claims, e)) return false;
       e.preventDefault();
       up('key', { key: e.key, code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
       return true;
@@ -180,7 +175,7 @@
         scrollback: o.scrollback,
         cursorBlink: true,
         allowProposedApi: true,
-        // xterm's default asks with confirm() and opens a window, which the installed hub window blocks.
+        // xterm's default asks with confirm() and opens a window, which an installed app window blocks.
         linkHandler: { activate: (_e, uri) => up('link', { href: uri }), allowNonHttpProtocols: true },
         ...o.themeOptions,
       });
@@ -240,7 +235,7 @@
         return false;
       });
       // xterm leaves OSC 10/11 color queries unanswered, so apps that pick a palette from the
-      // background (Claude Code's Auto theme) assume dark even on a light theme.
+      // background assume dark even on a light theme.
       for (const [code, key] of [
         [10, 'foreground'],
         [11, 'background'],
@@ -255,7 +250,7 @@
       term.onData((d) => send({ t: 'in', d }));
       term.onResize(({ cols, rows }) => send({ t: 'resize', cols, rows }));
       // One fit per frame while a drag resizes the pane. The atlas is rebuilt only when the frame comes
-      // back from 0×0, which is also how a hidden hub iframe or pane shows again.
+      // back from 0×0, which is also how a hidden pane shows again.
       let frame = 0;
       let visible = false;
       new win.ResizeObserver(() => {
@@ -268,7 +263,7 @@
           visible = nowVisible;
         });
       }).observe(host);
-      // Vimium eats Escape inside a text field and only blurs it, so the key never reaches Claude.
+      // Vimium eats Escape inside a text field and only blurs it, so the key never reaches pi.
       // A blur no click caused, while this frame keeps focus, is that Escape. When the board takes
       // focus back, this document loses it, so that blur is not one.
       let pointerDown = false;
@@ -382,7 +377,6 @@
           return applyFont(m.size);
         case 'claims':
           state.claims = new Set((m.keys || []).map(claimSig));
-          state.forward = new Set(m.forward || []);
           return;
         case 'focus':
           return state.term.focus();
@@ -397,7 +391,7 @@
   }
 
   if (typeof module === 'object' && module.exports) {
-    module.exports = { createTerminalFrame, claimSig, isClaimed, handsBack, parentOriginOf, tailOf, pathsIn };
+    module.exports = { createTerminalFrame, claimSig, isClaimed, parentOriginOf, tailOf, pathsIn };
   } else {
     createTerminalFrame(root);
   }

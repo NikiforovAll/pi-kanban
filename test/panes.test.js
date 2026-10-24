@@ -167,19 +167,18 @@ describe('pane store', () => {
 });
 
 describe('isOwnOrigin', () => {
-  const opts = { boardPort: 3541, boardHosts: ['box.lan'], hubUrl: 'http://localhost:3540' };
+  const opts = { boardPort: 3541, boardHosts: ['box.lan'] };
 
-  it('matches every name of the board and the hub', () => {
-    for (const u of ['http://localhost:3541/x', 'http://127.0.0.1:3541', 'http://[::1]:3541/', 'http://box.lan:3541', 'http://127.0.0.1:3540/']) {
+  it('matches every name of the board', () => {
+    for (const u of ['http://localhost:3541/x', 'http://127.0.0.1:3541', 'http://[::1]:3541/', 'http://box.lan:3541']) {
       assert.equal(isOwnOrigin(u, opts), true, u);
     }
   });
 
   it('passes another port, scheme or host', () => {
-    for (const u of ['http://localhost:8228', 'https://localhost:3541', 'http://other.lan:3541', 'https://example.com', 'not a url']) {
+    for (const u of ['http://localhost:8228', 'http://127.0.0.1:3540/', 'https://localhost:3541', 'http://other.lan:3541', 'https://example.com', 'not a url']) {
       assert.equal(isOwnOrigin(u, opts), false, u);
     }
-    assert.equal(isOwnOrigin('http://localhost:3540', { boardPort: 3541 }), false);
   });
 });
 

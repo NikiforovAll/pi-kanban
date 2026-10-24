@@ -266,39 +266,26 @@ describe('upgradeVerdict', { skip: !netGuard?.createNetGuard }, () => {
 });
 
 describe('frameGuard', { skip: !netGuard?.createNetGuard }, () => {
-  function headersFor(reqPath, hubUrl) {
-    const saved = process.env.HUB_URL;
-    if (hubUrl) process.env.HUB_URL = hubUrl;
-    else delete process.env.HUB_URL;
-    try {
-      const guard = netGuard.createNetGuard({ selfFramedPaths: ['/framed.html'] });
-      const headers = {};
-      const res = { setHeader: (k, v) => (headers[k.toLowerCase()] = v) };
-      let nexted = false;
-      guard.frameGuard({ path: reqPath, socket: { localPort: 3541 } }, res, () => (nexted = true));
-      assert.ok(nexted);
-      return headers;
-    } finally {
-      if (saved === undefined) delete process.env.HUB_URL;
-      else process.env.HUB_URL = saved;
-    }
+  function headersFor(reqPath) {
+    const guard = netGuard.createNetGuard({ selfFramedPaths: ['/framed.html'] });
+    const headers = {};
+    const res = { setHeader: (k, v) => (headers[k.toLowerCase()] = v) };
+    let nexted = false;
+    guard.frameGuard({ path: reqPath, socket: { localPort: 3541 } }, res, () => (nexted = true));
+    assert.ok(nexted);
+    return headers;
   }
 
-  it('lets only its own port frame a self-framed page when alone', () => {
+  it('lets only its own port frame a self-framed page', () => {
     const h = headersFor('/framed.html');
     assert.equal(h['content-security-policy'], "frame-ancestors 'self' http://localhost:3541 http://127.0.0.1:3541");
     assert.equal(h['x-frame-options'], undefined);
   });
 
-  it('denies framing of every other page when alone', () => {
+  it('denies framing of every other page', () => {
     const h = headersFor('/index.html');
     assert.equal(h['content-security-policy'], "frame-ancestors 'none'");
     assert.equal(h['x-frame-options'], 'DENY');
-  });
-
-  it('keeps the hub policy for a self-framed page', () => {
-    const h = headersFor('/framed.html', 'http://localhost:3540');
-    assert.match(h['content-security-policy'], /http:\/\/localhost:\*/);
   });
 });
 

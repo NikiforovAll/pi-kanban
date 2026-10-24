@@ -30,19 +30,19 @@ async function until(check, what, timeoutMs = 15000) {
   }
 }
 
-// The restore test resumes a session, which would start the real claude, so a stub goes
-// first on PATH. On Windows, like claude, it outlives a closed console and Ctrl+C, so only a tree
-// kill ends it. On POSIX claude exits on the SIGHUP that pty.kill() sends, so the stub does too.
-function stubClaude() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-fake-claude-'));
-  const js = path.join(dir, 'claude.js');
+// The restore test resumes a session, which would start the real pi, so a stub goes
+// first on PATH. On Windows it outlives a closed console and Ctrl+C, so only a tree
+// kill ends it. On POSIX it exits on the SIGHUP that pty.kill() sends.
+function stubPi() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-fake-pi-'));
+  const js = path.join(dir, 'pi.js');
   fs.writeFileSync(js, [
     "require('node:fs').writeFileSync(require('node:path').join(__dirname, 'ran'), String(process.pid));",
     process.platform === 'win32' ? "for (const s of ['SIGHUP', 'SIGINT', 'SIGTERM']) process.on(s, () => {});" : '',
     'setTimeout(() => {}, 600000);',
   ].join('\n'));
-  if (process.platform === 'win32') fs.writeFileSync(path.join(dir, 'claude.cmd'), `@"${process.execPath}" "${js}" %*\r\n`);
-  else fs.writeFileSync(path.join(dir, 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${js}" "$@"\n`, { mode: 0o755 });
+  if (process.platform === 'win32') fs.writeFileSync(path.join(dir, 'pi.cmd'), `@"${process.execPath}" "${js}" %*\r\n`);
+  else fs.writeFileSync(path.join(dir, 'pi'),`#!/bin/sh\nexec "${process.execPath}" "${js}" "$@"\n`, { mode: 0o755 });
   process.env.PATH = `${dir}${path.delimiter}${process.env.PATH}`;
   return dir;
 }
@@ -64,12 +64,11 @@ describe('terminal host process', { skip: !ptyAvailable }, () => {
   let stubDir;
 
   before(async () => {
-    stubDir = stubClaude();
+    stubDir = stubPi();
     terminal = createTerminalClient({
-      config: { enabled: true, restore: true, shell: SHELL, maxSessions: 30, scrollback: 100, noFlicker: true },
+      config: { enabled: true, restore: true, shell: SHELL, maxSessions: 30, scrollback: 100 },
       net: { EXPOSED: false, upgradeVerdict: () => null },
       piAgentDir: os.tmpdir(),
-      isDefaultDir: false,
       sessionsDir: os.tmpdir(),
       token: TOKEN,
       load: () => events.saved,
@@ -91,7 +90,7 @@ describe('terminal host process', { skip: !ptyAvailable }, () => {
     terminal.shutdown();
     server.close();
     const stubPid = Number(fs.readFileSync(path.join(stubDir, 'ran'), 'utf8'));
-    await until(() => !alive(stubPid), 'the restored claude to be gone', 10000);
+    await until(() => !alive(stubPid), 'the restored pi to be gone', 10000);
     fs.rmSync(stubDir, { recursive: true, force: true });
   });
 
@@ -134,6 +133,6 @@ describe('terminal host process', { skip: !ptyAvailable }, () => {
     terminal.restore();
     await until(() => terminal.isRunning(KNOWN), 'restored terminal');
     assert.ok(events.asks.includes(KNOWN));
-    await until(() => fs.existsSync(path.join(stubDir, 'ran')), 'the stub, not the real claude, to start');
+    await until(() => fs.existsSync(path.join(stubDir, 'ran')), 'the stub, not the real pi, to start');
   });
 });
