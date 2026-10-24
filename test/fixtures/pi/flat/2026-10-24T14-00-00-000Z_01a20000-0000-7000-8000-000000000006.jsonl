@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"01a20000-0000-7000-8000-000000000006","timestamp":"2026-10-24T14:00:00.000Z","cwd":"/home/dev/app"}
+{"type":"model_change","id":"f0000001","parentId":null,"timestamp":"2026-10-24T14:00:00.100Z","provider":"codemie","modelId":"gpt-6-luna"}
+{"type":"message","id":"f0000002","parentId":"f0000001","timestamp":"2026-10-24T14:00:01.000Z","message":{"role":"user","content":"ping","timestamp":1792850401000}}
+{"type":"message","id":"f0000003","parentId":"f0000002","timestamp":"2026-10-24T14:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"pong"}],"api":"openai-responses","provider":"codemie","model":"gpt-6-luna","usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":3000,"reasoning":0,"totalTokens":3004,"cost":{"total":0.0004}},"stopReason":"stop","timestamp":1792850401010}}

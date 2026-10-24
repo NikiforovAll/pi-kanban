@@ -1,0 +1,159 @@
+{
+  "$id": "pi-session-entry.schema.json",
+  "title": "pi Session JSONL Line",
+  "description": "A single line of a pi session file (version 3): the header on the first line, then tree entries linked by parentId. Source: @earendil-works/pi-coding-agent dist/core/session-manager.d.ts.",
+  "type": "object",
+  "required": ["type"],
+  "oneOf": [
+    {
+      "title": "Session header",
+      "properties": {
+        "type": { "const": "session" },
+        "version": { "type": "number" },
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "cwd": { "type": "string" },
+        "parentSession": { "type": "string" }
+      },
+      "required": ["type", "id", "timestamp", "cwd"]
+    },
+    {
+      "title": "Message entry",
+      "properties": {
+        "type": { "const": "message" },
+        "message": {
+          "type": "object",
+          "required": ["role"],
+          "oneOf": [
+            {
+              "properties": {
+                "role": { "const": "user" },
+                "content": { "type": ["string", "array"] }
+              },
+              "required": ["role", "content"]
+            },
+            {
+              "properties": {
+                "role": { "const": "assistant" },
+                "content": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["type"],
+                    "oneOf": [
+                      { "properties": { "type": { "const": "text" }, "text": { "type": "string" } }, "required": ["type", "text"] },
+                      { "properties": { "type": { "const": "thinking" }, "thinking": { "type": "string" } }, "required": ["type", "thinking"] },
+                      { "properties": { "type": { "const": "toolCall" }, "id": { "type": "string" }, "name": { "type": "string" }, "arguments": { "type": "object" } }, "required": ["type", "id", "name", "arguments"] }
+                    ]
+                  }
+                },
+                "model": { "type": "string" },
+                "provider": { "type": "string" },
+                "usage": {
+                  "type": "object",
+                  "properties": {
+                    "input": { "type": "number" },
+                    "output": { "type": "number" },
+                    "cacheRead": { "type": "number" },
+                    "cacheWrite": { "type": "number" }
+                  },
+                  "required": ["input", "output", "cacheRead", "cacheWrite"]
+                },
+                "stopReason": { "enum": ["stop", "length", "toolUse", "error", "aborted"] },
+                "errorMessage": { "type": "string" }
+              },
+              "required": ["role", "content", "model", "usage", "stopReason"]
+            },
+            {
+              "properties": {
+                "role": { "const": "toolResult" },
+                "toolCallId": { "type": "string" },
+                "toolName": { "type": "string" },
+                "content": { "type": "array" },
+                "isError": { "type": "boolean" }
+              },
+              "required": ["role", "toolCallId", "toolName", "content", "isError"]
+            },
+            {
+              "properties": {
+                "role": { "const": "bashExecution" },
+                "command": { "type": "string" },
+                "output": { "type": "string" },
+                "exitCode": { "type": ["number", "null"] }
+              },
+              "required": ["role", "command", "output"]
+            },
+            {
+              "properties": {
+                "role": { "enum": ["custom", "branchSummary", "compactionSummary", "system"] }
+              },
+              "required": ["role"]
+            }
+          ]
+        }
+      },
+      "required": ["type", "message"]
+    },
+    {
+      "title": "Model change",
+      "properties": { "type": { "const": "model_change" }, "provider": { "type": "string" }, "modelId": { "type": "string" } },
+      "required": ["type", "provider", "modelId"]
+    },
+    {
+      "title": "Thinking level change",
+      "properties": { "type": { "const": "thinking_level_change" }, "thinkingLevel": { "type": "string" } },
+      "required": ["type", "thinkingLevel"]
+    },
+    {
+      "title": "Compaction",
+      "properties": {
+        "type": { "const": "compaction" },
+        "summary": { "type": "string" },
+        "firstKeptEntryId": { "type": "string" },
+        "tokensBefore": { "type": "number" },
+        "fromHook": { "type": "boolean" }
+      },
+      "required": ["type", "summary", "firstKeptEntryId", "tokensBefore"]
+    },
+    {
+      "title": "Branch summary",
+      "properties": { "type": { "const": "branch_summary" }, "fromId": { "type": "string" }, "summary": { "type": "string" } },
+      "required": ["type", "fromId", "summary"]
+    },
+    {
+      "title": "Extension state",
+      "properties": { "type": { "const": "custom" }, "customType": { "type": "string" } },
+      "required": ["type", "customType"]
+    },
+    {
+      "title": "Extension message",
+      "properties": {
+        "type": { "const": "custom_message" },
+        "customType": { "type": "string" },
+        "content": { "type": ["string", "array"] },
+        "display": { "type": "boolean" }
+      },
+      "required": ["type", "customType", "content", "display"]
+    },
+    {
+      "title": "Label",
+      "properties": { "type": { "const": "label" }, "targetId": { "type": "string" }, "label": { "type": ["string", "null"] } },
+      "required": ["type", "targetId"]
+    },
+    {
+      "title": "Session info",
+      "properties": { "type": { "const": "session_info" }, "name": { "type": "string" } },
+      "required": ["type"]
+    }
+  ],
+  "if": { "not": { "properties": { "type": { "const": "session" } } } },
+  "then": {
+    "properties": {
+      "id": { "type": "string" },
+      "parentId": { "type": ["string", "null"] },
+      "timestamp": { "type": "string" }
+    },
+    "required": ["id", "parentId", "timestamp"]
+  },
+  "additionalProperties": true
+}

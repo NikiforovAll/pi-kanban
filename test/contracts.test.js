@@ -1,6 +1,6 @@
 const { describe, it, before, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { readFileSync, writeFileSync, appendFileSync, mkdirSync, mkdtempSync, rmSync } = require('fs');
+const { readFileSync, writeFileSync, appendFileSync, mkdirSync, mkdtempSync, rmSync, readdirSync } = require('fs');
 const path = require('path');
 const os = require('os');
 const Ajv = require('ajv');
@@ -32,6 +32,7 @@ const {
   buildLoopInfoFromState,
   modelDisplayName
 } = require('../lib/parsers');
+const { readClaudeLines } = require('../lib/pi-transcript');
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);
@@ -50,6 +51,60 @@ function loadFixture(name) {
 function loadFixtureJson(name) {
   return JSON.parse(loadFixture(name));
 }
+
+const PI_PROJECT = path.join(FIXTURES_DIR, 'pi', 'agent', 'sessions', '--C--work-demo--');
+const PI_FLAT = path.join(FIXTURES_DIR, 'pi', 'flat');
+const piFile = (dir, n) => path.join(dir, readdirSync(dir).find((f) => f.endsWith(`-${String(n).padStart(12, '0')}.jsonl`)));
+const PI = {
+  chat: piFile(PI_PROJECT, 1),
+  tools: piFile(PI_PROJECT, 2),
+  compact: piFile(PI_PROJECT, 3),
+  branch: piFile(PI_PROJECT, 4),
+  fork: piFile(PI_FLAT, 5),
+  posix: piFile(PI_FLAT, 6),
+};
+const CLAUDE_TRANSCRIPT = path.join(FIXTURES_DIR, 'session.jsonl');
+
+// Entries get ids e1, e2, ... chained by parentId unless they bring their own.
+function piSession(entries, header = {}) {
+  const out = [{ type: 'session', version: 3, id: 's1', timestamp: '2026-01-01T00:00:00.000Z', cwd: 'C:\\proj', ...header }];
+  let parentId = null;
+  entries.forEach((e, i) => {
+    const id = e.id || `e${i + 1}`;
+    out.push({ timestamp: '2026-01-01T00:00:00.000Z', parentId, ...e, id });
+    parentId = id;
+  });
+  return out.map((l) => `${JSON.stringify(l)}\n`).join('');
+}
+const piLine = (entry) => `${JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', ...entry })}\n`;
+const piUser = (content, extra) => ({ type: 'message', ...extra, message: { role: 'user', content } });
+const piReply = (content, { model = 'gpt-6-luna', usage = { input: 1, output: 2, cacheRead: 100, cacheWrite: 0 }, stopReason = 'stop', ...extra } = {}) => ({
+  type: 'message', ...extra, message: { role: 'assistant', content, model, provider: 'codemie', usage, stopReason },
+});
+const piText = (text) => [{ type: 'text', text }];
+const piCall = (id, name, args, extra) => piReply([{ type: 'toolCall', id, name, arguments: args }], { stopReason: 'toolUse', ...extra });
+const piResult = (toolCallId, toolName, text, extra) => ({
+  type: 'message', message: { role: 'toolResult', toolCallId, toolName, content: [{ type: 'text', text }], isError: false, ...extra },
+});
+
+function withTmp(fn) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-test-'));
+  const done = () => rmSync(dir, { recursive: true, force: true });
+  try {
+    const out = fn(dir);
+    if (out && typeof out.then === 'function') return out.finally(done);
+    done();
+    return out;
+  } catch (err) {
+    done();
+    throw err;
+  }
+}
+const writeTmp = (dir, text, name = 's.jsonl') => {
+  const p = path.join(dir, name);
+  writeFileSync(p, text);
+  return p;
+};
 
 // --- Schema validation tests ---
 
@@ -141,16 +196,37 @@ describe('Schema: Sessions Index', () => {
   });
 });
 
+describe('Schema: pi session entries', () => {
+  const validate = ajv.compile(loadSchema('pi-session-entry.schema.json'));
+
+  it('validates every line of every pi fixture', () => {
+    for (const file of Object.values(PI)) {
+      for (const line of readFileSync(file, 'utf8').trim().split('\n')) {
+        const obj = JSON.parse(line);
+        assert.ok(validate(obj), `${path.basename(file)} type="${obj.type}" failed: ${JSON.stringify(validate.errors)}`);
+      }
+    }
+  });
+
+  it('rejects an entry without a parentId', () => {
+    assert.ok(!validate({ type: 'model_change', id: 'x', timestamp: 't', provider: 'p', modelId: 'm' }));
+  });
+});
+
 describe('Schema: Session JSONL Lines', () => {
   const validate = ajv.compile(loadSchema('session-jsonl-line.schema.json'));
 
-  it('validates all lines in fixture JSONL', () => {
-    const lines = loadFixture('session.jsonl').trim().split('\n');
-    for (const line of lines) {
-      const obj = JSON.parse(line);
-      const valid = validate(obj);
-      assert.ok(valid, `Line type="${obj.type}" failed: ${JSON.stringify(validate.errors)}`);
+  it('validates every line the pi fixtures map to', () => {
+    const types = new Set();
+    for (const file of Object.values(PI)) {
+      for (const obj of readClaudeLines(file)) {
+        types.add(obj.subtype ? `${obj.type}:${obj.subtype}` : obj.type);
+        assert.ok(validate(obj), `${path.basename(file)} type="${obj.type}" failed: ${JSON.stringify(validate.errors)}`);
+      }
     }
+    assert.deepEqual([...types].sort(), [
+      'assistant', 'custom-title', 'system:compact_boundary', 'system:model_change', 'system:thinking_level_change', 'user',
+    ]);
   });
 });
 
@@ -236,41 +312,34 @@ describe('Parser: parseSessionsIndex', () => {
 });
 
 describe('Parser: parseJsonlLine', () => {
-  const lines = readFileSync(path.join(FIXTURES_DIR, 'session.jsonl'), 'utf8').trim().split('\n');
+  const chat = readClaudeLines(PI.chat);
+  const tools = readClaudeLines(PI.tools);
 
-  it('parses progress/meta line', () => {
-    const parsed = parseJsonlLine(lines[0]);
-    assert.equal(parsed.type, 'progress');
-    assert.equal(parsed.slug, 'test-session');
-    assert.equal(parsed.cwd, '/home/user/project');
+  it('parses a mapped system line to its base fields', () => {
+    const parsed = parseJsonlLine(chat[0]);
+    assert.deepEqual(parsed, { type: 'system', timestamp: '2026-10-24T10:00:00.100Z', sessionId: '01a20000-0000-7000-8000-000000000001', uuid: 'a0000001' });
   });
 
   it('parses user message', () => {
-    const parsed = parseJsonlLine(lines[1]);
+    const parsed = parseJsonlLine(chat.find((l) => l.message?.content === 'And in French?'));
     assert.equal(parsed.role, 'user');
-    assert.equal(parsed.content, 'Fix the login bug');
+    assert.equal(parsed.content, 'And in French?');
     assert.equal(parsed.isMeta, false);
   });
 
   it('parses assistant text message', () => {
-    const parsed = parseJsonlLine(lines[2]);
+    const parsed = parseJsonlLine(chat.find((l) => l.type === 'assistant'));
     assert.equal(parsed.role, 'assistant');
-    assert.equal(parsed.blocks.length, 1);
-    assert.equal(parsed.blocks[0].type, 'text');
+    assert.equal(parsed.model, 'gpt-6-luna');
+    assert.deepEqual(parsed.blocks.map((b) => b.type), ['thinking', 'text']);
   });
 
   it('parses assistant tool_use message', () => {
-    const parsed = parseJsonlLine(lines[3]);
-    assert.equal(parsed.role, 'assistant');
-    assert.equal(parsed.blocks.length, 2);
+    const parsed = parseJsonlLine(tools.find((l) => l.type === 'assistant'));
+    assert.equal(parsed.blocks.length, 1);
     assert.equal(parsed.blocks[0].type, 'tool_use');
     assert.equal(parsed.blocks[0].name, 'Read');
-    assert.equal(parsed.blocks[1].name, 'Bash');
-  });
-
-  it('parses file-history-snapshot', () => {
-    const parsed = parseJsonlLine(lines[6]);
-    assert.equal(parsed.type, 'file-history-snapshot');
+    assert.equal(parsed.blocks[0].input.file_path, 'C:\\work\\demo\\README.md');
   });
 
   it('parses queued message (queue-operation enqueue)', () => {
@@ -288,431 +357,167 @@ describe('Parser: parseJsonlLine', () => {
 });
 
 describe('Parser: readRecentMessages', () => {
-  const jsonlPath = path.join(FIXTURES_DIR, 'session.jsonl');
+  const tools = () => readRecentMessages(PI.tools, 100);
 
-  it('reads messages from JSONL file', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    assert.ok(messages.length > 0);
-    const types = messages.map(m => m.type);
-    assert.ok(types.includes('user'));
-    assert.ok(types.includes('assistant'));
+  it('reads user and assistant messages', () => {
+    assert.deepEqual(readRecentMessages(PI.chat, 30).map((m) => [m.type, m.text]), [
+      ['user', 'Say hello in one word.'],
+      ['assistant', 'Hello.'],
+      ['user', 'And in French?'],
+      ['assistant', 'Bonjour.'],
+    ]);
   });
 
-  it('includes tool_use messages', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const toolMsgs = messages.filter(m => m.type === 'tool_use');
-    assert.ok(toolMsgs.length > 0);
-    assert.ok(toolMsgs.some(m => m.tool === 'Read'));
-    assert.ok(toolMsgs.some(m => m.tool === 'Bash'));
+  it('maps pi tool names to the Claude tool names', () => {
+    assert.deepEqual(tools().filter((m) => m.type === 'tool_use').map((m) => m.tool), ['Read', 'Bash', 'Edit', 'TodoWrite', 'Agent', 'Agent', 'Agent']);
   });
 
-  it('extracts file_path detail for Read tool', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const readMsg = messages.find(m => m.tool === 'Read');
-    assert.equal(readMsg.detail, 'login.ts');
-    assert.equal(readMsg.fullDetail, '/home/user/project/src/auth/login.ts');
+  it('extracts the file and command details', () => {
+    const read = tools().find((m) => m.tool === 'Read');
+    assert.equal(read.detail, 'README.md');
+    assert.equal(read.fullDetail, 'C:\\work\\demo\\README.md');
+    assert.equal(tools().find((m) => m.tool === 'Bash').detail, 'npm test');
   });
 
-  it('extracts command detail for Bash tool', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const bashMsg = messages.find(m => m.tool === 'Bash');
-    assert.ok(bashMsg.detail);
+  it('attaches tool results, an error result included', () => {
+    const msgs = tools();
+    assert.equal(msgs.find((m) => m.tool === 'Read').toolResult, '# Demo\n\nTeh demo app.');
+    assert.ok(msgs.find((m) => m.tool === 'Bash').toolResult.includes('Missing script'));
+  });
+
+  it('gives an Edit its old and new strings', () => {
+    const edit = tools().find((m) => m.tool === 'Edit');
+    assert.deepEqual(edit.params, { file_path: 'C:\\work\\demo\\README.md', old_string: 'Teh demo', new_string: 'The demo' });
+  });
+
+  it('keeps every edit of a multi-edit call', () => withTmp((dir) => {
+    const p = writeTmp(dir, piSession([piCall('c1', 'edit', { path: 'a.txt', edits: [{ oldText: 'a', newText: 'b' }, { oldText: 'c', newText: 'd' }] })]));
+    const edit = readRecentMessages(p, 10).find((m) => m.tool === 'Edit');
+    assert.deepEqual(edit.params.edits, [{ old_string: 'a', new_string: 'b' }, { old_string: 'c', new_string: 'd' }]);
+  }));
+
+  it('extracts the subagent fields', () => {
+    const agent = tools().find((m) => m.tool === 'Agent');
+    assert.equal(agent.toolUseId, 'call_s1|fc_s1');
+    assert.equal(agent.agentType, 'scout');
+    assert.equal(agent.agentPrompt, 'List the files in the current directory and reply with just the count.');
+  });
+
+  it('shows a failed reply, a shell command and no hidden extension message', () => {
+    const msgs = tools();
+    assert.ok(msgs.some((m) => m.type === 'assistant' && m.text === 'Error: 529 overloaded'));
+    const shell = msgs.find((m) => m.systemLabel === 'Shell command');
+    assert.equal(shell.text, '$ git status --short\n M README.md');
+    assert.ok(!msgs.some((m) => m.text?.includes('Background task completed')));
+  });
+
+  it('renders a compaction as a chip with its summary', () => {
+    const chip = readRecentMessages(PI.compact, 30).find((m) => m.systemLabel === 'Compacted');
+    assert.equal(chip.compactSummary, '## Goal\nPlan the release.\n\n## Progress\nSteps 1 and 2 drafted.');
+  });
+
+  it('shows only the active branch, with the branch summary', () => {
+    const msgs = readRecentMessages(PI.branch, 30);
+    assert.deepEqual(msgs.map((m) => m.text), ['Pick a name for the CLI.', 'How about demo?', 'Tried a longer name; the user went back.', 'Make it shorter.', 'dm']);
+    assert.equal(msgs[2].systemLabel, 'Branch summary');
   });
 
   it('respects limit', () => {
-    const messages = readRecentMessages(jsonlPath, 2);
-    assert.ok(messages.length <= 2);
+    assert.deepEqual(readRecentMessages(PI.chat, 2).map((m) => m.text), ['And in French?', 'Bonjour.']);
   });
 
-  it('returns empty for non-existent file', () => {
-    const messages = readRecentMessages('/nonexistent/path.jsonl', 10);
-    assert.deepEqual(messages, []);
+  it('returns empty for a missing file and for a file without a pi header', () => {
+    assert.deepEqual(readRecentMessages('/nonexistent/path.jsonl', 10), []);
+    assert.deepEqual(readRecentMessages(CLAUDE_TRANSCRIPT, 10), []);
   });
 
-  it('extracts Agent tool fields (toolUseId, agentType, agentPrompt)', () => {
-    const messages = readRecentMessages(jsonlPath, 20);
-    const agentMsg = messages.find(m => m.tool === 'Agent');
-    assert.ok(agentMsg, 'should find an Agent tool_use message');
-    assert.equal(agentMsg.toolUseId, 'tu_agent_01');
-    assert.equal(agentMsg.agentType, 'Explore');
-    assert.equal(agentMsg.agentPrompt, 'Find all auth middleware files');
-  });
-
-  it('attaches tool_result to matching tool_use messages', () => {
-    const messages = readRecentMessages(jsonlPath, 20);
-    const readMsg = messages.find(m => m.tool === 'Read');
-    assert.ok(readMsg, 'should find a Read tool_use message');
-    assert.ok(readMsg.toolResult, 'Read message should have toolResult');
-    assert.ok(readMsg.toolResult.includes('import { hash }'), 'toolResult should contain file content');
-
-    const bashMsg = messages.find(m => m.tool === 'Bash');
-    assert.ok(bashMsg, 'should find a Bash tool_use message');
-    assert.ok(bashMsg.toolResult, 'Bash message should have toolResult');
-    assert.ok(bashMsg.toolResult.includes('authenticate'), 'toolResult should contain grep output');
-  });
-
-  it('extracts SendMessage detail with recipient and summary', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const sendMsg = messages.find(m => m.tool === 'SendMessage' && m.detail && m.detail.includes('worker-1'));
-    assert.ok(sendMsg, 'should find a SendMessage tool_use');
-    assert.equal(sendMsg.detail, '→ worker-1: Please review the auth module');
-    assert.equal(sendMsg.fullDetail, 'Check the auth module for security issues');
-  });
-
-  it('extracts SendMessage params (to, summary, protocol)', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const sendMsg = messages.find(m => m.tool === 'SendMessage' && m.params?.to === 'worker-1');
-    assert.ok(sendMsg, 'should find SendMessage with params');
-    assert.equal(sendMsg.params.to, 'worker-1');
-    assert.equal(sendMsg.params.summary, 'Please review the auth module');
-  });
-
-  it('extracts SendMessage protocol object when message is an object', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const protoMsg = messages.find(m => m.tool === 'SendMessage' && m.params?.to === 'worker-3');
-    assert.ok(protoMsg, 'should find SendMessage with protocol message');
-    assert.deepEqual(protoMsg.params.protocol, { type: 'task_assignment', taskId: '99', subject: 'Deploy hotfix' });
-  });
-
-  it('extracts TaskCreate subject param', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const createMsg = messages.find(m => m.tool === 'TaskCreate');
-    assert.ok(createMsg, 'should find a TaskCreate tool_use');
-    assert.equal(createMsg.params.subject, 'Fix login null guard');
-  });
-
-  it('extracts TaskUpdate taskId with # prefix', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const updateMsg = messages.find(m => m.tool === 'TaskUpdate');
-    assert.ok(updateMsg, 'should find a TaskUpdate tool_use');
-    assert.equal(updateMsg.params.taskId, '#42');
-    assert.equal(updateMsg.params.status, 'completed');
-  });
-
-  it('parses teammate_terminated protocol with protocolLabel and protocolData', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const terminated = messages.find(m => m.type === 'teammate' && m.protocolType === 'teammate_terminated');
-    assert.ok(terminated, 'should find teammate_terminated message');
-    assert.equal(terminated.teammateId, 'worker-1');
-    assert.equal(terminated.protocolLabel, 'worker-1 has shut down');
-    assert.ok(terminated.protocolData, 'should have protocolData');
-    assert.equal(terminated.protocolData.type, 'teammate_terminated');
-    assert.equal(terminated.protocolData.from, 'worker-1');
-  });
-
-  it('parses shutdown_response with protocolData', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const shutdown = messages.find(m => m.type === 'teammate' && m.protocolType === 'shutdown_response');
-    assert.ok(shutdown, 'should find shutdown_response message');
-    assert.equal(shutdown.teammateId, 'worker-2');
-    assert.equal(shutdown.protocolLabel, 'shutdown approved');
-    assert.ok(shutdown.protocolData, 'should have protocolData');
-    assert.equal(shutdown.protocolData.approve, true);
-  });
-
-  it('uses default protocolLabel with underscores replaced by spaces', () => {
-    const messages = readRecentMessages(jsonlPath, 30);
-    const taskAssign = messages.find(m => m.type === 'teammate' && m.protocolType === 'task_assignment');
-    // There's no teammate message with task_assignment in our fixture via teammate-message tag,
-    // but we can test the protocol label via SendMessage protocol. Skip if not present.
-    // Instead let's verify teammate_terminated label is not the default handler
-    const terminated = messages.find(m => m.type === 'teammate' && m.protocolType === 'teammate_terminated');
-    assert.ok(terminated);
-    assert.notEqual(terminated.protocolLabel, 'teammate terminated');
-  });
+  it('shows entries appended to a growing session', () => withTmp((dir) => {
+    const p = writeTmp(dir, piSession([piUser('hi'), piReply(piText('hello'))]));
+    assert.equal(readRecentMessages(p, 10).length, 2);
+    appendFileSync(p, piLine(piUser('more', { id: 'e3', parentId: 'e2' })));
+    assert.deepEqual(readRecentMessages(p, 10).map((m) => m.text), ['hi', 'hello', 'more']);
+  }));
 });
 
 describe('Parser: findTerminatedTeammates', () => {
-  const { writeFileSync, unlinkSync, mkdtempSync } = require('fs');
-  const os = require('os');
-  let tmpDir;
-
-  tmpDir = mkdtempSync(path.join(os.tmpdir(), 'pk-test-'));
-
-  it('returns empty map for non-existent file', async () => {
-    const result = await findTerminatedTeammates('/nonexistent/path.jsonl');
-    assert.deepEqual(result, new Map());
-  });
-
-  it('detects teammate_terminated with from field', async () => {
-    const file = path.join(tmpDir, 'terminated-from.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: '<teammate-message teammate_id="worker-1" summary="terminated">{"type":"teammate_terminated","from":"worker-1","message":"worker-1 has shut down"}</teammate-message>' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.ok(result.has('worker-1'));
-    assert.equal(result.size, 1);
-    unlinkSync(file);
-  });
-
-  it('extracts name from message first word when from is missing', async () => {
-    const file = path.join(tmpDir, 'terminated-msg.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: '<teammate-message teammate_id="w2" summary="terminated">{"type":"teammate_terminated","message":"alice has shut down"}</teammate-message>' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.ok(result.has('alice'));
-    unlinkSync(file);
-  });
-
-  it('falls back to teammate_id when no from or message match', async () => {
-    const file = path.join(tmpDir, 'terminated-tid.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: '<teammate-message teammate_id="bob" summary="terminated">{"type":"teammate_terminated"}</teammate-message>' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.ok(result.has('bob'));
-    unlinkSync(file);
-  });
-
-  it('detects shutdown_response with approve:true', async () => {
-    const file = path.join(tmpDir, 'shutdown-approve.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: '<teammate-message teammate_id="worker-3" summary="approved">{"type":"shutdown_response","from":"worker-3","approve":true}</teammate-message>' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.ok(result.has('worker-3'));
-    unlinkSync(file);
-  });
-
-  it('ignores shutdown_response with approve:false', async () => {
-    const file = path.join(tmpDir, 'shutdown-reject.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: '<teammate-message teammate_id="worker-4" summary="rejected">{"type":"shutdown_response","from":"worker-4","approve":false,"reason":"still working"}</teammate-message>' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.equal(result.size, 0);
-    unlinkSync(file);
-  });
-
-  it('filters out system teammate_id', async () => {
-    const file = path.join(tmpDir, 'terminated-system.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: '<teammate-message teammate_id="system" summary="terminated">{"type":"teammate_terminated","from":"system"}</teammate-message>' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.equal(result.size, 0);
-    unlinkSync(file);
-  });
-
-  it('handles multiple teammate-message tags in one JSONL line', async () => {
-    const file = path.join(tmpDir, 'multi-terminated.jsonl');
-    const content = '<teammate-message teammate_id="a1" summary="t1">{"type":"teammate_terminated","from":"alice"}</teammate-message>' +
-      '<teammate-message teammate_id="b1" summary="t2">{"type":"shutdown_response","from":"bob","approve":true}</teammate-message>';
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: content },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.ok(result.has('alice'));
-    assert.ok(result.has('bob'));
-    assert.equal(result.size, 2);
-    unlinkSync(file);
-  });
-
-  it('skips non-user type lines', async () => {
-    const file = path.join(tmpDir, 'non-user.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'assistant',
-      message: { role: 'assistant', content: '<teammate-message teammate_id="x" summary="t">{"type":"teammate_terminated","from":"x"}</teammate-message>' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    const result = await findTerminatedTeammates(file);
-    assert.equal(result.size, 0);
-    unlinkSync(file);
-  });
-
-  it('reads from existing session fixture', async () => {
-    const result = await findTerminatedTeammates(path.join(FIXTURES_DIR, 'session.jsonl'));
-    assert.ok(result.has('worker-1'));
-    assert.ok(result.has('worker-2'));
-    assert.equal(result.size, 2);
+  it('returns an empty map for a missing file and for a pi session', async () => {
+    assert.deepEqual(await findTerminatedTeammates('/nonexistent/path.jsonl'), new Map());
+    assert.deepEqual(await findTerminatedTeammates(PI.tools), new Map());
   });
 });
 
 describe('Parser: buildAgentProgressMap', () => {
-  const jsonlPath = path.join(FIXTURES_DIR, 'session.jsonl');
-
-  it('maps parentToolUseID to agentId and prompt', async () => {
-    const map = await buildAgentProgressMap(jsonlPath);
-    assert.equal(map['tu_agent_01'].agentId, 'agent-abc-123');
-    assert.equal(map['tu_agent_01'].prompt, 'Find all auth middleware files');
+  it('maps a sync subagent call to its agent id, prompt and usage', async () => {
+    const map = await buildAgentProgressMap(PI.tools);
+    assert.deepEqual(map['call_s1|fc_s1'], {
+      agentId: 'tc_call_s1fc_s1_0',
+      prompt: 'List the files in the current directory and reply with just the count.',
+      usage: { tokens: 39, tools: 1, durationMs: 9193 },
+      usageText: ' · 39 tok · 1 tool · 9s',
+    });
   });
 
-  it('maps background agent tool_result to agentId', async () => {
-    const map = await buildAgentProgressMap(jsonlPath);
-    assert.equal(map['tu_bg_agent_01'].agentId, 'agent-bg-456');
-    assert.equal(map['tu_bg_agent_01'].prompt, null);
-  });
-
-  it('maps teammate_spawned tool_result to agentId', async () => {
-    const map = await buildAgentProgressMap(jsonlPath);
-    assert.equal(map['tu_team_agent_01'].agentId, 'reviewer@my-team');
-    assert.equal(map['tu_team_agent_01'].prompt, null);
+  it('maps an async launch without usage and skips a status call', async () => {
+    const map = await buildAgentProgressMap(PI.tools);
+    assert.deepEqual(map['call_s2|fc_s2'], { agentId: 'tc_call_s2fc_s2_0', prompt: 'Summarize README.md in one line.', usage: null, usageText: null });
+    assert.deepEqual(Object.keys(map).sort(), ['call_s1|fc_s1', 'call_s2|fc_s2']);
   });
 
   it('returns empty map for non-existent file', async () => {
-    const map = await buildAgentProgressMap('/nonexistent/path.jsonl');
-    assert.deepEqual(map, {});
+    assert.deepEqual(await buildAgentProgressMap('/nonexistent/path.jsonl'), {});
   });
 });
 
 describe('Parser: readSessionInfoFromJsonl', () => {
-  const jsonlPath = path.join(FIXTURES_DIR, 'session.jsonl');
-  const pickNames = ({ customTitle, agentName }) => ({ customTitle, agentName });
+  const CLAUDE_ONLY = ['slug', 'gitBranch', 'agentName', 'logicalParentUuid', 'compactBoundaryUuid', 'permissionMode', 'cacheTtl', 'scratchpadDir'];
 
-  it('reads slug from fixture', () => {
-    const info = readSessionInfoFromJsonl(jsonlPath);
-    assert.equal(info.slug, 'test-session');
+  it('reads the header, the name and the first prompt', () => {
+    const info = readSessionInfoFromJsonl(PI.chat);
+    assert.equal(info.projectPath, 'C:\\work\\demo');
+    assert.equal(info.cwd, 'C:\\work\\demo');
+    assert.equal(info.sessionId, '01a20000-0000-7000-8000-000000000001');
+    assert.equal(info.customTitle, 'Greeting');
+    assert.equal(info.firstPrompt, 'Say hello in one word.');
+    assert.equal(info.parentSessionPath, null);
   });
 
-  it('reads projectPath (cwd) from fixture', () => {
-    const info = readSessionInfoFromJsonl(jsonlPath);
-    assert.equal(info.projectPath, '/home/user/project');
+  it('leaves the fields pi does not write null', () => {
+    const info = readSessionInfoFromJsonl(PI.tools);
+    for (const k of CLAUDE_ONLY) assert.equal(info[k], null, k);
   });
 
-  it('reads gitBranch from fixture', () => {
-    const info = readSessionInfoFromJsonl(jsonlPath);
-    assert.equal(info.gitBranch, 'main');
+  it('reads the parent session path of a fork', () => {
+    assert.equal(readSessionInfoFromJsonl(PI.fork).parentSessionPath, 'C:\\pi\\agent\\sessions\\--C--work-demo--\\2026-10-24T12-00-00-000Z_01a20000-0000-7000-8000-000000000004.jsonl');
   });
 
-  it('returns null fields for non-existent file', () => {
-    const info = readSessionInfoFromJsonl('/nonexistent/path.jsonl');
-    assert.equal(info.slug, null);
-    assert.equal(info.projectPath, null);
-    assert.equal(info.gitBranch, null);
-    assert.equal(info.customTitle, null);
-    assert.equal(info.agentName, null);
-  });
+  it('skips a shell command when it looks for the first prompt', () => withTmp((dir) => {
+    const p = writeTmp(dir, piSession([
+      { type: 'message', message: { role: 'bashExecution', command: 'ls', output: 'a', exitCode: 0 } },
+      piUser('real prompt'),
+    ]));
+    assert.equal(readSessionInfoFromJsonl(p).firstPrompt, 'real prompt');
+  }));
 
-  it('keeps the agent name apart from the title, and takes the last one as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-name-'));
-    const p = path.join(dir, 's.jsonl');
-    const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
-    try {
-      writeFileSync(p, line({ type: 'user', cwd: '/p', slug: 's' }) + line({ type: 'ai-title', aiTitle: 'Generated' }));
-      assert.deepEqual(pickNames(readSessionInfoFromJsonl(p)), { customTitle: 'Generated', agentName: null });
-      appendFileSync(p, line({ type: 'agent-name', agentName: 'worker-a' }) + line({ type: 'ai-title', aiTitle: 'Generated' }));
-      assert.deepEqual(pickNames(readSessionInfoFromJsonl(p)), { customTitle: 'Generated', agentName: 'worker-a' });
-      appendFileSync(p, line({ type: 'custom-title', customTitle: 'Renamed' }) + line({ type: 'agent-name', agentName: 'renamed' }));
-      assert.deepEqual(pickNames(readSessionInfoFromJsonl(p)), { customTitle: 'Renamed', agentName: 'renamed' });
-      appendFileSync(p, line({ type: 'user', cwd: '/p' }));
-      assert.deepEqual(pickNames(readSessionInfoFromJsonl(p)), { customTitle: 'Renamed', agentName: 'renamed' });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+  it('returns null fields for a missing file and for a file without a pi header', () => {
+    for (const p of ['/nonexistent/path.jsonl', CLAUDE_TRANSCRIPT]) {
+      const info = readSessionInfoFromJsonl(p);
+      for (const k of ['projectPath', 'customTitle', 'sessionId', 'firstPrompt', 'lastReply', ...CLAUDE_ONLY]) assert.equal(info[k], null, `${p} ${k}`);
     }
   });
 
-  it('finds the agent name on a first read when it comes before the custom title', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-name-'));
-    const p = path.join(dir, 's.jsonl');
-    const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
-    try {
-      writeFileSync(p, line({ type: 'user', cwd: '/p' }) + line({ type: 'agent-name', agentName: 'release' }) + line({ type: 'custom-title', customTitle: 'release' }));
-      assert.deepEqual(pickNames(readSessionInfoFromJsonl(p)), { customTitle: 'release', agentName: 'release' });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('reads the scratchpad dir from the last environment attachment, as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-scratch-'));
-    const p = path.join(dir, 's.jsonl');
-    const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
-    const env = (scratchpadDirectory) => line({ type: 'attachment', attachment: { type: 'environment', snapshot: { scratchpadDirectory } } });
-    try {
-      writeFileSync(p, line({ type: 'user', cwd: '/p' }));
-      assert.equal(readSessionInfoFromJsonl(p).scratchpadDir, null);
-      appendFileSync(p, env('/tmp/claude-501/-p/s/scratchpad'));
-      assert.equal(readSessionInfoFromJsonl(p).scratchpadDir, '/tmp/claude-501/-p/s/scratchpad');
-      appendFileSync(p, env('/tmp/claude-501/-p--claude-worktrees-a/s/scratchpad') + line({ type: 'user', cwd: '/p' }));
-      assert.equal(readSessionInfoFromJsonl(p).scratchpadDir, '/tmp/claude-501/-p--claude-worktrees-a/s/scratchpad');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('drops the head scratchpad dir when a cold scan skips the middle of a large transcript', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-scratch-'));
-    const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
-    const env = (scratchpadDirectory) => line({ type: 'attachment', attachment: { type: 'environment', snapshot: { scratchpadDirectory } } });
-    const filler = line({ type: 'user', cwd: '/p', timestamp: 't', pad: 'x'.repeat(1000) }).repeat(1300);
-    const turn = line({ type: 'user', cwd: '/p', timestamp: 't' }) + line({ type: 'assistant', cwd: '/p', message: { model: 'm', usage: {} } });
-    try {
-      const gap = path.join(dir, 'gap.jsonl');
-      writeFileSync(gap, env('/tmp/claude-501/-p/s/scratchpad') + filler + env('/tmp/claude-501/-q/s/scratchpad') + filler + turn);
-      assert.equal(readSessionInfoFromJsonl(gap).scratchpadDir, null);
-      const tail = path.join(dir, 'tail.jsonl');
-      writeFileSync(tail, env('/tmp/claude-501/-p/s/scratchpad') + filler + filler + env('/tmp/claude-501/-q/s/scratchpad') + turn);
-      assert.equal(readSessionInfoFromJsonl(tail).scratchpadDir, '/tmp/claude-501/-q/s/scratchpad');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('reads permissionMode from the last prompt, permission-mode line or auto-mode attachment, as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-mode-'));
-    const p = path.join(dir, 's.jsonl');
-    const prompt = (permissionMode) => `${JSON.stringify({ type: 'user', cwd: 'C:/proj', permissionMode, message: { role: 'user', content: 'hi' } })}\n`;
-    const toolResult = `${JSON.stringify({ type: 'user', cwd: 'C:/proj', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }] } })}\n`;
-    const modeLine = (permissionMode) => `${JSON.stringify({ type: 'permission-mode', permissionMode })}\n`;
-    const attachment = (type) => `${JSON.stringify({ type: 'attachment', attachment: { type } })}\n`;
-    try {
-      writeFileSync(p, prompt('default') + toolResult + attachment('auto_mode'));
-      assert.equal(readSessionInfoFromJsonl(p).permissionMode, 'auto');
-      writeFileSync(p, prompt('default') + toolResult + attachment('auto_mode') + toolResult + attachment('auto_mode_exit'));
-      assert.equal(readSessionInfoFromJsonl(p).permissionMode, 'default');
-      writeFileSync(p, prompt('auto') + toolResult);
-      assert.equal(readSessionInfoFromJsonl(p).permissionMode, 'auto');
-      writeFileSync(p, prompt('auto') + toolResult + modeLine('default'));
-      assert.equal(readSessionInfoFromJsonl(p).permissionMode, 'default');
-      writeFileSync(p, prompt('auto') + toolResult + modeLine('default') + toolResult + prompt('auto'));
-      assert.equal(readSessionInfoFromJsonl(p).permissionMode, 'auto');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('reads cacheTtl from the last main-thread cache write, as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-ttl-'));
-    const p = path.join(dir, 's.jsonl');
-    const reply = (h1, m5, isSidechain = false) => `${JSON.stringify({
-      type: 'assistant', cwd: 'C:/proj', isSidechain,
-      message: { role: 'assistant', content: [], usage: { cache_creation: { ephemeral_1h_input_tokens: h1, ephemeral_5m_input_tokens: m5 } } },
-    })}\n`;
-    try {
-      writeFileSync(p, reply(0, 0));
-      assert.equal(readSessionInfoFromJsonl(p).cacheTtl, null);
-      for (const [line, ttl] of [[reply(500, 0), '1h'], [reply(0, 0), '1h'], [reply(0, 300, true), '1h'], [reply(0, 300), '5m']]) {
-        appendFileSync(p, line);
-        assert.equal(readSessionInfoFromJsonl(p).cacheTtl, ttl);
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it('takes the latest session name as the file grows, and an empty name clears it', () => withTmp((dir) => {
+    const p = writeTmp(dir, piSession([piUser('hi'), { type: 'session_info', name: 'One' }]));
+    assert.equal(readSessionInfoFromJsonl(p).customTitle, 'One');
+    appendFileSync(p, piLine({ type: 'session_info', id: 'e3', parentId: 'e2', name: 'Two' }));
+    assert.equal(readSessionInfoFromJsonl(p).customTitle, 'Two');
+    appendFileSync(p, piLine({ type: 'session_info', id: 'e4', parentId: 'e3', name: ' ' }));
+    assert.equal(readSessionInfoFromJsonl(p).customTitle, null);
+  }));
 
   describe('lastReply', () => {
-    const T = (s) => `2026-01-01T00:00:${String(s).padStart(2, '0')}Z`;
-    const user = (s, isSidechain = false) => `${JSON.stringify({ type: 'user', isSidechain, timestamp: T(s), cwd: 'C:/proj', message: { role: 'user', content: 'hi' } })}\n`;
-    const reply = (s, { model = 'claude-opus-5-5', write = 0, read = 100, isSidechain = false } = {}) => `${JSON.stringify({
-      type: 'assistant', isSidechain, timestamp: T(s), cwd: 'C:/proj',
-      message: { role: 'assistant', model, content: [], usage: { input_tokens: 1, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 2, cache_creation: { ephemeral_5m_input_tokens: write } } },
-    })}\n`;
-    const compact = `${JSON.stringify({ type: 'system', subtype: 'compact_boundary', timestamp: T(50) })}\n`;
+    const T = (s) => `2026-01-01T00:00:${String(s).padStart(2, '0')}.000Z`;
+    const user = (s, extra) => piUser('hi', { timestamp: T(s), ...extra });
+    const reply = (s, opts) => piReply(piText('ok'), { timestamp: T(s), ...opts });
     const usage = (read, write) => ({ input_tokens: 1, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 2 });
     let dir;
     let p;
@@ -722,40 +527,27 @@ describe('Parser: readSessionInfoFromJsonl', () => {
     });
     afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-    it('takes the last main-thread reply, timed by the request before it, as the file grows', () => {
-      writeFileSync(p, user(1) + reply(5, { write: 300 }));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'claude-opus-5-5', usage: usage(100, 300) });
-      appendFileSync(p, user(10) + reply(12, { model: '<synthetic>' }) + user(20, true) + reply(22, { isSidechain: true }));
-      assert.equal(readSessionInfoFromJsonl(p).lastReply.at, Date.parse(T(1)));
-      appendFileSync(p, reply(14, { model: 'claude-fable-5-1', read: 400 }));
-      const info = readSessionInfoFromJsonl(p);
-      assert.deepEqual(info.lastReply, { at: Date.parse(T(10)), model: 'claude-fable-5-1', usage: usage(400, 0) });
-      assert.equal(info.cacheTtl, '5m', 'a full cache hit moves the time but keeps the TTL');
+    it('takes the last reply, timed by the request before it, as the file grows', () => {
+      writeFileSync(p, piSession([user(1), reply(5, { usage: { input: 1, output: 2, cacheRead: 100, cacheWrite: 300 } })]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: usage(100, 300) });
+      appendFileSync(p, piLine(user(10, { id: 'e3', parentId: 'e2' })) + piLine(reply(14, { id: 'e4', parentId: 'e3', model: 'claude-fable-5-1' })));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(10)), model: 'claude-fable-5-1', usage: usage(100, 0) });
+    });
+
+    it('ignores a reply on an abandoned branch', () => {
+      writeFileSync(p, piSession([user(1), reply(5), user(10), reply(12, { model: 'claude-fable-5-1' }), user(20, { id: 'e5', parentId: 'e2' })]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: usage(100, 0) });
     });
 
     it('a compaction after the reply clears its usage', () => {
-      writeFileSync(p, user(1) + reply(5) + compact);
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'claude-opus-5-5', usage: null });
+      writeFileSync(p, piSession([user(1), reply(5), { type: 'compaction', summary: 's', firstKeptEntryId: 'e1', tokensBefore: 10, timestamp: T(50) }]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: null });
     });
 
-    it('a cold read of a big file finds a reply behind a long last line', () => {
-      const pad = (n) => `${JSON.stringify({ type: 'progress', data: 'x'.repeat(n) })}\n`;
-      writeFileSync(p, pad(1_200_000) + user(1) + reply(5, { write: 300 }) + compact + pad(200_000));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'claude-opus-5-5', usage: null });
-    });
-
-    it('a cold read with no reply in the last 2 MB drops the head reply', () => {
-      const pad = (n) => `${JSON.stringify({ type: 'progress', data: 'x'.repeat(n) })}\n`;
-      writeFileSync(p, user(1) + reply(5, { write: 300 }) + pad(1_200_000) + pad(2_500_000));
-      const info = readSessionInfoFromJsonl(p);
-      assert.equal(info.lastReply, null);
-      assert.equal(info.cacheTtl, null);
-    });
-
-    it('a cold read finds a reply many short lines back, across chunk edges', () => {
-      const pad = (n) => `${JSON.stringify({ type: 'progress', data: 'x'.repeat(n) })}\n`;
-      writeFileSync(p, pad(1_200_000) + user(1) + reply(5, { write: 300 }) + pad(997).repeat(300));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'claude-opus-5-5', usage: usage(100, 300) });
+    it('skips a reply that stopped on a provider error', () => {
+      const failed = reply(12, { model: 'claude-fable-5-1', stopReason: 'error', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+      writeFileSync(p, piSession([user(1), reply(5), user(10), failed]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: usage(100, 0) });
     });
   });
 
@@ -850,11 +642,7 @@ describe('Parser: updateLoopInfo', () => {
 describe('Session cache across restarts', () => {
   const { execFileSync } = require('child_process');
   const { utimesSync } = require('fs');
-  const lines = (slug, title) => [
-    JSON.stringify({ type: 'user', slug, cwd: 'C:/proj', sessionId: 's1' }),
-    JSON.stringify({ type: 'custom-title', customTitle: title, sessionId: 's1' }),
-    '',
-  ].join('\n');
+  const lines = (prompt, title) => piSession([piUser(prompt), { type: 'session_info', name: title }]);
   // Each call is a fresh process, so the in-memory caches start empty and only the file carries state.
   const run = (op, cacheFile, jsonl) => JSON.parse(execFileSync(process.execPath, ['-e', `
     const { loadSessionCache, saveSessionCache } = require(${JSON.stringify(path.join(__dirname, '../lib/session-cache'))});
@@ -863,7 +651,7 @@ describe('Session cache across restarts', () => {
     const loaded = loadSessionCache(cacheFile);
     const info = readSessionInfoFromJsonl(jsonl);
     if (op === 'save') saveSessionCache((data) => require('fs').writeFileSync(cacheFile, JSON.stringify(data)));
-    console.log(JSON.stringify({ loaded, slug: info.slug, title: info.customTitle }));
+    console.log(JSON.stringify({ loaded, prompt: info.firstPrompt, title: info.customTitle }));
   `, op, cacheFile, jsonl], { encoding: 'utf8' }));
 
   let dir, cacheFile, jsonl;
@@ -876,52 +664,51 @@ describe('Session cache across restarts', () => {
 
   // Whole seconds, because utimes cannot set the sub-millisecond part a real write leaves.
   const T0 = new Date('2026-01-01T00:00:00Z');
-  const writeAt = (slug, title, t = T0) => {
-    writeFileSync(jsonl, lines(slug, title));
+  const writeAt = (prompt, title, t = T0) => {
+    writeFileSync(jsonl, lines(prompt, title));
     utimesSync(jsonl, t, t);
   };
 
   it('reuses entries of an unchanged file from the last run', () => {
-    writeAt('s-one', 'Alpha');
-    assert.deepEqual(run('save', cacheFile, jsonl), { loaded: false, slug: 's-one', title: 'Alpha' });
-    writeAt('s-two', 'Brava');
-    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: true, slug: 's-one', title: 'Alpha' });
+    writeAt('one', 'Alpha');
+    assert.deepEqual(run('save', cacheFile, jsonl), { loaded: false, prompt: 'one', title: 'Alpha' });
+    writeAt('two', 'Brava');
+    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: true, prompt: 'one', title: 'Alpha' });
   });
 
   it('rescans a file rewritten in place with the same size', () => {
-    writeAt('s-one', 'Alpha');
+    writeAt('one', 'Alpha');
     run('save', cacheFile, jsonl);
-    writeAt('s-two', 'Brava', new Date(T0.getTime() + 5000));
-    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: true, slug: 's-two', title: 'Brava' });
+    writeAt('two', 'Brava', new Date(T0.getTime() + 5000));
+    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: true, prompt: 'two', title: 'Brava' });
   });
 
-  it('reads only the appended bytes of a file that grew', () => {
-    writeAt('s-one', 'Alpha');
+  it('reads a file that grew again from the start', () => {
+    writeAt('one', 'Alpha');
     run('save', cacheFile, jsonl);
-    writeAt('s-two', 'Brava');
-    writeFileSync(jsonl, `${JSON.stringify({ type: 'custom-title', customTitle: 'Gamma', sessionId: 's1' })}\n`, { flag: 'a' });
-    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: true, slug: 's-one', title: 'Gamma' });
+    writeAt('two', 'Brava');
+    writeFileSync(jsonl, piLine({ type: 'session_info', id: 'e3', parentId: 'e2', name: 'Gamma' }), { flag: 'a' });
+    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: true, prompt: 'two', title: 'Gamma' });
   });
 
   it('ignores a cache file of another version', () => {
-    writeAt('s-one', 'Alpha');
+    writeAt('one', 'Alpha');
     run('save', cacheFile, jsonl);
     const data = JSON.parse(readFileSync(cacheFile, 'utf8'));
     writeFileSync(cacheFile, JSON.stringify({ ...data, version: data.version + 1 }));
-    writeAt('s-two', 'Brava');
-    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: false, slug: 's-two', title: 'Brava' });
+    writeAt('two', 'Brava');
+    assert.deepEqual(run('read', cacheFile, jsonl), { loaded: false, prompt: 'two', title: 'Brava' });
   });
 
   it('drops entries of deleted transcripts on save', () => {
     const gone = path.join(dir, 'gone.jsonl');
-    writeFileSync(gone, lines('s-gone', 'Gone'));
+    writeFileSync(gone, lines('gone', 'Gone'));
     run('save', cacheFile, gone);
     rmSync(gone);
-    writeFileSync(jsonl, lines('s-one', 'Alpha'));
+    writeFileSync(jsonl, lines('one', 'Alpha'));
     run('save', cacheFile, jsonl);
     const data = JSON.parse(readFileSync(cacheFile, 'utf8'));
     assert.deepEqual(data.info.map(([p]) => p), [jsonl]);
-    assert.deepEqual(data.titles.map(([p]) => p), [jsonl]);
   });
 });
 
@@ -931,7 +718,7 @@ describe('Parent verdict cache', () => {
   const { getParentVerdict, setParentVerdict } = require('../lib/parent-cache');
   // Birth times must differ, and NTFS keeps them to 100 ns.
   const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-  const line = (sessionId) => `${JSON.stringify({ type: 'user', uuid: 'u1', sessionId, cwd: 'C:/proj' })}\n`;
+  const line = (sessionId) => piSession([piUser('hi', { id: 'u1' })], { id: sessionId });
   const result = { parentSessionId: 'p', parentJsonlPath: null, relation: 'compact', isCompact: true, isFork: false };
 
   let root, proj, older, parent, child, meta;
@@ -974,7 +761,7 @@ describe('Parent verdict cache', () => {
 
   it('holds while the child grows and newer transcripts appear', () => {
     setup('grow');
-    writeFileSync(child, line('c'), { flag: 'a' });
+    writeFileSync(child, piLine(piUser('more', { id: 'u2', parentId: 'u1' })), { flag: 'a' });
     readSessionInfoFromJsonl(child);
     pause();
     put(path.join(path.dirname(child), 'newer.jsonl'), 'n');
@@ -1029,34 +816,27 @@ describe('Parent verdict cache', () => {
 });
 
 describe('Parser: readMessagesPage', () => {
-  const jsonlPath = path.join(FIXTURES_DIR, 'session.jsonl');
-
   it('returns messages array and hasMore flag', () => {
-    const result = readMessagesPage(jsonlPath, 100);
-    assert.ok(Array.isArray(result.messages));
-    assert.equal(typeof result.hasMore, 'boolean');
-    assert.ok(result.messages.length > 0, 'fixture should produce messages');
-    const msg = result.messages[0];
-    assert.ok('type' in msg, 'message should have type');
-    assert.ok('timestamp' in msg, 'message should have timestamp');
-  });
-
-  it('respects limit — returns at most limit messages', () => {
-    const result = readMessagesPage(jsonlPath, 3);
-    assert.ok(result.messages.length <= 3);
-  });
-
-  it('returns hasMore: false when all messages fit', () => {
-    const result = readMessagesPage(jsonlPath, 1000);
+    const result = readMessagesPage(PI.tools, 100);
+    assert.equal(result.messages.length, 12);
     assert.equal(result.hasMore, false);
+    for (const msg of result.messages) {
+      assert.ok('type' in msg, 'message should have type');
+      assert.ok('timestamp' in msg, 'message should have timestamp');
+    }
+  });
+
+  it('respects limit and reports more', () => {
+    const result = readMessagesPage(PI.tools, 3);
+    assert.equal(result.messages.length, 3);
+    assert.equal(result.hasMore, true);
   });
 
   it('filters by beforeTimestamp', () => {
-    const all = readMessagesPage(jsonlPath, 1000);
-    assert.ok(all.messages.length >= 2, 'fixture must have at least 2 messages');
+    const all = readMessagesPage(PI.tools, 1000);
     const cutoff = all.messages[all.messages.length - 1].timestamp;
-    const filtered = readMessagesPage(jsonlPath, 1000, cutoff);
-    assert.ok(filtered.messages.length < all.messages.length, 'filtering should reduce result count');
+    const filtered = readMessagesPage(PI.tools, 1000, cutoff);
+    assert.equal(filtered.messages.length, all.messages.length - 1);
     for (const msg of filtered.messages) {
       assert.ok(msg.timestamp < cutoff, `message timestamp ${msg.timestamp} should be < ${cutoff}`);
     }
@@ -1070,92 +850,50 @@ describe('Parser: readMessagesPage', () => {
 });
 
 describe('Parser: extractPromptFromTranscript', () => {
-  let tmpDir;
-
-  it('returns null when first line is not a user message', () => {
-    const result = extractPromptFromTranscript(path.join(FIXTURES_DIR, 'session.jsonl'));
-    assert.equal(result, null);
+  it('takes the text of the first user message with content blocks', () => {
+    assert.equal(extractPromptFromTranscript(PI.chat), 'Say hello in one word.');
   });
+
+  it('takes a string prompt', () => withTmp((dir) => {
+    assert.equal(extractPromptFromTranscript(writeTmp(dir, piSession([piUser('Please fix the authentication bug')]))), 'Please fix the authentication bug');
+  }));
+
+  it('returns null without a user message', () => withTmp((dir) => {
+    assert.equal(extractPromptFromTranscript(writeTmp(dir, piSession([piReply(piText('x'))]))), null);
+  }));
 
   it('throws for non-existent file', () => {
     assert.throws(() => extractPromptFromTranscript('/nonexistent/path.jsonl'));
   });
 
-  it('extracts content when first line is a user message with string content', () => {
-    tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const file = path.join(tmpDir, 'prompt.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: 'Please fix the authentication bug' },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    try {
-      const result = extractPromptFromTranscript(file);
-      assert.equal(result, 'Please fix the authentication bug');
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it('extracts text from array content blocks', () => {
-    tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const file = path.join(tmpDir, 'prompt.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text: 'Refactor the login module' }] },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    try {
-      const result = extractPromptFromTranscript(file);
-      assert.equal(result, 'Refactor the login module');
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it('returns long content in full (no truncation)', () => {
-    tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
+  it('returns long content in full (no truncation)', () => withTmp((dir) => {
     const longText = 'x'.repeat(600);
-    const file = path.join(tmpDir, 'prompt.jsonl');
-    writeFileSync(file, JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: longText },
-      timestamp: '2026-03-05T10:00:00Z'
-    }) + '\n');
-    try {
-      const result = extractPromptFromTranscript(file);
-      assert.equal(result.length, 600);
-      assert.equal(result, longText);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+    assert.equal(extractPromptFromTranscript(writeTmp(dir, piSession([piUser(longText)]))), longText);
+  }));
 });
 
 describe('Parser: extractModelFromTranscript', () => {
-  let tmpDir;
-  before(() => { tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-')); });
-  after(() => rmSync(tmpDir, { recursive: true, force: true }));
-
-  const assistant = (model) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', model, content: [] } });
-
-  it('finds the model in the head', () => {
-    const file = path.join(tmpDir, 'head.jsonl');
-    writeFileSync(file, `${JSON.stringify({ type: 'user', message: { content: 'hi' } })}\n${assistant('claude-opus-5-5')}\n`);
-    assert.equal(extractModelFromTranscript(file), 'claude-opus-5-5');
+  it('takes the model of the first reply', () => {
+    assert.equal(extractModelFromTranscript(PI.chat), 'gpt-6-luna');
+    assert.equal(extractModelFromTranscript(PI.compact), 'gpt-6-luna');
   });
 
-  it('finds the model in the tail when a long first line ends the head scan', () => {
-    const file = path.join(tmpDir, 'tail.jsonl');
-    const prompt = JSON.stringify({ type: 'user', message: { content: 'x'.repeat(150000) } });
-    writeFileSync(file, `${prompt}\n${assistant('claude-opus-5-5')}\n`);
-    assert.equal(extractModelFromTranscript(file), 'claude-opus-5-5');
-  });
+  it('takes a model change before any reply', () => withTmp((dir) => {
+    const p = writeTmp(dir, piSession([{ type: 'model_change', provider: 'anthropic', modelId: 'claude-opus-5-5' }, piUser('hi')]));
+    assert.equal(extractModelFromTranscript(p), 'claude-opus-5-5');
+  }));
 
-  it('returns null when no line has a model', () => {
-    const file = path.join(tmpDir, 'none.jsonl');
-    writeFileSync(file, `${JSON.stringify({ type: 'user', message: { content: 'x'.repeat(150000) } })}\n`);
-    assert.equal(extractModelFromTranscript(file), null);
+  it('finds the model after a long first prompt', () => withTmp((dir) => {
+    const p = writeTmp(dir, piSession([piUser('x'.repeat(150000)), piReply(piText('a'), { model: 'claude-opus-5-5' })]));
+    assert.equal(extractModelFromTranscript(p), 'claude-opus-5-5');
+  }));
+
+  it('returns null when no line has a model', () => withTmp((dir) => {
+    assert.equal(extractModelFromTranscript(writeTmp(dir, piSession([piUser('hi')]))), null);
+  }));
+
+  it('throws for non-existent file', () => {
+    assert.throws(() => extractModelFromTranscript('/nonexistent/path.jsonl'));
   });
 });
 
@@ -1175,35 +913,9 @@ describe('Parser: readSubagentMeta', () => {
 });
 
 describe('Parser: readScratchpadCreations', () => {
-  const write = (lines) => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const file = path.join(tmpDir, 'pads.jsonl');
-    writeFileSync(file, `${lines.join('\n')}\n`);
-    return { file, tmpDir };
-  };
-
-  const call = (command, id = 'toolu_1') =>
-    JSON.stringify({
-      type: 'assistant',
-      timestamp: '2026-03-05T10:00:00.344Z',
-      message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] }
-    });
-
-  const result = (text, id = 'toolu_1') =>
-    JSON.stringify({
-      type: 'user',
-      timestamp: '2026-03-05T10:00:01Z',
-      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text }] }
-    });
-
-  const run = async (lines) => {
-    const { file, tmpDir } = write(lines);
-    try {
-      return await readScratchpadCreations(file);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  };
+  const call = (command, id = 'call_1') => piCall(id, 'bash', { command }, { timestamp: '2026-03-05T10:00:00.344Z' });
+  const result = (text, id = 'call_1') => ({ ...piResult(id, 'bash', text), timestamp: '2026-03-05T10:00:01.000Z' });
+  const run = (entries) => withTmp((dir) => readScratchpadCreations(writeTmp(dir, piSession(entries))));
 
   it('takes the printed manifest path as the answer', async () => {
     const out = 'pad dir   : C:\\p\\notes\\demo\n  manifest  : C:\\p\\notes\\demo\\scratchpad.json';
@@ -1235,100 +947,35 @@ describe('Parser: readScratchpadCreations', () => {
 });
 
 describe('Parser: readCompactSummaries', () => {
-  it('returns empty array when subagents dir does not exist', async () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const file = path.join(tmpDir, 'no-subagents.jsonl');
-    writeFileSync(file, '');
-    try {
-      const result = await readCompactSummaries(file);
-      assert.deepEqual(result, []);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
+  it('returns empty without a compaction and for a missing file', async () => {
+    assert.deepEqual(await readCompactSummaries(PI.chat), []);
+    assert.deepEqual(await readCompactSummaries('/nonexistent/path.jsonl'), []);
   });
 
-  it('returns summaries from compact subagent JSONL files', async () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const sessionName = 'compact-test-session';
-    const sessionFile = path.join(tmpDir, `${sessionName}.jsonl`);
-    const subagentsDir = path.join(tmpDir, sessionName, 'subagents');
-    mkdirSync(subagentsDir, { recursive: true });
-
-    const compactFile = path.join(subagentsDir, 'agent-acompact-001.jsonl');
-    writeFileSync(compactFile, [
-      JSON.stringify({ type: 'user', message: { role: 'user', content: 'compact this' }, timestamp: '2026-03-05T10:00:00Z' }),
-      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '<summary>Session compacted successfully</summary>' }] }, timestamp: '2026-03-05T10:00:05Z' })
-    ].join('\n') + '\n');
-    writeFileSync(sessionFile, '');
-
-    try {
-      const result = await readCompactSummaries(sessionFile);
-      assert.ok(Array.isArray(result));
-      assert.equal(result.length, 1);
-      assert.equal(result[0].summary, 'Session compacted successfully');
-      assert.equal(result[0].timestamp, '2026-03-05T10:00:05Z');
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
+  it('returns the inline summary of a compaction', async () => {
+    assert.deepEqual(await readCompactSummaries(PI.compact), [
+      { timestamp: '2026-10-24T11:02:00.000Z', summary: '## Goal\nPlan the release.\n\n## Progress\nSteps 1 and 2 drafted.', source: 'inline' },
+    ]);
   });
 
-  it('skips compact files without a summary tag', async () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const sessionName = 'compact-no-summary';
-    const sessionFile = path.join(tmpDir, `${sessionName}.jsonl`);
-    const subagentsDir = path.join(tmpDir, sessionName, 'subagents');
-    mkdirSync(subagentsDir, { recursive: true });
-
-    const compactFile = path.join(subagentsDir, 'agent-acompact-002.jsonl');
-    writeFileSync(compactFile, [
-      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'No summary here' }] }, timestamp: '2026-03-05T10:01:00Z' })
-    ].join('\n') + '\n');
-    writeFileSync(sessionFile, '');
-
-    try {
-      const result = await readCompactSummaries(sessionFile);
-      assert.deepEqual(result, []);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it('gives each chip on an older page its own summary', async () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const sessionName = 'compact-page';
-    const sessionFile = path.join(tmpDir, `${sessionName}.jsonl`);
-    const subagentsDir = path.join(tmpDir, sessionName, 'subagents');
-    mkdirSync(subagentsDir, { recursive: true });
-    const preamble = 'This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:\n';
-    const user = (text, timestamp) => JSON.stringify({ type: 'user', message: { role: 'user', content: text }, timestamp });
-    const compact = (text, timestamp) => JSON.stringify({ type: 'user', isCompactSummary: true, message: { role: 'user', content: preamble + text }, timestamp });
-    writeFileSync(sessionFile, [
+  it('gives each chip on an older page its own summary', () => withTmp((dir) => {
+    const user = (text, timestamp) => piUser(text, { timestamp });
+    const compact = (summary, timestamp) => ({ type: 'compaction', summary, firstKeptEntryId: 'e1', tokensBefore: 10, timestamp });
+    const p = writeTmp(dir, piSession([
       user('start', '2026-03-05T10:00:00.000Z'),
       compact('Summary one', '2026-03-05T10:10:00.000Z'),
       user('after one', '2026-03-05T10:15:00.000Z'),
-      compact('', '2026-03-05T10:20:00.000Z'),
+      compact('Summary two', '2026-03-05T10:20:00.000Z'),
       user('after two', '2026-03-05T10:25:00.000Z'),
       compact('Summary three', '2026-03-05T10:30:00.000Z'),
-      user('after three', '2026-03-05T10:35:00.000Z')
-    ].join('\n') + '\n');
-    writeFileSync(path.join(subagentsDir, 'agent-acompact-two.jsonl'), JSON.stringify({
-      type: 'assistant',
-      message: { role: 'assistant', content: [{ type: 'text', text: '<summary>Summary two</summary>' }] },
-      timestamp: '2026-03-05T10:19:58.000Z'
-    }) + '\n');
-
-    try {
-      const page = readMessagesPage(sessionFile, 4, '2026-03-05T10:40:00.000Z');
-      const chips = page.messages.filter(m => m.systemLabel === 'Compacted');
-      assert.deepEqual(chips.map(c => c.timestamp), ['2026-03-05T10:20:00.000Z', '2026-03-05T10:30:00.000Z']);
-      assert.equal(chips[0].compactSummary, null);
-
-      fillCompactSummaries(chips, await readCompactSummaries(sessionFile));
-      assert.deepEqual(chips.map(c => c.compactSummary), ['Summary two', 'Summary three']);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+      user('after three', '2026-03-05T10:35:00.000Z'),
+    ]));
+    const chips = readMessagesPage(p, 4, '2026-03-05T10:40:00.000Z').messages.filter((m) => m.systemLabel === 'Compacted');
+    assert.deepEqual(chips.map((c) => [c.timestamp, c.compactSummary]), [
+      ['2026-03-05T10:20:00.000Z', 'Summary two'],
+      ['2026-03-05T10:30:00.000Z', 'Summary three'],
+    ]);
+  }));
 
   it('leaves a chip empty when no subagent summary is near it', () => {
     const chips = [{ systemLabel: 'Compacted', compactSummary: null, timestamp: '2026-03-05T10:20:00.000Z' }];
@@ -1400,69 +1047,6 @@ describe('parseTaskNotification', () => {
   });
 });
 
-// End-to-end: a task-notification must render as a system message (clean result
-// body + summary/usage chip), NEVER as a raw user message — on BOTH the normally
-// delivered (type:'user') path and the queued (queue-operation) path.
-describe('readRecentMessages: task-notification rendering', () => {
-  const raw = loadFixture('task-notification.txt');
-  const dummy = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'x' }] }, timestamp: '2026-06-09T20:00:00Z' });
-
-  function readOne(notifLine) {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const sessionFile = path.join(tmpDir, 'notif-session.jsonl');
-    // First line is treated as potentially-partial and dropped, so lead with a dummy.
-    writeFileSync(sessionFile, [dummy, notifLine].join('\n') + '\n');
-    try {
-      return readRecentMessages(sessionFile, 10);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  }
-
-  function assertCleanNotification(msg) {
-    assert.ok(msg, 'notification message present');
-    // Rich chip: summary + usage suffix.
-    assert.equal(msg.systemLabel, 'Agent "Emulate work A" completed · 22.3k tok · 6 tools · 119s');
-    // Body is the agent result, not the envelope.
-    assert.ok(msg.text.startsWith('test agent A done'));
-    assert.ok(!msg.text.includes('<task-notification>'));
-    assert.ok(!msg.text.includes('<output-file>'));
-    assert.ok(!msg.text.includes('22316'));
-    // Tagged for client-side grouping + agent-type join.
-    assert.equal(msg.taskNotification, true);
-    assert.equal(msg.taskId, 'ae80b022c427830bd');
-  }
-
-  it('normalizes the normally-delivered (type:"user") notification', () => {
-    const msgs = readOne(JSON.stringify({ type: 'user', message: { role: 'user', content: raw }, timestamp: '2026-06-09T20:36:00Z' }));
-    assertCleanNotification(msgs.find((m) => m.systemLabel && m.systemLabel.startsWith('Agent "Emulate work A"')));
-  });
-
-  it('normalizes the queued (queue-operation enqueue) notification', () => {
-    const msgs = readOne(JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: raw, timestamp: '2026-06-09T20:36:00Z' }));
-    assertCleanNotification(msgs.find((m) => m.systemLabel && m.systemLabel.startsWith('Agent "Emulate work A"')));
-  });
-
-  it('emits the enqueue+delivered pair sharing one taskId (so the client groups them)', () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const sessionFile = path.join(tmpDir, 'notif-session.jsonl');
-    writeFileSync(sessionFile, [
-      dummy,
-      JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: raw, timestamp: '2026-06-09T20:56:12.176Z' }),
-      JSON.stringify({ type: 'user', message: { role: 'user', content: raw }, timestamp: '2026-06-09T20:56:12.189Z' })
-    ].join('\n') + '\n');
-    try {
-      const notifs = readRecentMessages(sessionFile, 10).filter((m) => m.taskNotification);
-      assert.equal(notifs.length, 2);
-      assert.ok(notifs.every((m) => m.taskId === 'ae80b022c427830bd'));
-      // One came from the queued path, one from the delivered path.
-      assert.deepEqual(notifs.map((m) => !!m.queued).sort(), [false, true]);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-});
-
 // A subagent handing its report back through SendMessage arrives wrapped in an
 // <agent-message> envelope with harness security notes around it. Unparsed, the
 // whole frame renders under a person icon as if the user had typed it.
@@ -1529,141 +1113,10 @@ describe('parseAgentMessage', () => {
   });
 });
 
-// End-to-end: both delivery paths must render as an agent message, never as user input.
-describe('readRecentMessages: agent-message rendering', () => {
-  const raw = loadFixture('agent-handback.txt');
-  const dummy = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'x' }] }, timestamp: '2026-09-15T11:00:00Z' });
-
-  function readOne(line) {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const sessionFile = path.join(tmpDir, 'agent-msg-session.jsonl');
-    writeFileSync(sessionFile, [dummy, line].join('\n') + '\n');
-    try {
-      return readRecentMessages(sessionFile, 10);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  }
-
-  // The frame body as the harness repeats it on `origin` (Claude Code >= 2.1).
-  const originBody = raw.split('<agent-message from="abd86c3f28b1c29ad">\n')[1].split('\n</agent-message>')[0];
-  const enqueueLine = JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: raw, timestamp: '2026-09-15T11:10:41.602Z' });
-  const deliveredLine = JSON.stringify({
-    type: 'user',
-    isMeta: true,
-    message: { role: 'user', content: raw },
-    origin: { kind: 'peer', from: 'abd86c3f28b1c29ad', body: originBody, handback: true },
-    timestamp: '2026-09-15T11:10:41.625Z'
-  });
-
-  function assertCleanHandBack(msg) {
-    assert.ok(msg, 'agent message present');
-    assert.equal(msg.agentMessage, true);
-    assert.equal(msg.agentFrom, 'abd86c3f28b1c29ad');
-    assert.equal(msg.systemLabel, 'Subagent hand-back · abd86c3f');
-    assert.ok(msg.text.startsWith('Wrote `scratchpad/specdev-permissions.md`.'));
-    assert.ok(!msg.text.includes('<agent-message'));
-    assert.ok(!msg.text.includes('carry no user authority'));
-  }
-
-  it('normalizes the queued (queue-operation enqueue) hand-back', () => {
-    assertCleanHandBack(readOne(enqueueLine).find((m) => m.agentMessage));
-  });
-
-  // The delivered record is isMeta — filtered as user input — so it is read from
-  // its structured `origin` instead. Sessions where the harness wrote no enqueue
-  // record have nothing else to render.
-  it('normalizes the delivered (isMeta, origin:peer) hand-back', () => {
-    assertCleanHandBack(readOne(deliveredLine).find((m) => m.agentMessage));
-  });
-
-  it('renders the enqueue+delivered pair once', () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const sessionFile = path.join(tmpDir, 'agent-msg-session.jsonl');
-    writeFileSync(sessionFile, [dummy, enqueueLine, deliveredLine].join('\n') + '\n');
-    try {
-      const agentMsgs = readRecentMessages(sessionFile, 10).filter((m) => m.agentMessage);
-      assert.equal(agentMsgs.length, 1);
-      assertCleanHandBack(agentMsgs[0]);
-      // It was delivered, so the queued marker is dropped from the surviving row.
-      assert.equal(agentMsgs[0].queued, undefined);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-});
-
-// Foreground agents report cost on their completion toolUseResult
-// (totalTokens/totalToolUseCount/totalDurationMs), not via a <task-notification>.
-// buildAgentProgressMap must capture those as a formatted usageText chip — the same
-// " · Nk tok · N tools · Ns" string a background agent gets — keyed by tool_use_id.
-describe('buildAgentProgressMap: foreground agent usage chip', () => {
-  it('captures totalTokens/toolUses/duration as a usageText chip', async () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const file = path.join(tmpDir, 'fg-agent.jsonl');
-    const dummy = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'x' }] }, timestamp: '2026-06-10T10:00:00Z' });
-    const completion = JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_fg1', content: 'done' }] },
-      toolUseResult: {
-        status: 'completed',
-        agentId: 'fgagent123',
-        agentType: 'Explore',
-        prompt: 'You are the REUSE reviewer ...',
-        totalTokens: 31485,
-        totalToolUseCount: 5,
-        totalDurationMs: 33551
-      },
-      timestamp: '2026-06-10T10:00:34Z'
-    });
-    writeFileSync(file, [dummy, completion].join('\n') + '\n');
-    try {
-      const map = await buildAgentProgressMap(file);
-      const entry = map['toolu_fg1'];
-      assert.ok(entry, 'progressMap entry for the agent tool_use_id');
-      assert.equal(entry.agentId, 'fgagent123');
-      assert.equal(entry.usageText, ' · 31.5k tok · 5 tools · 34s');
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it('omits usageText when the toolUseResult carries no cost numbers', async () => {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const file = path.join(tmpDir, 'fg-agent-nousage.jsonl');
-    const dummy = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'x' }] }, timestamp: '2026-06-10T10:00:00Z' });
-    const completion = JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_fg2', content: 'done' }] },
-      toolUseResult: { status: 'completed', agentId: 'fgagent456', prompt: 'p' },
-      timestamp: '2026-06-10T10:00:10Z'
-    });
-    writeFileSync(file, [dummy, completion].join('\n') + '\n');
-    try {
-      const entry = (await buildAgentProgressMap(file))['toolu_fg2'];
-      assert.ok(entry);
-      assert.equal(entry.usageText, null);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-});
-
 describe('Parser: extractAgentResultFromTranscript', () => {
-  const toolUse = (name, input) =>
-    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${name}`, name, input }] } });
-  const text = (t) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: t }] } });
-
-  function extract(lines) {
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-    const file = path.join(tmpDir, 'agent.jsonl');
-    writeFileSync(file, lines.join('\n') + '\n');
-    try {
-      return extractAgentResultFromTranscript(file);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  }
+  const toolUse = (name, input) => piCall(`call_${name}`, name, input);
+  const text = (t) => piReply(piText(t));
+  const extract = (entries) => withTmp((dir) => extractAgentResultFromTranscript(writeTmp(dir, piSession(entries))));
 
   it('takes the message of a SubagentHandback call', () => {
     assert.equal(extract([text('working'), toolUse('SubagentHandback', { message: 'I found 7 findings.' })]), 'I found 7 findings.');
@@ -1674,8 +1127,8 @@ describe('Parser: extractAgentResultFromTranscript', () => {
   });
 
   it('takes the last result call when there are several', () => {
-    const lines = [toolUse('SubagentHandback', { message: 'first' }), toolUse('StructuredOutput', { summary: 'last' })];
-    assert.equal(extract(lines), '### summary\n\nlast');
+    const entries = [toolUse('SubagentHandback', { message: 'first' }), toolUse('StructuredOutput', { summary: 'last' })];
+    assert.equal(extract(entries), '### summary\n\nlast');
   });
 
   it('falls back to the last assistant text without a result call', () => {
@@ -1688,7 +1141,11 @@ describe('Parser: extractAgentResultFromTranscript', () => {
   });
 
   it('returns null with no text and no result call', () => {
-    assert.equal(extract([toolUse('Read', { file_path: 'x' })]), null);
+    assert.equal(extract([toolUse('read', { path: 'x' })]), null);
     assert.equal(extract([toolUse('SubagentHandback', { message: '' })]), null);
+  });
+
+  it('throws for non-existent file', () => {
+    assert.throws(() => extractAgentResultFromTranscript('/nonexistent/path.jsonl'));
   });
 });

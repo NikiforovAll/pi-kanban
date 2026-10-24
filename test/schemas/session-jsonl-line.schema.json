@@ -81,6 +81,23 @@
       "required": ["type"]
     },
     {
+      "title": "System line",
+      "properties": {
+        "type": { "const": "system" },
+        "subtype": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": ["type", "subtype"]
+    },
+    {
+      "title": "Custom title",
+      "properties": {
+        "type": { "const": "custom-title" },
+        "customTitle": { "type": "string" }
+      },
+      "required": ["type", "customTitle"]
+    },
+    {
       "title": "File history snapshot",
       "properties": {
         "type": { "const": "file-history-snapshot" }
