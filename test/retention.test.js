@@ -5,7 +5,6 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   createDispatchedStore,
-  scanTranscripts,
   pruneSessionDirs,
   pruneContextStatus,
   pruneTaskMaps,
@@ -241,27 +240,6 @@ describe('pruneTaskMaps', () => {
     assert.equal(await pruneTaskMaps(dir, { known: new Set(), maxAgeMs: MONTH }), 0);
     assert.ok(fs.existsSync(path.join(dir, 'bad.json')));
     assert.equal(await pruneTaskMaps(path.join(dir, 'missing'), { known: null, maxAgeMs: MONTH }), 0);
-  });
-});
-
-describe('scanTranscripts', () => {
-  it('lists session ids and the project dirs that hold them', async () => {
-    const dir = tempDir();
-    fs.mkdirSync(path.join(dir, 'proj-a'));
-    fs.mkdirSync(path.join(dir, 'proj-b'));
-    fs.mkdirSync(path.join(dir, 'proj-empty'));
-    fs.writeFileSync(path.join(dir, 'proj-a', 'one.jsonl'), '');
-    fs.writeFileSync(path.join(dir, 'proj-a', 'sessions-index.json'), '{}');
-    fs.writeFileSync(path.join(dir, 'proj-b', 'two.jsonl'), '');
-    const { ids, dirs } = await scanTranscripts(dir);
-    assert.deepEqual([...ids].sort(), ['one', 'two']);
-    assert.deepEqual([...dirs].sort(), ['proj-a', 'proj-b']);
-  });
-
-  it('returns null for a missing or empty projects dir', async () => {
-    const dir = tempDir();
-    assert.equal(await scanTranscripts(path.join(dir, 'missing')), null);
-    assert.equal(await scanTranscripts(dir), null);
   });
 });
 

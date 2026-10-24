@@ -158,11 +158,25 @@ describe('foreground run', () => {
   });
 
   it('stops every child with the error when the call fails before a result', () => {
-    const end = endLines('tc2', 2, { content: [{ type: 'text', text: 'Unknown agent: nope\nmore' }] }, true, T1);
-    assert.deepEqual(end.map((l) => [l.agentId, l.error, l.stopReason]), [
-      ['tc_tc2_0', 'Unknown agent: nope', 'error'],
-      ['tc_tc2_1', 'Unknown agent: nope', 'error'],
+    const result = { content: [{ type: 'text', text: 'Unknown agent: general\nEffective cwd: C:\\sandbox' }] };
+    const start = startLines('tc2', { tasks: [{ agent: 'general', task: 'a' }, { agent: 'general', task: 'b' }] }, T0);
+    const end = endLines('tc2', 2, result, true, T1);
+    assert.deepEqual(end.map((l) => [l.agentId, l.error, l.lastMessage, l.stopReason]), [
+      ['tc_tc2_0', 'Unknown agent: general', 'Unknown agent: general', 'error'],
+      ['tc_tc2_1', 'Unknown agent: general', 'Unknown agent: general', 'error'],
     ]);
+    const agent = fold([start[0], end[0]]);
+    assert.ok(validateAgent(agent), JSON.stringify(validateAgent.errors));
+  });
+
+  it('keeps the output over the error, and drops the thinking level from the model', () => {
+    const [line] = endLines('tc4', 1, { details: { results: [{ model: 'codemie/gpt-6-luna:low', output: 'half', error: 'boom' }] } }, false, T1);
+    assert.deepEqual([line.model, line.lastMessage, line.error], ['codemie/gpt-6-luna', 'half', 'boom']);
+  });
+
+  it('leaves the response of a child that ran to its transcript', () => {
+    const [line] = endLines('tc7', 1, { details: { results: [{ sessionFile: 's7.jsonl', error: 'boom', exitCode: 1 }] } }, false, T1);
+    assert.deepEqual([line.lastMessage, line.error, line.stopReason], [undefined, 'boom', 'error']);
   });
 });
 
@@ -173,5 +187,13 @@ describe('modelLines', () => {
     assert.deepEqual(modelLines('tc3', partial, known, T0), [{ agentId: 'tc_tc3_0', event: 'update', model: 'codemie/gpt-6-luna', updatedAt: T0 }]);
     assert.deepEqual(modelLines('tc3', partial, known, T1), []);
     assert.deepEqual(modelLines('tc3', {}, known, T1), []);
+  });
+
+  it('drops the thinking level, so a level change is no new model', () => {
+    const known = new Map();
+    const lines = modelLines('tc5', { details: { results: [{ model: 'codemie/gpt-6-luna:xhigh' }] } }, known, T0);
+    assert.deepEqual(lines.map((l) => l.model), ['codemie/gpt-6-luna']);
+    assert.deepEqual(modelLines('tc5', { details: { results: [{ model: 'codemie/gpt-6-luna' }] } }, known, T1), []);
+    assert.equal(modelLines('tc6',{ details: { results: [{ model: 'host/name:8080' }] } }, new Map(), T0)[0].model, 'host/name:8080');
   });
 });
