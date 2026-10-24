@@ -447,12 +447,6 @@ function isRegistryIdle(sessionId) {
   return live?.status === 'idle';
 }
 
-// The registry name is the address SendMessage and ListAgents use.
-function getPeerName(sessionId) {
-  const live = loadLiveSessions().find((s) => s.sessionId === sessionId && s.name && s.pid && isPidAlive(s.pid));
-  return live?.name ?? null;
-}
-
 function hasRecentLogActivity(sessionId, logAge) {
   return logAge <= SESSION_STALE_MS && !isRegistryIdle(sessionId) && !replacedSessions.has(sessionId);
 }
@@ -770,7 +764,6 @@ function buildSessionObject(id, meta, overrides = {}) {
   return {
     id,
     name: getSessionDisplayName(meta),
-    peerName: getPeerName(id),
     project: meta.project || null,
     cwd: meta.cwd || null,
     description: meta.description || null,
@@ -2464,43 +2457,6 @@ const {
 } = require('./lib/session-events');
 app.get('/api/sessions/:sessionId/events', handleSessionEvents);
 
-// API: Create a task
-app.post('/api/tasks/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const subject = (req.body.subject || '').trim();
-    if (!subject) return res.status(400).json({ error: 'Subject is required' });
-
-    const sessionDir = taskDirFor(sessionId);
-    if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
-
-    // Ids are the agent's own numbering scheme, so a hand-made task has to keep counting
-    // from the highest one on disk -- reusing a number would overwrite that task's file.
-    const ids = readdirSync(sessionDir)
-      .filter((f) => f.endsWith('.json'))
-      .map((f) => parseInt(path.basename(f, '.json'), 10))
-      .filter((n) => Number.isInteger(n));
-    const id = String(Math.max(0, ...ids) + 1);
-
-    const task = {
-      id,
-      subject,
-      description: (req.body.description || '').trim(),
-      status: 'pending',
-      blocks: [],
-      blockedBy: [],
-    };
-
-    // No doorbell here, unlike a move: the user typed this task, so telling their session
-    // about it would only repeat what they just said. Dragging it to In Progress rings.
-    await writeTaskFile(path.join(sessionDir, `${id}.json`), task);
-    res.json({ success: true, task });
-  } catch (error) {
-    console.error('Error creating task:', error);
-    res.status(500).json({ error: 'Failed to create task' });
-  }
-});
-
 // API: Update task fields (subject, description)
 app.put('/api/tasks/:sessionId/:taskId', async (req, res) => {
   try {
@@ -2564,19 +2520,6 @@ async function deleteTasks(dir, shouldDelete) {
   await Promise.all(doomed.map(({ file }) => fs.unlink(path.join(dir, file))));
   return [...doomedIds];
 }
-
-// API: Delete a task
-app.delete('/api/tasks/:sessionId/:taskId', async (req, res) => {
-  try {
-    const { sessionId, taskId } = req.params;
-    const deleted = await deleteTasks(taskDirFor(sessionId), ({ file }) => file === `${taskId}.json`);
-    if (!deleted.length) return res.status(404).json({ error: 'Task not found' });
-    res.json({ success: true, taskId });
-  } catch (error) {
-    console.error('Error deleting task:', error);
-    res.status(500).json({ error: 'Failed to delete task' });
-  }
-});
 
 // API: Delete every task in a list, or with ?status=completed only the completed ones
 app.delete('/api/tasks/:sessionId', async (req, res) => {
