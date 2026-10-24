@@ -6,15 +6,15 @@ pi-kanban is a **read-only observability dashboard** for the [pi coding agent](h
 
 ### Three runtime pieces
 
-1. **`server.js`** — Express server. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-parsers.js`) plus markdown preview, "open in editor", and theme APIs.
+1. **`server.js`** — Express server. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-sessions.js`, `lib/pi-transcript.js` and `lib/parsers.js`) plus markdown preview, "open in editor", and theme APIs.
 
 2. **`public/`** — vanilla HTML/CSS/JS frontend. **Everything lives in one file: `public/app.js` organized by `//#region` blocks. No bundler, no framework.
 
 3. **`extensions/kanban.ts`** — pi extension exposing the `/kanban` slash command (`start | stop | status | open web|app | session open | session pin | session sticky-pin | session unpin | session view-doc | session link-doc`). Spawns `server.js` as a child process on port 3460 and proxies pin/preview commands via HTTP. This is the entry point when installed via `pi install npm:pi-kanban`.
 
-### Session parsing (`lib/pi-parsers.js`)
+### Session parsing (`lib/pi-sessions.js`, `lib/pi-transcript.js`, `lib/parsers.js`)
 
-pi stores sessions as JSONL files under `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl`. The encoded cwd uses `--` as separators and a leading drive letter on Windows (`--C--Users-foo--` → `C:\Users\foo`); `decodeProjectDir` reverses this. All session/task/agent endpoints in `server.js` call functions from this module — keep parsing logic here, not in route handlers.
+pi stores sessions as JSONL files under `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl`, or flat in a custom dir (`PI_CODING_AGENT_SESSION_DIR` or `sessionDir` in settings). The encoded cwd uses `--` as separators and a leading drive letter on Windows (`--C--Users-foo--` → `C:\Users\foo`); `decodeProjectDir` in `lib/pi-sessions.js` reverses this, but the header `cwd` wins. `lib/pi-sessions.js` finds session files and reads their headers, `lib/pi-transcript.js` maps pi entries to the lines `lib/parsers.js` reads. All session/task/agent endpoints in `server.js` call functions from these modules — keep parsing logic there, not in route handlers.
 
 ### Frontend conventions
 
