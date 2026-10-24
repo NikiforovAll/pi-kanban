@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, unlinkSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
@@ -10,11 +11,31 @@ import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
 const extDir = fileURLToPath(new URL('.', import.meta.url));
 
-const taskStore = createRequire(import.meta.url)(
-	resolvePath(extDir, "..", "lib", "task-store.js"),
-) as {
+const requireLib = createRequire(import.meta.url);
+const lib = (name: string) => requireLib(resolvePath(extDir, "..", "lib", name));
+
+type Line = Record<string, unknown>;
+
+const taskStore = lib("task-store.js") as {
 	reconcileFromSnapshot: (sessionId: string, snapshot: unknown[]) => void;
-	cleanupIfAllCompleted: (sessionId: string) => boolean;
+};
+const liveSessions = lib("live-sessions.js") as {
+	writeLiveSession: (dir: string, entry: Line) => Promise<void>;
+	removeLiveSession: (dir: string, pid: number) => Promise<void>;
+	sweepDeadLiveSessions: (dir: string) => Promise<void>;
+};
+const agentLog = lib("agent-log.js") as {
+	appendAgentLine: (dir: string, record: Line) => Promise<void>;
+	writeWaiting: (dir: string, marker: Line) => Promise<void>;
+	clearWaiting: (dir: string) => Promise<void>;
+	markStopped: (dir: string) => Promise<void>;
+	clearStopped: (dir: string) => Promise<void>;
+};
+const piAgents = lib("pi-agents.js") as {
+	startLines: (toolCallId: string, args: unknown, now: string) => Line[];
+	endLines: (toolCallId: string, spawnCount: number, result: unknown, isError: boolean, now: string) => Line[];
+	modelLines: (toolCallId: string, partial: unknown, known: Map<string, string>, now: string) => Line[];
+	asyncCompleteLines: (payload: unknown, status: unknown, now: string) => Line[];
 };
 
 let child: ChildProcess | null = null;
@@ -24,6 +45,8 @@ const port = 3460;
 const KANBAN_DIR = joinPath(getAgentDir(), "kanban");
 const SETTINGS_PATH = joinPath(KANBAN_DIR, "settings.json");
 const DEFAULT_THEME_DIR = joinPath(KANBAN_DIR, "themes");
+const LIVE_DIR = joinPath(KANBAN_DIR, "live");
+const ACTIVITY_DIR = joinPath(KANBAN_DIR, "agent-activity");
 
 type KanbanSettings = {
 	themes?: {
@@ -181,9 +204,173 @@ async function ensureRunning(notify: (msg: string, level: "info" | "error") => v
 	return false;
 }
 
+const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
+const EXIT_GUARD = Symbol.for("pi-kanban.live-exit-guard");
+
+// A subagent child is shown on its parent's card, so it does not register as a live session.
+function registerLiveState(pi: ExtensionAPI) {
+	if (process.env.PI_SUBAGENT_CHILD) return;
+
+	let session: { sessionId: string; cwd: string; name: string | null } | null = null;
+	let status: "busy" | "idle" | "waiting" = "idle";
+	let statusUpdatedAt = Date.now();
+	let running = false;
+	let openPrompts = 0;
+	let queue: Promise<unknown> = Promise.resolve();
+	const toolsInFlight = new Map<string, { toolName: string; args: unknown }>();
+	const spawnCounts = new Map<string, { sessionId: string; count: number }>();
+	const knownModels = new Map<string, string>();
+	const asyncRuns = new Map<string, { sessionId: string; toolCallId: string; asyncDir?: string }>();
+
+	const now = () => new Date().toISOString();
+	const activityDir = (sessionId: string) => joinPath(ACTIVITY_DIR, sessionId);
+
+	// Writes run one at a time, so the files change in the order the events came.
+	function enqueue(label: string, job: () => Promise<unknown>) {
+		queue = queue.then(job).catch((e: any) => console.warn(`pi-kanban: ${label} failed: ${e?.message ?? e}`));
+	}
+
+	function appendLines(sessionId: string, lines: Line[]) {
+		if (!lines.length) return;
+		enqueue("agent activity", async () => {
+			for (const line of lines) await agentLog.appendAgentLine(activityDir(sessionId), line);
+		});
+	}
+
+	function publish(next?: typeof status) {
+		if (next && next !== status) {
+			status = next;
+			statusUpdatedAt = Date.now();
+		}
+		if (!session) return;
+		const entry = { sessionId: session.sessionId, pid: process.pid, cwd: session.cwd, startedAt: PROCESS_STARTED_AT, status, statusUpdatedAt, name: session.name };
+		enqueue("live session", () => liveSessions.writeLiveSession(LIVE_DIR, entry));
+	}
+
+	const g = globalThis as Record<symbol, unknown>;
+	if (!g[EXIT_GUARD]) {
+		g[EXIT_GUARD] = true;
+		process.once("exit", () => {
+			try { unlinkSync(joinPath(LIVE_DIR, `${process.pid}.json`)); } catch {}
+		});
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (!sessionId) return;
+		session = { sessionId, cwd: ctx.sessionManager.getCwd(), name: ctx.sessionManager.getSessionName() ?? null };
+		running = false;
+		openPrompts = 0;
+		toolsInFlight.clear();
+		enqueue("sweep", () => liveSessions.sweepDeadLiveSessions(LIVE_DIR));
+		enqueue("waiting", () => agentLog.clearWaiting(activityDir(sessionId)));
+		publish("idle");
+	});
+
+	pi.on("session_info_changed", async (event) => {
+		if (!session) return;
+		session.name = event.name ?? null;
+		publish();
+	});
+
+	// /new, /resume and /fork keep the process, and the next session_start rewrites its file.
+	pi.on("session_shutdown", async (event) => {
+		if (event.reason !== "quit" || !session) return;
+		session = null;
+		enqueue("live session", () => liveSessions.removeLiveSession(LIVE_DIR, process.pid));
+	});
+
+	pi.on("agent_start", async () => {
+		if (!session) return;
+		running = true;
+		const dir = activityDir(session.sessionId);
+		enqueue("stop marker", () => agentLog.clearStopped(dir));
+		publish("busy");
+	});
+
+	pi.on("agent_settled", async (event) => {
+		if (!session) return;
+		running = false;
+		if (!event.aborted) {
+			const dir = activityDir(session.sessionId);
+			enqueue("stop marker", () => agentLog.markStopped(dir));
+		}
+		publish(openPrompts ? "waiting" : "idle");
+	});
+
+	// pi does not say which tool asked, so the marker names the newest tool still running.
+	pi.on("ui_prompt_start", async (event) => {
+		if (!session) return;
+		openPrompts++;
+		const tool = [...toolsInFlight.values()].at(-1);
+		const marker = {
+			kind: event.kind === "confirm" ? "permission" : "question",
+			toolName: tool?.toolName ?? event.title ?? event.kind,
+			toolInput: JSON.stringify(tool?.args ?? { title: event.title ?? null }),
+			cwd: session.cwd,
+			timestamp: now(),
+		};
+		const dir = activityDir(session.sessionId);
+		enqueue("waiting", () => agentLog.writeWaiting(dir, marker));
+		publish("waiting");
+	});
+
+	pi.on("ui_prompt_end", async () => {
+		if (!session || openPrompts === 0 || --openPrompts > 0) return;
+		const dir = activityDir(session.sessionId);
+		enqueue("waiting", () => agentLog.clearWaiting(dir));
+		publish(running ? "busy" : "idle");
+	});
+
+	pi.on("tool_execution_start", async (event) => {
+		toolsInFlight.set(event.toolCallId, { toolName: event.toolName, args: event.args });
+		if (!session || event.toolName !== "subagent") return;
+		const lines = piAgents.startLines(event.toolCallId, event.args, now());
+		if (!lines.length) return;
+		spawnCounts.set(event.toolCallId, { sessionId: session.sessionId, count: lines.length });
+		appendLines(session.sessionId, lines);
+	});
+
+	pi.on("tool_execution_update", async (event) => {
+		const call = spawnCounts.get(event.toolCallId);
+		if (!call) return;
+		appendLines(call.sessionId, piAgents.modelLines(event.toolCallId, event.partialResult, knownModels, now()));
+	});
+
+	pi.on("tool_execution_end", async (event) => {
+		toolsInFlight.delete(event.toolCallId);
+		const call = spawnCounts.get(event.toolCallId);
+		if (!call) return;
+		spawnCounts.delete(event.toolCallId);
+		const details = event.result?.details;
+		if (details?.asyncId && !event.isError) {
+			asyncRuns.set(String(details.asyncId), { sessionId: call.sessionId, toolCallId: event.toolCallId, asyncDir: details.asyncDir });
+		}
+		appendLines(call.sessionId, piAgents.endLines(event.toolCallId, call.count, event.result, event.isError, now()));
+	});
+
+	// pi-subagents emits this in the parent process when an async run's result file appears.
+	pi.events.on("subagent:async-complete", (data: any) => {
+		const runId = String(data?.runId ?? data?.id ?? "");
+		const run = asyncRuns.get(runId);
+		if (!run) return;
+		asyncRuns.delete(runId);
+		enqueue("agent activity", async () => {
+			let runStatus: unknown = null;
+			if (run.asyncDir) {
+				try { runStatus = JSON.parse(await readFile(joinPath(run.asyncDir, "status.json"), "utf8")); } catch {}
+			}
+			const lines = piAgents.asyncCompleteLines({ ...data, toolCallId: data.toolCallId ?? run.toolCallId }, runStatus, now());
+			for (const line of lines) await agentLog.appendAgentLine(activityDir(run.sessionId), line);
+		});
+	});
+}
+
 export default function kanbanExtension(pi: ExtensionAPI) {
 	const serverPath = resolvePath(extDir, "..", "server.js");
 	const url = `http://localhost:${port}`;
+
+	registerLiveState(pi);
 
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.toolName !== "todo") return;
@@ -192,7 +379,6 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 		if (sessionId && Array.isArray(tasks)) {
 			try {
 				taskStore.reconcileFromSnapshot(sessionId, tasks);
-				taskStore.cleanupIfAllCompleted(sessionId);
 			} catch (e: any) { console.warn(`pi-kanban: reconcile failed: ${e?.message ?? e}`); }
 		}
 	});
@@ -210,7 +396,6 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			if (!Array.isArray(tasks)) continue;
 			try {
 				taskStore.reconcileFromSnapshot(sessionId, tasks);
-				taskStore.cleanupIfAllCompleted(sessionId);
 			} catch (e: any) { console.warn(`pi-kanban: backfill failed: ${e?.message ?? e}`); }
 			return;
 		}

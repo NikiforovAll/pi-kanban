@@ -1,6 +1,43 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { noteReplacedSessions } = require('../lib/live-sessions');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { noteReplacedSessions, readLiveSessions, writeLiveSession, removeLiveSession, sweepDeadLiveSessions } = require('../lib/live-sessions');
+
+const tempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pk-live-'));
+
+function deadPid() {
+  return spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout.trim() * 1;
+}
+
+describe('live session files', () => {
+  const entry = { sessionId: '01a16eb5-b912-7486-8548-41c706ab95bd', pid: process.pid, cwd: 'C:\\Users\\u\\sandbox', startedAt: 1, status: 'busy', statusUpdatedAt: 2, name: 'demo' };
+
+  it('writes the registry the server reads', async () => {
+    const dir = tempDir();
+    await writeLiveSession(dir, entry);
+    assert.deepEqual(fs.readdirSync(dir), [`${process.pid}.json`]);
+    assert.deepEqual(readLiveSessions(dir), [entry]);
+    await writeLiveSession(dir, { ...entry, sessionId: 'next', status: 'idle' });
+    assert.deepEqual(readLiveSessions(dir).map((s) => [s.sessionId, s.status]), [['next', 'idle']]);
+    await removeLiveSession(dir, process.pid);
+    await removeLiveSession(dir, process.pid);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  });
+
+  it('sweeps the file of a pid that is gone', async () => {
+    const dir = tempDir();
+    const gone = deadPid();
+    await writeLiveSession(dir, entry);
+    await writeLiveSession(dir, { ...entry, pid: gone, sessionId: 'crashed' });
+    fs.writeFileSync(path.join(dir, 'notes.json'), '{}');
+    await sweepDeadLiveSessions(dir);
+    assert.deepEqual(fs.readdirSync(dir).sort(), [`${process.pid}.json`, 'notes.json']);
+    await sweepDeadLiveSessions(path.join(dir, 'missing'));
+  });
+});
 
 describe('noteReplacedSessions', () => {
   const TTL = 1000;
