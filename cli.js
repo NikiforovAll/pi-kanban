@@ -157,7 +157,7 @@ const COMMANDS = {
         usage: 'pi-kanban session plan <id> [--json]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
-          '--json': 'Output JSON ({content, slug}); content is null when there is no plan',
+          '--json': 'Output JSON ({content, path}); content is null when there is no plan',
         },
         examples: ['pi-kanban session plan 3fa9c1'],
         run: runSessionPlanCli,
@@ -766,7 +766,7 @@ async function printLinkedDocs(sessionId, asJson) {
 }
 
 function sessionTitle(s) {
-  return s.customTitle || s.name || s.slug || '';
+  return s.customTitle || s.name || '';
 }
 
 // The board's badge rule (docs/session-states.md). `active` is a wider rule, for which rows show.

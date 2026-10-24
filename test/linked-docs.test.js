@@ -37,6 +37,13 @@ describe('linked docs store', () => {
     assert.deepEqual(docs.get('s1'), ['c:/repo/a.md', '/repo/b.md']);
   });
 
+  it('keeps only the newest doc with max 1, as the plan store does', () => {
+    const plans = createLinkedDocStore({ load: () => ({ sessions: { s1: ['/a.md', '/b.md'] } }), save: () => {}, max: 1 });
+    assert.deepEqual(plans.get('s1'), ['/a.md']);
+    plans.link('s1', '/c.md');
+    assert.deepEqual(plans.get('s1'), ['/c.md']);
+  });
+
   it('caps each session like the browser list', () => {
     const docs = fileStore().open();
     for (let i = 0; i <= MAX_LINKED_DOCS; i++) docs.link('s1', `/repo/${i}.md`);

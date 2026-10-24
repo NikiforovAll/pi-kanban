@@ -335,7 +335,6 @@ async function fetchSessions(includeTasks = true, focusId = currentSessionId) {
       .flatMap((g) => g.members.filter((m) => m.type === 'session').map((m) => m.ref));
     const include = [
       focusId,
-      revealedPlanSessionId,
       revealedStorageSessionId,
       ...openedStickyIds,
       ...zenMembers,
@@ -781,9 +780,6 @@ async function fetchTasks(sessionId) {
   if (sessionId !== currentSessionId && document.getElementById('scratchpad-modal').classList.contains('visible'))
     closeScratchpad();
   if (sessionId !== currentSessionId && detailPanel.classList.contains('visible')) closeDetailPanel();
-  if (revealedPlanSessionId && sessionId !== revealedPlanSessionId) {
-    revealedPlanSessionId = null;
-  }
   if (revealedStorageSessionId && sessionId !== revealedStorageSessionId) {
     revealedStorageSessionId = null;
   }
@@ -3740,7 +3736,6 @@ function highlightSelectedAgent() {
 //#endregion
 
 //#region RENDERING
-let revealedPlanSessionId = null;
 let revealedStorageSessionId = null;
 
 // Opens a session and scrolls the sidebar to it, refetching first when the id
@@ -3762,17 +3757,6 @@ async function revealSession(id) {
   if (uncollapsed) renderSessions();
   const el = document.querySelector(`.session-item[data-session-id="${escSel(id)}"]`);
   if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-async function revealPlanSession(planSessionId) {
-  if (revealedPlanSessionId === planSessionId) {
-    revealedPlanSessionId = null;
-    renderSessions();
-    return;
-  }
-  revealedPlanSessionId = planSessionId;
-  await revealSession(planSessionId);
 }
 
 function showNoSession() {
@@ -3812,7 +3796,7 @@ function getFilteredSessions() {
     // Force-include revealed/current sessions that didn't pass the active filter.
     // Skip pinned sessions — they are prepended separately below (lines ~2180) to preserve stable position.
     const filteredIds = new Set(filteredSessions.map((s) => s.id));
-    for (const id of [revealedPlanSessionId, revealedStorageSessionId, currentSessionId]) {
+    for (const id of [revealedStorageSessionId, currentSessionId]) {
       if (id && !filteredIds.has(id) && !(isAnyPinned(id) && activityFilter.size === 0)) {
         const session = sessions.find((s) => s.id === id);
         if (session) {
@@ -4028,8 +4012,7 @@ function renderSessions() {
                 ${hasScratchpad ? `<span class="scratchpad-badge${padEmoji ? ' has-emoji' : ''}" onclick="event.stopPropagation(); openSessionScratchpad('${sid}')" title="Open scratchpad">${padEmoji ? escapeHtml(padEmoji) : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`}</span>` : ''}
                 ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${sid}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}">${BOOKMARK_SVG}${bookmarksCount}</span>` : ''}
                 ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
-                ${session.hasPlan && !session.planSourceSessionId ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${sid}')" title="View plan">${ICON_PLAN}</span>` : ''}
-                ${session.planSourceSessionId ? `<span class="plan-indicator" title="Implements plan — click to reveal plan session" onclick="event.stopPropagation(); revealPlanSession('${escAttrJs(session.planSourceSessionId)}')">${ICON_PLAN}</span>` : ''}
+                ${session.hasPlan ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${sid}')" title="View plan">${ICON_PLAN}</span>` : ''}
                 ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
                 ${session.dispatched ? `<span class="dispatched-badge"${session.dispatched.parent ? ` onclick="event.stopPropagation(); revealSession('${escAttrJs(session.dispatched.parent)}')"` : ''} title="${escapeHtml(dispatchedTitle(session.dispatched))}">${ICON_DISPATCHED}</span>` : ''}
                 ${runningTerminals.has(session.id) ? `<span class="terminal-badge" onclick="event.stopPropagation(); showSessionTerminal('${escAttrJs(session.id)}')" title="${TERMINAL_TITLE}">${ICON_TERMINAL}</span>` : ''}
@@ -6984,7 +6967,7 @@ function _storageSessionMap() {
 }
 
 function _sessionLabel(session, id) {
-  return session ? escapeHtml(session.name || session.slug || id.slice(0, 12)) : escapeHtml(id.slice(0, 12));
+  return session ? escapeHtml(session.name || id.slice(0, 12)) : escapeHtml(id.slice(0, 12));
 }
 
 function _groupByProject(sessionIds) {
@@ -11934,7 +11917,7 @@ function showInfoModal(session, planContent, parentInfo) {
   const titleEl = document.getElementById('team-modal-title');
   const bodyEl = document.getElementById('team-modal-body');
 
-  const titleText = session.name || session.slug || session.id;
+  const titleText = session.name || session.id;
   titleEl.innerHTML =
     escapeHtml(titleText) +
     (session.modifiedAt
@@ -11958,8 +11941,8 @@ function showInfoModal(session, planContent, parentInfo) {
       { openClaudeDir: true, openFile: parentInfo.parentJsonlPath, openSession: parentInfo.parentSessionId },
     ]);
   }
-  if (session.slug && session.hasPlan) {
-    infoRows.push(['Slug', session.slug, { openClaudeDir: true, openFile: session.planPath }]);
+  if (session.hasPlan) {
+    infoRows.push(['Plan', session.planPath, { openPath: session.cwd || session.project, openFile: session.planPath }]);
   }
   if (session.project) {
     const projectName = session.project.split(/[/\\]/).pop();

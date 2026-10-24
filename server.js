@@ -54,7 +54,7 @@ const { createWorktreeStore } = require('./lib/worktrees');
 const { createScratchpadDirResolver, scratchpadRoot } = require('./lib/scratchpad-dir');
 const { readSettings } = require('./lib/claude-settings');
 const { readGitBranch, sessionGitBranch } = require('./lib/git-branch');
-const { createLinkedDocStore, linkUrl } = require('./lib/linked-docs');
+const { createLinkedDocStore, canonicalPath, linkUrl } = require('./lib/linked-docs');
 const { createPaneStore, isOwnOrigin } = require('./lib/panes');
 const { probeFraming, parseOrigin } = require('./lib/frame-policy');
 const { pickFolder } = require('./lib/folder-dialog');
@@ -88,7 +88,6 @@ const PK_DIR = boardDir(PI_AGENT_DIR);
 const TASKS_DIR = path.join(PK_DIR, 'tasks');
 const SESSION_ROOTS = sessionRoots({ agentDir: PI_AGENT_DIR });
 const SESSION_OPTS = { roots: SESSION_ROOTS };
-const PLANS_DIR = path.join(PK_DIR, 'plans');
 const SESSIONS_DIR = path.join(PK_DIR, 'live');
 const AGENT_ACTIVITY_DIR = path.join(PK_DIR, 'agent-activity');
 const CONTEXT_STATUS_DIR = path.join(PK_DIR, 'context-status');
@@ -98,6 +97,7 @@ const USER_GROUPS_FILE = path.join(PK_DIR, 'groups.json');
 const DISPATCHED_FILE = path.join(PK_DIR, 'dispatched.json');
 const WORKTREES_FILE = path.join(PK_DIR, 'worktrees.json');
 const LINKED_DOCS_FILE = path.join(PK_DIR, 'linked-docs.json');
+const PLANS_FILE = path.join(PK_DIR, 'plans.json');
 const PANES_FILE = path.join(PK_DIR, 'panes.json');
 const SERVER_INFO_FILE = path.join(PK_DIR, 'server.json');
 const TERMINAL_TOKENS_DIR = path.join(PK_DIR, 'terminal-tokens');
@@ -736,17 +736,25 @@ function loadSessionMetadata() {
   return metadata;
 }
 
-function getPlanInfo(slug) {
-  if (!slug) return { hasPlan: false, planTitle: null, planPath: null };
-  const planPath = path.join(PLANS_DIR, `${slug}.md`);
-  if (!existsSync(planPath)) return { hasPlan: false, planTitle: null, planPath: null };
+const plans = createLinkedDocStore({ ...jsonFile(PLANS_FILE), max: 1 });
+const planPaths = () => Object.values(plans.all()).flat();
+const planTitles = new Map();
+
+function readPlanTitle(planPath) {
   try {
-    const head = readFileSync(planPath, 'utf8').slice(0, 512);
-    const match = head.match(/^#\s+(.+)$/m);
-    return { hasPlan: true, planTitle: match ? match[1].trim() : null, planPath };
+    const match = readFileSync(planPath, 'utf8').slice(0, 512).match(/^#\s+(.+)$/m);
+    return { title: match ? match[1].trim() : null };
   } catch {
-    return { hasPlan: true, planTitle: null, planPath };
+    return { title: null };
   }
+}
+
+// Every session list build asks for each session, so the title is read once per file change.
+function getPlanInfo(sessionId) {
+  const [planPath] = plans.get(sessionId);
+  const head = planPath && cachedByFileStat(planTitles, planPath, () => readPlanTitle(planPath));
+  if (!head) return { hasPlan: false, planTitle: null, planPath: null };
+  return { hasPlan: true, planTitle: head.title, planPath };
 }
 
 function getSessionDisplayName(meta) {
@@ -769,7 +777,6 @@ function buildSessionObject(id, meta, overrides = {}) {
     id,
     name: getSessionDisplayName(meta),
     peerName: getPeerName(id),
-    slug: meta.slug || null,
     project: meta.project || null,
     cwd: meta.cwd || null,
     description: meta.description || null,
@@ -795,7 +802,7 @@ function buildSessionObject(id, meta, overrides = {}) {
     projectDir: meta.jsonlPath ? path.dirname(meta.jsonlPath) : null,
     scratchpadDir: getScratchpadDir(id, meta),
     ...getContextFields(id, meta),
-    ...getPlanInfo(meta.slug),
+    ...getPlanInfo(id),
     ...overrides,
     // Remove internal-only field
     _logStat: undefined,
@@ -866,8 +873,6 @@ app.get('/api/sessions', async (req, res) => {
             if (jsonlMtime > modifiedAt) modifiedAt = jsonlMtime;
           }
 
-          const planInfo = getPlanInfo(meta.slug);
-
           sessionsMap.set(entry.name, buildSessionObject(entry.name, meta, {
             _logStat: logStat,
             taskCount,
@@ -880,7 +885,6 @@ app.get('/api/sessions', async (req, res) => {
             hasWaitingForUser: !!agentStatus.waitingForUser,
             unread: agentStatus.unread,
             tasksDir: sessionPath,
-            ...planInfo
           }));
         }
       }
@@ -988,26 +992,6 @@ app.get('/api/sessions', async (req, res) => {
           }));
         }
       } catch { /* ignore */ }
-    }
-
-    // Correlate plan sessions with their implementation sessions (same slug)
-    const slugGroups = new Map();
-    for (const [_sid, session] of sessionsMap) {
-      if (session.slug) {
-        if (!slugGroups.has(session.slug)) slugGroups.set(session.slug, []);
-        slugGroups.get(session.slug).push(session);
-      }
-    }
-    for (const [_slug, group] of slugGroups) {
-      if (group.length < 2) continue;
-      group.sort((a, b) => new Date(a.modifiedAt) - new Date(b.modifiedAt));
-      const planSession = group.find(s => s.hasPlan);
-      const linkedSession = group.find(s => s !== planSession && !s.hasPlan && new Date(s.modifiedAt) >= new Date(planSession?.modifiedAt || 0));
-      if (planSession && linkedSession) {
-        planSession.hasWaitingForUser = false;
-        planSession.planImplementationSessionId = linkedSession.id;
-        linkedSession.planSourceSessionId = planSession.id;
-      }
     }
 
     // Backfill contextStatus for already-built sessions that are pinned
@@ -1241,20 +1225,36 @@ app.get('/api/projects/:encodedPath/tasks', async (req, res) => {
 // API: Get session plan
 app.get('/api/sessions/:sessionId/plan', async (req, res) => {
   try {
-    const meta = sessionMetaFor(req.params.sessionId);
     // Most sessions have no saved plan, and the info modal asks for one every time it
     // opens, so "no plan" is a normal answer rather than a 404 in the console.
-    const slug = meta?.slug;
-    if (!slug) return res.json({ content: null });
-
-    const planPath = path.join(PLANS_DIR, `${slug}.md`);
-    if (!existsSync(planPath)) return res.json({ content: null });
+    const { planPath } = getPlanInfo(req.params.sessionId);
+    if (!planPath) return res.json({ content: null });
 
     const content = await fs.readFile(planPath, 'utf8');
-    res.json({ content, slug, path: planPath });
+    res.json({ content, path: planPath });
   } catch (error) {
     console.error('Error reading plan:', error);
     res.status(500).json({ error: 'Failed to read plan' });
+  }
+});
+
+// The pi `bind_plan` tool. A session has one plan; binding another replaces it.
+app.post('/api/sessions/:sessionId/plan', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const raw = req.body?.path;
+    if (linkUrl(raw)) throw previewError(400, 'A plan is a local markdown file, not a URL', 'bad_target');
+    const abs = resolveFileTarget(raw);
+    await statFileTarget(abs);
+    const [old] = plans.get(sessionId);
+    plans.link(sessionId, abs);
+    plansWatcher.add(abs);
+    if (old && !planPaths().some((p) => canonicalPath(p) === canonicalPath(old))) plansWatcher.unwatch(old);
+    broadcast({ type: 'metadata-update' });
+    res.json({ path: abs, title: getPlanInfo(sessionId).planTitle });
+  } catch (error) {
+    if (!error.status) console.error('Error binding plan:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to bind plan', code: error.code });
   }
 });
 
@@ -1426,12 +1426,8 @@ app.get('/api/sessions/:sessionId/scratchpad-files', async (req, res) => {
 // API: Open session plan in VS Code
 app.post('/api/sessions/:sessionId/plan/open', (req, res) => {
   try {
-    const meta = sessionMetaFor(req.params.sessionId);
-    const slug = meta?.slug;
-    if (!slug) return res.status(404).json({ error: 'No plan found' });
-
-    const planPath = path.join(PLANS_DIR, `${slug}.md`);
-    if (!existsSync(planPath)) return res.status(404).json({ error: 'No plan found' });
+    const { planPath } = getPlanInfo(req.params.sessionId);
+    if (!planPath) return res.status(404).json({ error: 'No plan found' });
 
     openInEditor([planPath]);
     res.json({ success: true });
@@ -2722,6 +2718,15 @@ function resolvePreviewPath(rawPath, base) {
   return dropUrlFragment(path.resolve(filePath));
 }
 
+// A file a pane or a plan names: the board's cwd means nothing to the caller, so a relative path needs a base.
+function resolveFileTarget(raw, base) {
+  const hasBase = typeof base === 'string' && path.isAbsolute(base);
+  if (typeof raw !== 'string' || (!hasBase && !path.isAbsolute(fileUrlToPath(raw)))) {
+    throw previewError(400, 'target must be an http(s) URL, an absolute file path, or a relative path with an absolute base', 'bad_target');
+  }
+  return resolvePreviewPath(raw, base);
+}
+
 app.post('/api/preview', async (req, res) => {
   try {
     const { path: filePath, sessionId, base } = req.body || {};
@@ -3086,11 +3091,7 @@ async function resolvePaneTarget(target, base) {
     }
     return { kind: 'url', target: url };
   }
-  const hasBase = typeof base === 'string' && path.isAbsolute(base);
-  if (!hasBase && !path.isAbsolute(fileUrlToPath(target))) {
-    throw previewError(400, 'target must be an http(s) URL, an absolute file path, or a relative path with an absolute base', 'bad_target');
-  }
-  const abs = resolvePreviewPath(target, base);
+  const abs = resolveFileTarget(target, base);
   const { kind } = await validatePreviewFile(abs);
   return { kind, target: await fs.realpath(abs) };
 }
@@ -3422,23 +3423,17 @@ const projectsWatchers = SESSION_ROOTS.map((root) => chokidar.watch(root.dir, {
   awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 }
 }).on('all', onSessionFileEvent));
 
-const plansWatcher = chokidar.watch(PLANS_DIR, {
+const plansWatcher = chokidar.watch(planPaths(), {
   persistent: true,
   ignoreInitial: true,
-  depth: 0
 });
 
-plansWatcher.on('all', (event, filePath) => {
-  if ((event === 'add' || event === 'change' || event === 'unlink') && filePath.endsWith('.md')) {
-    // Plan files don't affect cached session metadata — getPlanInfo is called
-    // fresh from buildSessionObject on every list build. The broadcast alone
-    // is enough to trigger a client refetch.
-    broadcast({ type: 'metadata-update' });
-    if (event === 'change') {
-      const slug = path.basename(filePath, '.md');
-      broadcast({ type: 'plan-update', slug });
-    }
-  }
+plansWatcher.on('all', (event) => {
+  // Plan files don't affect cached session metadata — getPlanInfo is called
+  // fresh from buildSessionObject on every list build. The broadcast alone
+  // is enough to trigger a client refetch.
+  broadcast({ type: 'metadata-update' });
+  if (event === 'change') broadcast({ type: 'plan-update' });
 });
 
 // Watch agent-activity directory for subagent lifecycle events
