@@ -20,7 +20,6 @@
   };
   const R = moved(D.responses, '');
   delete window.__PI_KANBAN_DEMO__;
-  R['/api/config'].terminal.available = true;
 
   // The board shows the terminal only with a token; the fake socket in terminal.html takes any.
   try {

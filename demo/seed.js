@@ -155,11 +155,10 @@ const TODO_LOAD = [
 ];
 
 const BENCH_HTML = `<style>
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; color: var(--text, #222); }
   .bar { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
   .bar span:first-child { width: 120px; }
-  .fill { height: 18px; border-radius: 4px; background: var(--accent, #4f7cff); }
-  small { color: var(--text-muted, #666); }
+  .fill { height: 18px; border-radius: 4px; background: var(--color-accent); }
+  small { color: var(--color-text-muted); }
 </style>
 <h3>p95 latency with the limiter on</h3>
 <div class="bar"><span>no limiter</span><div class="fill" style="width:180px"></div><span>18 ms</span></div>
@@ -168,8 +167,7 @@ const BENCH_HTML = `<style>
 <small>k6, 200 VUs, 5 min, staging. The Redis bucket adds 3 ms at p95.</small>
 `;
 const ASK_HTML = `<style>
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
-  label { display: block; margin: 8px 0; padding: 10px; border: 1px solid #8884; border-radius: 6px; }
+  label { display: block; margin: 8px 0; padding: 10px; border: 1px solid var(--color-border); border-radius: 6px; }
 </style>
 <h3>Where should the step indicator go?</h3>
 <form id="f">

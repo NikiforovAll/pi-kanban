@@ -13,6 +13,9 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'demo', 'mock-data.js');
 const FAKE_HOME = '/home/dev';
+// package.json keeps a dev version, and the release tag sets the real one.
+const DEMO_VERSION = /^## (\d+\.\d+\.\d+)/m.exec(fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8'))?.[1];
+if (!DEMO_VERSION) throw new Error('CHANGELOG.md has no "## x.y.z" release heading');
 const TERMINALS = { limiter: '7e1a0000-0000-4000-8000-000000000001', checkout: '7e1a0000-0000-4000-8000-000000000003' };
 
 const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-demo-')));
@@ -25,10 +28,11 @@ delete process.env.PI_CODING_AGENT_SESSION_DIR;
 
 const { encodeProjectDirName } = require('../lib/board-dir');
 const { createShowStore } = require('../lib/show');
+const { readTerminalConfig, clientConfigFor } = require('../lib/terminal');
 const { IDS, SHOW_IDS, LIVE_START_MIN, seedFiles, seedLive, seedBoard } = require('../demo/seed');
 
 // The server marks projects under its temp dir as temp, and the New session dialog hides those,
-// so it gets a temp dir outside the seed. demo/mock.js turns the terminal on.
+// so it gets a temp dir outside the seed. It runs without a terminal, so the terminal config and replies are built here.
 function startServer() {
   const osTmp = path.join(tmp, 'os-tmp');
   fs.mkdirSync(osTmp);
@@ -107,7 +111,7 @@ async function main() {
       return responses[k];
     };
 
-    for (const p of ['/api/version', '/api/config', '/api/projects', '/api/tasks/all', '/api/groups', '/api/session/pins', '/api/document/links', '/api/sessions/known', '/api/dispatch', '/api/context-status']) await get(p);
+    for (const p of ['/api/config', '/api/projects', '/api/tasks/all', '/api/groups', '/api/session/pins', '/api/document/links', '/api/sessions/known', '/api/dispatch', '/api/context-status']) await get(p);
     const list = await get('/api/sessions', { limit: 200 });
     const files = new Set();
     for (const { id } of list) {
@@ -139,8 +143,9 @@ async function main() {
 
   const { walk, rekey } = makeRewriter();
   const rewritten = Object.fromEntries(Object.entries(responses).map(([k, v]) => [rekey(k), walk(v)]));
-  // The Windows build of the recording host, not of the viewer.
-  delete rewritten['/api/config'].terminal.windowsPty;
+  // windowsPty describes the Windows build of the recording host, not of the viewer.
+  const { windowsPty, ...terminal } = clientConfigFor(readTerminalConfig({ argv: [], env: {} }), true);
+  rewritten['/api/config'].terminal = terminal;
   const data = { recordedAt: Date.now(), home: FAKE_HOME, responses: rewritten };
   const text = JSON.stringify(data, null, 1);
   const lower = text.toLowerCase();
@@ -158,6 +163,7 @@ function liveReplies({ pads, projects }, list, now) {
   const startedAt = now - LIVE_START_MIN * 60_000;
   const term = (id, terminalId, cwd) => ({ id, terminalId, mode: 'resume', cwd, pid: null, clients: 1, startedAt, name: byId[id]?.name ?? null, edit: false, forkOf: null, piExited: false, awaitingTrust: false });
   const out = {
+    '/api/version': { version: DEMO_VERSION },
     '/api/terminals': { sessions: [term(IDS.limiter, TERMINALS.limiter, projects.api), term(IDS.checkout, TERMINALS.checkout, projects.web)] },
     '/api/terminals/stats': { pk: null, host: null, terminals: {} },
     '/api/pi/models': {
