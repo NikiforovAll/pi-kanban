@@ -1,5 +1,5 @@
 //#region STATE
-// Set by the server in index.html: null for the default Claude dir, a per-dir prefix otherwise.
+// Set by the server in index.html: null for the default agent dir, a per-dir prefix otherwise.
 const STORAGE_NS = window.__STORAGE_NS__ ? `${window.__STORAGE_NS__}:` : '';
 // Theme is hub-wide (echoed to every app via hub:theme), so it stays shared across config dirs.
 const THEME_KEY = 'theme';
@@ -115,7 +115,6 @@ let sessionGroups = []; // user-named groups: [{id, name, color, members:[{type,
 let sgDrag = null; // in-flight sidebar drag: {kind:'session'|'project'|'group', ref}
 let searchQuery = ''; // Search query for fuzzy search
 let allTasksCache = []; // Cache all tasks for search
-let ownerFilter = '';
 let currentAgents = [];
 let currentWaiting = null;
 let lastWaitingHash = '';
@@ -127,13 +126,8 @@ let lastMessagesHash = '';
 let currentMessages = [];
 let agentDurationInterval = null;
 let agentPollInterval = null;
-// Inside the hub an inactive app is a display:none iframe whose document.hidden stays false,
-// so the hub tells us via hub:active. Standalone, or if that message is lost, pi-kanban stays active.
-let hubActive = true;
-// setupEventSource runs before HUB_INTEGRATION connects, so it hands its handler over here.
-let onHubActive = () => {};
 let missedWhileHidden = false;
-const isOnScreen = () => hubActive && !document.hidden;
+const isOnScreen = () => !document.hidden;
 function skipOffScreen() {
   if (isOnScreen()) return false;
   missedWhileHidden = true;
@@ -145,7 +139,8 @@ let selectedSessionId = null;
 // Task stays selected (keyboard nav) but its white highlight is dimmed once the detail panel closes.
 let taskHighlightDimmed = false;
 let focusZone = 'board'; // 'board' | 'sidebar'
-let appConfig = { marketplaceUrl: null, costUrl: null, memoryUrl: null, scratchAvailable: false };
+let appConfig = { scratchAvailable: false };
+const ASSISTANT_LABEL = 'pi';
 let runningTerminals = new Set();
 // Embedded sessions stuck on Claude Code's folder-trust dialog. No hook runs before it, so the server reads it off the screen.
 let trustWaiting = new Set();
@@ -228,7 +223,6 @@ function updateUrl() {
   if (currentSessionId) params.set('session', currentSessionId);
   if (sessionFilter !== FILTER_DEFAULTS.session) params.set('filter', sessionFilter);
   if (filterProject && filterProject !== FILTER_DEFAULTS.project) params.set('project', filterProject);
-  if (ownerFilter) params.set('owner', ownerFilter);
   if (searchQuery) params.set('search', searchQuery);
   if (messagePanelOpen && !logAutoOpened) params.set('messages', '1');
   const qs = params.toString();
@@ -236,7 +230,6 @@ function updateUrl() {
   history.replaceState(null, '', url);
   persistLastView();
   syncTerminal();
-  schedulePublishSession();
 }
 
 const LAST_VIEW_KEY = 'lastView';
@@ -368,7 +361,6 @@ async function fetchSessions(includeTasks = true, focusId = currentSessionId) {
       sgSweepTransient();
       renderSessions();
       renderActivityChip();
-      schedulePublishSession();
     }
     // A list too short to scroll gives no scroll event, so fill it until it can scroll.
     if (sessionsHasMore) setTimeout(() => loadMoreIfNearEnd());
@@ -801,11 +793,10 @@ async function fetchTasks(sessionId) {
   currentSessionId = sessionId;
   markOpenSessionRead();
   if (switched) autoRevealLog(sessionId);
-  // A task change in the open session must not reset the messages, the agents or the owner
-  // filter: that reset rebuilds the panels and reads as a reload after each card move.
+  // A task change in the open session must not reset the messages or the agents: that reset
+  // rebuilds the panels and reads as a reload after each card move.
   if (!refresh) {
     currentPins = loadPins(sessionId);
-    ownerFilter = '';
     resetMessageScrollState();
     for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
     for (const k of Object.keys(teamColorMap)) delete teamColorMap[k];
@@ -2333,7 +2324,7 @@ function _renderPinToDetail(pin) {
     body.innerHTML = lastMsg ? renderMarkdown(lastMsg) : '<em>No agent message</em>';
   } else {
     const text = stripAnsi(pin.fullText || pin.text || '');
-    document.getElementById('msg-detail-title').textContent = pin.type === 'assistant' ? 'Claude' : 'User';
+    document.getElementById('msg-detail-title').textContent = pin.type === 'assistant' ? ASSISTANT_LABEL : 'User';
     body.innerHTML = renderMarkdown(text);
   }
   document.getElementById('msg-detail-meta').textContent = formatDate(pin.timestamp);
@@ -2416,7 +2407,7 @@ function highlightSelectedMsg() {
 function msgDetailTitle(m) {
   if (m.type === 'tool_use') return m.tool;
   if (m.type === 'teammate') return m.teammateId || 'Teammate';
-  return m.type === 'assistant' ? 'Claude' : m.agentMessage ? m.systemLabel : m.systemLabel ? 'System' : 'User';
+  return m.type === 'assistant' ? ASSISTANT_LABEL : m.agentMessage ? m.systemLabel : m.systemLabel ? 'System' : 'User';
 }
 
 // The message dialog and a message pane render a message the same way.
@@ -3790,7 +3781,6 @@ function showNoSession() {
   currentSessionId = null;
   switchSeq++;
   endLogLoading();
-  ownerFilter = '';
   resetAgentState();
   currentTasks = [];
   updateUrl();
@@ -3997,8 +3987,6 @@ function renderSessions() {
     const projectHtml = renderProjectIdentity(session);
 
     const gitBranch = session.gitBranch ? escapeHtml(session.gitBranch) : null;
-    const isTeam = session.isTeam;
-    const memberCount = session.memberCount || 0;
 
     const pinState = getSessionPinState(session.id);
     const pinClass = pinState === 'sticky' ? ' sticky' : pinState === 'pinned' ? ' pinned' : '';
@@ -4036,8 +4024,7 @@ function renderSessions() {
             <div class="session-footer">
               <div class="session-time">${formatDate(session.modifiedAt)}</div>
               <span class="session-indicators">
-                ${isTeam ? `<span class="team-badge" title="${memberCount} team members"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>${memberCount}</span>` : ''}
-                ${isTeam || session.project || showCtx ? `<span class="team-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="View session info"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>` : ''}
+                ${session.project || showCtx ? `<span class="team-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="View session info"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>` : ''}
                 ${hasScratchpad ? `<span class="scratchpad-badge${padEmoji ? ' has-emoji' : ''}" onclick="event.stopPropagation(); openSessionScratchpad('${sid}')" title="Open scratchpad">${padEmoji ? escapeHtml(padEmoji) : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`}</span>` : ''}
                 ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${sid}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}">${BOOKMARK_SVG}${bookmarksCount}</span>` : ''}
                 ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
@@ -4081,7 +4068,7 @@ function renderSessions() {
 
   if (filteredSessions.length === 0 && !zenGroup) {
     let emptyMsg = 'No sessions found';
-    let emptyHint = 'Tasks appear when you use Claude Code';
+    let emptyHint = 'Sessions appear when you use pi';
 
     if (zenMode) {
       emptyMsg = 'Zen mode: no session open';
@@ -4450,7 +4437,6 @@ function renderSession() {
   const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
-  updateOwnerFilter();
   renderKanban();
   renderSessions();
 }
@@ -4474,7 +4460,6 @@ function renderProjectView() {
   const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
-  updateOwnerFilter();
   renderKanban();
   renderSessions();
 }
@@ -4614,10 +4599,7 @@ function setColumnHtml(el, html) {
 }
 
 function renderKanban() {
-  let filtered = currentTasks.filter((t) => !isInternalTask(t));
-  if (ownerFilter) {
-    filtered = filtered.filter((t) => t.owner === ownerFilter);
-  }
+  const filtered = currentTasks.filter((t) => !isInternalTask(t));
   const pending = filtered.filter((t) => t.status === 'pending');
   const inProgress = filtered.filter((t) => t.status === 'in_progress');
   const completed = filtered.filter((t) => t.status === 'completed');
@@ -4634,7 +4616,7 @@ function renderKanban() {
   // away mid-typing -- leave the column alone until the input is gone.
   if (!addingTask) {
     const addTile = canAddTask()
-      ? `<button type="button" class="column-add${pending.length ? '' : ' empty'}" onclick="startAddTask(this)" title="You can also ask the agent to add tasks with its TaskCreate tool. Make sure CLAUDE_CODE_ENABLE_TASKS is set in its environment.">${plusIcon}<span>Add task</span></button>`
+      ? `<button type="button" class="column-add${pending.length ? '' : ' empty'}" onclick="startAddTask(this)" title="You can also ask the agent to add tasks with its todo tool.">${plusIcon}<span>Add task</span></button>`
       : '';
     writes.push([
       pendingTasks,
@@ -6433,7 +6415,7 @@ async function deleteTask(taskId, sessionId) {
 //#region HELP
 // Each tab shows its groups two to a row; a pair shares grid rows, so the two headings sit level and
 // the shorter group leaves empty rows. `combo` joins the keys with a plus (a chord) instead of
-// listing them as alternatives. The `hub` tab only works inside Claude Code Hub.
+// listing them as alternatives.
 const SHORTCUT_TABS = [
   {
     title: 'Board',
@@ -6465,12 +6447,7 @@ const SHORTCUT_TABS = [
         title: 'Tabs',
         rows: [
           { keys: ['[', ']'], label: 'Previous / next tab (a split counts as one)' },
-          {
-            keys: ['Ctrl', 'Alt', '1…9'],
-            combo: true,
-            yields: 'ctrl+alt+1',
-            label: 'Go to tab or group N (the board is 1)',
-          },
+          { keys: ['Ctrl', 'Alt', '1…9'], combo: true, label: 'Go to tab or group N (the board is 1)' },
           { keys: ['Alt', '[ / ]'], combo: true, label: 'Change the tab in the focused side of a split' },
           { keys: ['|'], label: 'Split with the tab before it / unsplit (or drag a tab onto a side)' },
           { keys: ['{', '}'], label: 'Focus left / right side of a split' },
@@ -6490,7 +6467,6 @@ const SHORTCUT_TABS = [
             combo: true,
             label: 'Zen mode (current session, or the group under the cursor)',
           },
-          { keys: ['Ctrl', 'Shift', 'K'], combo: true, label: 'Show / hide Kanbot' },
           { keys: ['Ctrl', '+'], combo: true, label: 'Larger modal text' },
           { keys: ['Ctrl', '−'], combo: true, label: 'Smaller modal text' },
           { keys: ['Ctrl', '0'], combo: true, label: 'Reset modal text size' },
@@ -6524,10 +6500,10 @@ const SHORTCUT_TABS = [
         title: 'Sessions',
         rows: [
           { keys: ['Ctrl', 'Alt', 'N'], combo: true, hubMod: true, label: 'New session' },
-          { keys: ['Ctrl', 'Alt', 'R'], combo: true, hubMod: true, label: 'Resume session (claude -r)' },
+          { keys: ['Ctrl', 'Alt', 'R'], combo: true, hubMod: true, label: 'Resume session' },
           { keys: ['Ctrl', 'Alt', 'S'], combo: true, hubMod: true, label: 'Swap to previous session' },
           { keys: ['Shift', 'C'], combo: true, label: 'Copy session id' },
-          { keys: ['Ctrl', 'Shift', 'C'], combo: true, label: 'Copy session name (SendMessage address)' },
+          { keys: ['Ctrl', 'Shift', 'C'], combo: true, label: 'Copy session name' },
         ],
       },
     ],
@@ -6559,49 +6535,6 @@ const SHORTCUT_TABS = [
       },
     ],
   },
-  {
-    title: 'Hub',
-    hub: true,
-    groups: [
-      {
-        title: 'Hub',
-        rows: [
-          { keys: ['M'], opens: 'project.plugins', label: 'Jump to marketplace' },
-          { keys: ['$'], opens: 'session.cost', label: 'Jump to cost' },
-          { keys: ['Ctrl', 'M'], opens: 'project.memory', combo: true, label: 'Jump to memory' },
-          {
-            keys: ['Ctrl', 'Alt', '←/→'],
-            action: ['hub.prevApp', 'hub.nextApp'],
-            combo: true,
-            hubMod: true,
-            label: 'Previous / next hub app',
-          },
-          {
-            keys: ['Alt', '1…9'],
-            action: 'hub.appByNumber',
-            combo: true,
-            hubMod: true,
-            label: 'Jump to hub app by number',
-          },
-          {
-            keys: ['Ctrl', 'Alt', 'P'],
-            action: 'hub.projectPicker',
-            combo: true,
-            hubMod: true,
-            label: 'Project picker',
-          },
-          {
-            keys: ['Ctrl', 'Alt', 'W'],
-            action: 'hub.configDirPicker',
-            combo: true,
-            hubMod: true,
-            label: 'Config dir picker',
-          },
-          { keys: ['Ctrl', 'Alt', 'A'], action: 'hub.appLauncher', combo: true, hubMod: true, label: 'App launcher' },
-        ],
-      },
-    ],
-  },
 ];
 
 // macOS names Control, Option and Shift by their symbols.
@@ -6617,14 +6550,8 @@ function termKbd() {
   return `<kbd>${IS_MAC ? '⌥' : 'Alt'}</kbd>+<kbd>\`</kbd>`;
 }
 
-// The keys of a help row as they read on this system. The hub's modifier is Ctrl+Alt, and on
-// macOS Control+Option for the tab numbers too (Windows and Linux use bare Alt for those). A hub
-// row shows the keys the hub reports, which the user can change; row.keys until it answers.
-function helpKeys(row, mac = IS_MAC, keyLabel = hub.keyLabel) {
-  const live = row.action && keyLabel(row.action);
-  if (live) return live;
-  // `yields`: the row's key gives way when the hub binds that combo.
-  if (row.yields && hub.forwardCombos().includes(row.yields)) return [];
+// The keys of a help row as they read on this system. On macOS the Ctrl+Alt rows read Control+Option.
+function helpKeys(row, mac = IS_MAC) {
   if (!mac) return row.keys;
   if (row.hubMod) return ['⌃', '⌥', ...row.keys.filter((k) => k !== 'Ctrl' && k !== 'Alt')];
   return row.keys.map((k) => MAC_KEYS[k] || k);
@@ -6660,19 +6587,9 @@ function buildHelpShortcuts(groups) {
 let helpTab = 0;
 const helpFilter = document.getElementById('help-filter');
 
-// Hub keys do nothing outside Claude Code Hub, except the app links that the --*-url flags set.
-const hubRowWorks = (r) => (r.opens ? hub.can(r.opens) : hub.inHub);
-const helpTabs = () =>
-  SHORTCUT_TABS.map((t) =>
-    t.hub
-      ? { ...t, groups: t.groups.map((g) => ({ ...g, rows: g.rows.filter(hubRowWorks) })).filter((g) => g.rows.length) }
-      : t,
-  ).filter((t) => t.groups.length);
-
 // The matching rows of every tab, in their groups.
 function filteredShortcutGroups(query) {
-  return helpTabs()
-    .flatMap((t) => t.groups)
+  return SHORTCUT_TABS.flatMap((t) => t.groups)
     .map((g) => ({
       title: g.title,
       rows: g.rows.filter((r) => fuzzyMatch(`${r.label} ${helpKeys(r).join(' ')}`.replaceAll('−', '-'), query)),
@@ -6681,16 +6598,14 @@ function filteredShortcutGroups(query) {
 }
 
 function renderHelp() {
-  const tabs = helpTabs();
-  helpTab = Math.min(helpTab, tabs.length - 1);
   const query = helpFilter.value.trim();
-  document.getElementById('help-tabs').innerHTML = tabs
+  document.getElementById('help-tabs').innerHTML = SHORTCUT_TABS
     .map((t, i) => {
       const on = !query && i === helpTab;
       return `<button type="button" role="tab" class="help-tab${on ? ' active' : ''}" aria-selected="${escapeHtml(String(on))}" data-idx="${i}">${escapeHtml(t.title)}</button>`;
     })
     .join('');
-  const groups = query ? filteredShortcutGroups(query) : tabs[helpTab].groups;
+  const groups = query ? filteredShortcutGroups(query) : SHORTCUT_TABS[helpTab].groups;
   document.getElementById('help-shortcuts').innerHTML = groups.length
     ? buildHelpShortcuts(groups)
     : `<div class="sc-empty">No shortcut matches "${escapeHtml(query)}"</div>`;
@@ -6733,7 +6648,7 @@ helpFilter.addEventListener('keydown', (e) => {
   const step = matchKey(e, 'ArrowLeft') ? -1 : matchKey(e, 'ArrowRight') ? 1 : 0;
   if (!step || helpFilter.value) return;
   e.preventDefault();
-  const n = helpTabs().length;
+  const n = SHORTCUT_TABS.length;
   selectHelpTab((helpTab + step + n) % n);
 });
 
@@ -7912,8 +7827,7 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
-  // The hub binds Ctrl+Alt+digit on macOS for its app keys.
-  if (hubModDown(e) && /^Digit[1-9]$/.test(e.code) && !hub.forwards(e) && selectPaneByNumber(Number(e.code.slice(5)))) {
+  if (hubModDown(e) && /^Digit[1-9]$/.test(e.code) && selectPaneByNumber(Number(e.code.slice(5)))) {
     e.preventDefault();
     focusActivePane();
     return;
@@ -7959,21 +7873,6 @@ document.addEventListener('keydown', (e) => {
   if (shiftOnly(e, 'KeyZ')) {
     e.preventDefault();
     toggleZenMode();
-    return;
-  }
-  if (e.key === '$' && plainShift) {
-    e.preventDefault();
-    openCost(contextSessionId());
-    return;
-  }
-  if (matchKey(e, 'KeyM')) {
-    e.preventDefault();
-    openMarketplace(contextSessionId());
-    return;
-  }
-  if (ClaudeHub.comboOf(e) === 'ctrl+m') {
-    e.preventDefault();
-    openMemory(contextSessionId());
     return;
   }
   if (e.key === '.' || e.key === '>') {
@@ -8116,7 +8015,7 @@ document.addEventListener('keydown', (e) => {
     else toggleScratchpad();
     return;
   }
-  if (ClaudeHub.comboOf(e) === 'ctrl+d') {
+  if (comboOf(e) === 'ctrl+d') {
     e.preventDefault();
     dismissContextSession();
     return;
@@ -8491,7 +8390,7 @@ function postToReviewFrame(type, id) {
 
 // Runs inside the preview iframe as source text, so it must not close over anything outside
 // its own body and arguments.
-function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector) {
+function reviewBridge(textBefore, headingBefore, rangeAt, fieldSelector) {
   const P = 'pk-review:';
   const marks = new Map();
   let pending = null;
@@ -8624,12 +8523,11 @@ function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector
     ].filter(Boolean);
   };
   let claims = new Set();
-  let forward = new Set();
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented || e.target.closest?.(fieldSelector)) return;
     const sigs = keySigs(e);
     const offerKey = pending && sigs.includes('|k:c');
-    if (!offerKey && !forward.has(comboOf(e)) && !sigs.some((s) => claims.has(s))) return;
+    if (!offerKey && !sigs.some((s) => claims.has(s))) return;
     e.preventDefault();
     send({ type: 'key', key: e.key, code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
   });
@@ -8644,7 +8542,6 @@ function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector
     const range = marks.get(e.data.id);
     if (type === 'claims') {
       claims = new Set(e.data.keys.map((c) => keySigs(c)[0]));
-      forward = new Set(e.data.forward);
     } else if (type === 'mark' && pending) {
       marks.set(e.data.id, pending);
       hl?.add(pending);
@@ -8672,7 +8569,7 @@ function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector
 const TEXT_FIELD_SELECTOR =
   'input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=reset], [type=range], [type=color], [type=file], [type=image]), textarea, select, [contenteditable]';
 
-const REVIEW_BRIDGE_TAG = `<script>(${reviewBridge})(${reviewTextBefore}, ${reviewHeadingBefore}, ${reviewRangeAt}, ${ClaudeHub.comboOf}, ${JSON.stringify(TEXT_FIELD_SELECTOR)});</script>`;
+const REVIEW_BRIDGE_TAG = `<script>(${reviewBridge})(${reviewTextBefore}, ${reviewHeadingBefore}, ${reviewRangeAt}, ${JSON.stringify(TEXT_FIELD_SELECTOR)});</script>`;
 
 // Frames from createPreviewFrame, which carry the bridge. A URL pane is another site and must
 // not drive the board.
@@ -8750,7 +8647,7 @@ window.addEventListener('message', (e) => {
   else if (type === 'key') replayKey(e.data, frame);
   else {
     const url = linkUrl(e.data.href);
-    if (url) hub.openExternal(url);
+    if (url) openExternal(url);
   }
 });
 
@@ -9481,7 +9378,6 @@ function handleSessionOpenEvent(data) {
     openedStickyIds.add(id);
   }
   setSessionDismissed(id, false);
-  cliOpenedId = id;
   fetchTasks(id);
 }
 
@@ -9506,7 +9402,7 @@ function handleDocumentLinkEvent(data) {
   setSessionDocLink(sessionId, filePath, unlink);
   const msg = `${unlink ? 'Unlinked' : 'Linked'} ${linkedDocLabel(filePath)}`;
   // Every tab gets the event; only the one on screen offers to open the URL.
-  if (open && isOnScreen()) showToast(msg, 'info', { label: 'Open', onClick: () => hub.openExternal(filePath) });
+  if (open && isOnScreen()) showToast(msg, 'info', { label: 'Open', onClick: () => openExternal(filePath) });
   else showToast(msg);
 }
 
@@ -9626,7 +9522,7 @@ function linkedDocLabel(p) {
 function openLinkedDoc(p, baseDir) {
   const opener = linkedDocOpener(p);
   if (opener === 'url') {
-    hub.openExternal(p);
+    openExternal(p);
     return;
   }
   if (opener === 'preview') {
@@ -9798,7 +9694,7 @@ const zenBookmarksExpanded = new Set();
 function zenBookmarkParts(p) {
   if (p.type === 'tool_use') return { who: p.tool || 'Tool', text: p.description || p.detail || '' };
   if (p.type === 'agent') return { who: p.agentType || 'Agent', text: stripTeammateWrapper(p.lastMessage || '') };
-  return { who: p.type === 'assistant' ? 'Claude' : 'You', text: p.text || '' };
+  return { who: p.type === 'assistant' ? ASSISTANT_LABEL : 'You', text: p.text || '' };
 }
 
 // Zen shows the open session only, so its pins are currentPins and a row opens through
@@ -10210,12 +10106,6 @@ function setupEventSource() {
         handleSessionOpenEvent(data);
       }
 
-      // Alone, the page would open a tab without a user gesture, which the browser blocks; the
-      // CLI prints the link instead.
-      if (data.type === 'session:cost' && hub.inHub) {
-        openCost(data.id, { agent: data.agent, pane: false });
-      }
-
       if (data.type === 'session:pin') {
         handleSessionPinEvent(data);
       }
@@ -10231,19 +10121,10 @@ function setupEventSource() {
       if (data.type === 'pane:file-changed') {
         onPaneFileChanged(data.path);
       }
-
-      if (data.type === 'team-update') {
-        const teamSession = sessions.find((s) => s.isTeam && s.teamName === data.teamName);
-        if (teamSession) {
-          debouncedRefresh(teamSession.id, false);
-        } else if (currentSessionId) {
-          debouncedRefresh(currentSessionId, false);
-        }
-      }
     };
   }
 
-  // When pi-kanban comes back on screen (tab visible or hub:active), catch up immediately
+  // When pi-kanban comes back on screen (tab visible), catch up immediately
   async function catchUp() {
     markOpenSessionRead();
     if (!isOnScreen() || !missedWhileHidden) return;
@@ -10265,11 +10146,6 @@ function setupEventSource() {
     renderAgentFooter();
   }
   document.addEventListener('visibilitychange', catchUp);
-  onHubActive = (active) => {
-    hubActive = active;
-    catchUp();
-    if (hubActive && wantsTerminal()) onTerminalShown();
-  };
 
   // Fallback poll every 30s in case SSE silently drops; skip when not on screen
   setInterval(() => {
@@ -10749,7 +10625,7 @@ function renderPermissionDiff(oldText, newText) {
 // the command or the diff, where it runs, and how long the ask has been waiting.
 function renderPermissionSummary(tool, params) {
   const waited = formatDuration(Math.max(0, Date.now() - new Date(currentWaiting.timestamp).getTime()));
-  const head = `<div class="perm-head"><span class="perm-tool">${escapeHtml(tool)}</span><span class="perm-wait" title="How long Claude has been waiting">waiting ${escapeHtml(waited)}</span></div>`;
+  const head = `<div class="perm-head"><span class="perm-tool">${escapeHtml(tool)}</span><span class="perm-wait" title="How long pi has been waiting">waiting ${escapeHtml(waited)}</span></div>`;
   let body = '';
   if (typeof params.command === 'string') {
     body = `<div class="perm-label">Command</div><pre class="perm-code">${escapeHtml(params.command)}</pre>`;
@@ -11553,12 +11429,6 @@ function toggleZenMode() {
   if (!leavingSessionZen) fetchSessions(false);
 }
 
-function applyHubSettings(s) {
-  sessionsList.classList.toggle('zen-centered', s.zenCentered === true);
-  if (s.zenPattern) sessionsList.dataset.zenPattern = s.zenPattern;
-  else delete sessionsList.dataset.zenPattern;
-}
-
 function renderZenState() {
   const btn = document.getElementById('zen-mode-btn');
   if (!btn) return;
@@ -11705,7 +11575,6 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// Used in HTML; also called by the hub project shim, so no biome suppression is needed.
 function filterByProject(project) {
   clearTimeout(projectFilterTimer);
   filterProject = project || null;
@@ -11832,9 +11701,9 @@ const COLOR_THEMES = [
   ['synthwave', "Synthwave '84"],
 ];
 
-function buildThemeMenu(themes = COLOR_THEMES) {
+function buildThemeMenu() {
   const menu = document.getElementById('themeMenu');
-  menu.innerHTML = themes
+  menu.innerHTML = COLOR_THEMES
     .map(
       ([id, label]) =>
         `<button type="button" class="theme-menu-item theme-swatch-${id}" data-theme-id="${id}"
@@ -12000,45 +11869,27 @@ async function showSessionInfoModal(sessionId) {
   if (!session) return;
 
   // Open modal immediately with session metadata (cwd / path / branch are
-  // already in-memory). Plan / team / tasks are fetched in the background
+  // already in-memory). Plan and parent are fetched in the background
   // and re-rendered when they arrive, so the modal doesn't block on network.
   _planSessionId = sessionId;
-  const cachedTasks = currentSessionId === sessionId ? currentTasks : [];
-  showInfoModal(session, null, cachedTasks, null, null);
+  showInfoModal(session, null, null);
   artifactsSection.load(sessionId);
   // The modal reaches any card's session, not just the open one, so this is the second
   // place a pad can first be seen. Linking belongs on the two open events rather than
   // in renderLinkedDocsHtml, which only builds a string and runs on every repaint.
   loadSessionPads(sessionId);
 
-  const rerender = (teamConfig, tasks, planContent, parentInfo) => {
-    if (_planSessionId !== sessionId) return; // user opened a different modal
-    const modal = document.getElementById('team-modal');
-    if (!modal?.classList.contains('visible')) return; // user closed modal — don't reopen
-    showInfoModal(session, teamConfig, tasks, planContent, parentInfo);
-  };
-
-  const teamPromise = session.isTeam
-    ? getJson(apiPath`/api/teams/${session.teamName || sessionId}`)
-    : Promise.resolve(null);
-
   const planPromise = getJson(apiPath`/api/sessions/${sessionId}/plan`).then((data) => {
     if (data?.content) _pendingPlanPath = data.path || null;
     return data?.content || null;
   });
 
-  const tasksPromise =
-    cachedTasks.length > 0 ? Promise.resolve(cachedTasks) : getJson(apiPath`/api/sessions/${sessionId}`, []);
-
   const parentPromise = getJson(apiPath`/api/sessions/${sessionId}/parent`);
 
-  const [teamConfig, planContent, tasks, parentInfo] = await Promise.all([
-    teamPromise,
-    planPromise,
-    tasksPromise,
-    parentPromise,
-  ]);
-  rerender(teamConfig, tasks, planContent, parentInfo);
+  const [planContent, parentInfo] = await Promise.all([planPromise, parentPromise]);
+  if (_planSessionId !== sessionId) return; // user opened a different modal
+  if (!document.getElementById('team-modal')?.classList.contains('visible')) return; // user closed modal — don't reopen
+  showInfoModal(session, planContent, parentInfo);
 }
 
 let _infoModalSessionId = null;
@@ -12078,14 +11929,12 @@ function renderScratchpadRow(session) {
   ${renderScratchFilesHtml(session.id)}`;
 }
 
-function showInfoModal(session, teamConfig, tasks, planContent, parentInfo) {
+function showInfoModal(session, planContent, parentInfo) {
   const modal = document.getElementById('team-modal');
   const titleEl = document.getElementById('team-modal-title');
   const bodyEl = document.getElementById('team-modal-body');
 
-  const titleText = teamConfig
-    ? `Team: ${teamConfig.team_name || teamConfig.name || 'Unknown'}`
-    : session.name || session.slug || session.id;
+  const titleText = session.name || session.slug || session.id;
   titleEl.innerHTML =
     escapeHtml(titleText) +
     (session.modifiedAt
@@ -12139,10 +11988,6 @@ function showInfoModal(session, teamConfig, tasks, planContent, parentInfo) {
   if (session.sharedTaskList) {
     infoRows.push(['Shared Tasks', session.sharedTaskList]);
   }
-  if (teamConfig?.configPath) {
-    const configDir = teamConfig.configPath.replace(/[/\\][^/\\]+$/, '');
-    infoRows.push(['Team Config', teamConfig.configPath, { openPath: configDir, openFile: teamConfig.configPath }]);
-  }
   const clickableStyle =
     'font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--accent-text); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;';
   const plainStyle =
@@ -12189,59 +12034,6 @@ function showInfoModal(session, teamConfig, tasks, planContent, parentInfo) {
   html += renderLinkedDocsHtml(session.id);
   html += renderArtifactsHtml(session.id);
 
-  // Team info section
-  if (teamConfig) {
-    const ownerCounts = {};
-    const memberDescriptions = {};
-    tasks.forEach((t) => {
-      if (isInternalTask(t) && t.subject) {
-        memberDescriptions[t.subject] = t.description;
-      } else if (t.owner) {
-        ownerCounts[t.owner] = (ownerCounts[t.owner] || 0) + 1;
-      }
-    });
-
-    const members = teamConfig.members || [];
-    const description = teamConfig.description || '';
-    const lead = members.find((m) => m.agentType === 'team-lead' || m.name === 'team-lead');
-
-    if (description) {
-      html += `<div class="team-modal-desc">"${escapeHtml(description)}"</div>`;
-    }
-
-    html += `<div style="font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-bottom: 10px;">Members (${members.length})</div>`;
-
-    members.forEach((member) => {
-      const taskCount = ownerCounts[member.name] || 0;
-      const memberDesc = memberDescriptions[member.name];
-      const mc = resolveNamedColor(member.color);
-      const borderStyle = mc ? ` style="border-left:3px solid ${mc.color}"` : '';
-      const nameStyle = mc ? ` style="color:${mc.color}"` : '';
-      html += `
-            <div class="team-member-card"${borderStyle}>
-              <div class="member-name"${nameStyle}>${escapeHtml(member.name)}</div>
-              ${member.model ? `<div class="member-detail">Model: ${escapeHtml(member.model)}</div>` : ''}
-              ${memberDesc ? `<div class="member-detail" style="margin-top: 4px; font-style: italic; color: var(--text-secondary);">${escapeHtml(memberDesc.split('\n')[0])}</div>` : ''}
-              <div class="member-tasks">Tasks: ${taskCount} assigned</div>
-            </div>
-          `;
-    });
-
-    const metaParts = [];
-    if (teamConfig.created_at) {
-      metaParts.push(`Created: ${new Date(teamConfig.created_at).toLocaleString()}`);
-    }
-    if (lead) {
-      metaParts.push(`Lead: ${lead.name}`);
-    }
-    if (teamConfig.working_dir) {
-      metaParts.push(`Working dir: ${teamConfig.working_dir}`);
-    }
-    if (metaParts.length > 0) {
-      html += `<div class="team-modal-meta">${metaParts.map((p) => escapeHtml(p)).join('<br>')}</div>`;
-    }
-  }
-
   bodyEl.innerHTML = html;
   // Bind to the section, not bodyEl: bodyEl outlives the modal, so listeners on it
   // would stack up once per open and fire the click handler N times.
@@ -12249,13 +12041,6 @@ function showInfoModal(session, teamConfig, tasks, planContent, parentInfo) {
   _infoModalSessionId = session.id;
   updateStickyBtnState();
   updateDismissBtnState();
-  const costBtn = document.getElementById('session-info-cost-btn');
-  if (costBtn) costBtn.style.display = hub.can('session.cost') ? '' : 'none';
-  const mkBtn = document.getElementById('session-info-marketplace-btn');
-  const memBtn = document.getElementById('session-info-memory-btn');
-  const proj = session.project;
-  if (mkBtn) mkBtn.style.display = proj && hub.can('project.plugins') ? '' : 'none';
-  if (memBtn) memBtn.style.display = proj && hub.can('project.memory') ? '' : 'none';
   modal.classList.add('visible');
 }
 
@@ -12794,35 +12579,6 @@ function openFolderInEditor(folder, file) {
   postAndToast('/api/open-folder', body, 'folder');
 }
 
-// Opens the app in a pane of `sid` and brings the pane into view. With no session, or `pane: false`
-// (a Shift-click), the hub switches to the app's tab instead.
-async function openAppAction(action, params, sid, { pane = true, label }) {
-  if (!sid || !pane) return hub.invoke(action, params);
-  const { url } = await hub.invoke(action, params, { open: 'pane' });
-  if (!url) return;
-  const onScreen = await postPane(sid, { target: url, title: label });
-  if (onScreen !== null) revealPane(sid, onScreen);
-}
-
-function openCost(sid, { agent, pane } = {}) {
-  const opts = { pane, label: 'Cost' };
-  if (sid && agent && hub.can('agent.cost')) return openAppAction('agent.cost', { session: sid, agent }, sid, opts);
-  return openAppAction('session.cost', sid ? { session: sid } : {}, sid, opts);
-}
-
-function openProjectApp(action, label, sid, { pane } = {}) {
-  const project = sessions.find((s) => s.id === sid)?.project;
-  return openAppAction(action, project ? { project } : {}, sid, { pane, label });
-}
-const openMarketplace = (sid, opts) => openProjectApp('project.plugins', 'Marketplace', sid, opts);
-const openMemory = (sid, opts) => openProjectApp('project.memory', 'Memory', sid, opts);
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openAppForInfoModal(open, e) {
-  closeTeamModal();
-  open(_infoModalSessionId, { pane: !e.shiftKey });
-}
-
 //#endregion
 
 //#region TOOL_STATS_MODAL
@@ -12924,51 +12680,6 @@ function closeToolStatsModal() {
 }
 //#endregion
 
-//#region OWNER_FILTER
-function updateOwnerFilter() {
-  const bar = document.getElementById('owner-filter-bar');
-  const select = document.getElementById('owner-filter');
-
-  const session = sessions.find((s) => s.id === currentSessionId);
-  if (!session?.isTeam) {
-    bar.classList.remove('visible');
-    return;
-  }
-
-  bar.classList.add('visible');
-  const owners = [
-    ...new Set(
-      currentTasks
-        .filter((t) => !isInternalTask(t))
-        .map((t) => t.owner)
-        .filter(Boolean),
-    ),
-  ].sort();
-  select.innerHTML =
-    '<option value="">All Members</option>' +
-    owners
-      .map((o) => {
-        const c = getOwnerColor(o);
-        return `<option value="${escapeHtml(o)}" style="color:${c.color};background:${c.bg}"${o === ownerFilter ? ' selected' : ''}>${escapeHtml(o)}</option>`;
-      })
-      .join('');
-  const current = ownerFilter ? getOwnerColor(ownerFilter) : null;
-  select.style.color = current ? current.color : '';
-  select.style.backgroundColor = current ? current.bg : '';
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function filterByOwner(value) {
-  ownerFilter = value;
-  const select = document.getElementById('owner-filter');
-  const c = value ? getOwnerColor(value) : null;
-  select.style.color = c ? c.color : '';
-  select.style.backgroundColor = c ? c.bg : '';
-  updateUrl();
-  renderKanban();
-}
-
-//#endregion
 
 //#region PANES
 // Layouts come from /api/panes and `pane:changed` (the pane contract, lib/panes.js). Every write
@@ -13509,7 +13220,7 @@ async function loadPaneView(sid, pane, view, scroll) {
   if (paneOwnOrigin(pane)) {
     view.insertAdjacentHTML(
       'beforeend',
-      paneCardHtml('A pane cannot show the board or the hub', pane.target, 'Open in new tab'),
+      paneCardHtml('A pane cannot show the board', pane.target,'Open in new tab'),
     );
     return;
   }
@@ -13531,11 +13242,6 @@ async function loadPaneView(sid, pane, view, scroll) {
     frame.setAttribute('referrerpolicy', 'no-referrer');
     frame.title = pane.title;
     frame.src = pane.target;
-    frame.addEventListener('load', () => {
-      view.classList.remove('keys-bridged');
-      frame.hostKeysSig = null;
-      pushTerminalClaims();
-    });
     view.appendChild(frame);
     view.insertAdjacentHTML('beforeend', paneUrlBarHtml());
     // Framed at once; a refusal found by the probe swaps the frame for the card.
@@ -14235,7 +13941,7 @@ function paneTargetFrom(raw) {
   if (!value) return null;
   const url = linkUrl(value);
   if (!url) return { kind: 'file', target: value };
-  if (paneOwnOrigin({ kind: 'url', target: url })) return { error: 'A pane cannot show the board or the hub' };
+  if (paneOwnOrigin({ kind: 'url', target: url })) return { error: 'A pane cannot show the board' };
   return { kind: 'url', target: url };
 }
 
@@ -14726,7 +14432,7 @@ const TERMINAL_FRAME_ALIVE_MS = 5000;
 const TERMINAL_MSG = 'pk-term:';
 const TERMINAL_RETRY_MS = [500, 1000, 2000, 4000, 8000];
 const TERMINAL_STABLE_MS = 5000;
-const STALE_TOKEN_MSG = 'The terminal token is out of date. Reload the hub window.';
+const STALE_TOKEN_MSG = 'The terminal token is out of date. Open the board from the URL the server prints.';
 // Read at load, before the first updateUrl() rewrites the URL without the fragment.
 let terminalToken = readTerminalToken();
 const termState = {
@@ -14737,7 +14443,6 @@ const termState = {
   panelHidden: false,
   shown: false,
   attached: false,
-  closeGuard: false,
   focusNext: false,
   openedByUser: null,
   retryTimer: null,
@@ -14759,7 +14464,7 @@ function resetTerminalFrame(patch) {
 }
 let terminalSocketSeq = 0;
 
-// The hub passes the token in the fragment, which is never sent to a server or logged.
+// The server prints the board URL with the token in the fragment, which is never sent to a server or logged.
 function readTerminalToken() {
   const m = /[#&]t=([^&]*)/.exec(location.hash);
   if (m && TERMINAL_TOKEN_RE.test(m[1])) {
@@ -14772,25 +14477,6 @@ function readTerminalToken() {
 
 function storeTerminalToken(token) {
   tabStore.setItem(TERMINAL_TOKEN_KEY, token);
-}
-
-let tokenRefresh = null;
-
-// The hub mints a new token each run, and this page can outlive a hub restart. Resolves true only
-// for a token that differs from the one that just failed, so a caller retries at most once.
-function refreshTerminalToken() {
-  tokenRefresh ??= hub
-    .terminalToken()
-    .then((token) => {
-      if (!TERMINAL_TOKEN_RE.test(token) || token === terminalToken) return false;
-      terminalToken = token;
-      storeTerminalToken(token);
-      return true;
-    })
-    .finally(() => {
-      tokenRefresh = null;
-    });
-  return tokenRefresh;
 }
 
 function terminalAvailable() {
@@ -14830,10 +14516,18 @@ function terminalPaneFocused() {
   return document.getElementById('terminal-pane').contains(active) && !showCardEl().contains(active);
 }
 
-// Kanban's own session keys (new, resume, swap) use the hub's modifier, so the hub leaves them alone.
 // AltGr reaches the page as Ctrl+Alt; when it types a character (Polish AltGr+S is 'ś'), the press is text.
 function hubModDown(e) {
   return e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey && !e.getModifierState?.('AltGraph');
+}
+
+// 'ctrl+shift+k' for a press: a letter or digit by its physical key when the layout types something else.
+function comboOf(e) {
+  const lower = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+  const m = !e.getModifierState?.('AltGraph') && /^(?:Key|Digit)([A-Z1-9])$/.exec(e.code || '');
+  const key = /^[a-z1-9]$/.test(lower) ? lower : m ? m[1].toLowerCase() : e.key;
+  const mods = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'meta'];
+  return [...mods, key].filter(Boolean).join('+');
 }
 
 function inPageField(e) {
@@ -14857,7 +14551,6 @@ function terminalShortcut(e, probe = false) {
   if (ctrlShift && e.code === 'KeyP') return toggleSessionPicker;
   // Ctrl+Shift+Z is redo in a text field, so only the terminal's own textarea gives it up.
   if (ctrlShift && e.code === 'KeyZ') return inPageField(e) ? null : toggleZenMode;
-  if (ctrlShift && e.code === 'KeyK') return kanbotAvailable() ? () => toggleKanbot() : null;
   if (ctrlShift && e.code === 'KeyL') return toggleMessagePanel;
   if (ctrlShift && e.code === 'KeyM') return toggleLastMessage;
   if (ctrlShift && e.code === 'KeyD') return dismissContextSession;
@@ -14956,7 +14649,6 @@ function syncTerminal() {
     termState.shown = false;
     termState.focusNext = false;
     termState.openedByUser = null;
-    syncCloseGuard();
     // Hiding keeps the socket so Ctrl+` back is instant.
     const keepSocket = termState.sessionId === currentSessionId && viewMode === 'session';
     if (termState.sessionId && !keepSocket) detachTerminal();
@@ -14964,7 +14656,6 @@ function syncTerminal() {
   }
   const wasShown = termState.shown;
   termState.shown = true;
-  syncCloseGuard();
   if (termState.sessionId !== currentSessionId) openTerminal(currentSessionId, terminalOpenMode(currentSessionId));
   else if (!wasShown) onTerminalShown(takeTerminalFocus(currentSessionId));
 }
@@ -15078,14 +14769,9 @@ function loadTerminalFrame(origin, timeoutMs) {
 function sendTerminalTheme() {
   const options = terminalThemeOptions();
   const key = JSON.stringify(options);
-  for (const [frame, post] of [
-    [termFrame, postToTerminalFrame],
-    [kanbotState, postToKanbotFrame],
-  ]) {
-    if (!frame.inited || key === frame.theme) continue;
-    frame.theme = key;
-    post('theme', { options });
-  }
+  if (!termFrame.inited || key === termFrame.theme) return;
+  termFrame.theme = key;
+  postToTerminalFrame('theme', { options });
 }
 
 // Keyed on the colors, and style is watched, because under the hub a theme change lands in two
@@ -15125,7 +14811,7 @@ function terminalInitOptions(themeOptions) {
 function openTerminalLink(href) {
   if (typeof href === 'string' && isLocalHref(href)) return openLocalHref(href);
   const url = linkUrl(href);
-  if (url) hub.openExternal(url);
+  if (url) openExternal(url);
 }
 
 function onTerminalFrameMessage(t, m) {
@@ -15160,13 +14846,13 @@ function onTerminalFrameMessage(t, m) {
     else if (m.msg?.t === 'error') socket.refused = true;
     onTerminalMessage(socket.sessionId, m.msg, m.tail);
   } else if (t === 'close') {
-    if (current) onTerminalSocketClose(socket, m.code);
+    if (current) onTerminalSocketClose(socket);
   }
 }
 
 // The frame hands back the keys the board acts on. Replaying them on a textarea inside the pane gives
-// the document listeners the target they saw when xterm lived here: the shortcut runs, the SDK
-// forwards a hub key, and the text-field guard keeps the board's own keys out.
+// the document listeners the target they saw when xterm lived here: the shortcut runs, and the
+// text-field guard keeps the board's own keys out.
 function replayKey(m, target) {
   target.dispatchEvent(
     new KeyboardEvent('keydown', {
@@ -15183,8 +14869,7 @@ function replayKey(m, target) {
 }
 
 // [code, key, key with Shift] on a US layout. Each is probed by code alone and by key alone, so a claim
-// holds on any layout exactly when the shortcut would. Hub keys are not probed: the frame gets the
-// hub's combos and matches them with the SDK's comboOf.
+// holds on any layout exactly when the shortcut would.
 const TERMINAL_PROBE_KEYS = [
   ...[...'abcdefghijklmnopqrstuvwxyz'].map((k) => [`Key${k.toUpperCase()}`, k, k.toUpperCase()]),
   ...[...')!@#$%^&*('].map((s, n) => [`Digit${n}`, String(n), s]),
@@ -15217,10 +14902,10 @@ function terminalClaims() {
 
 let terminalClaimsQueued = false;
 
-// The claims depend on state (the hub's welcome, a slow connect, the session), so every change re-sends
+// The claims depend on state (a slow connect, the session), so every change re-sends
 // them. One state change calls this several times, and the probe is about 1,500 shortcut checks.
 function keyClaims() {
-  return { keys: terminalClaims(), forward: hub.forwardCombos() };
+  return { keys: terminalClaims() };
 }
 
 function bridgeClaims(claims) {
@@ -15235,52 +14920,21 @@ function sendBridgeClaimsAll(frames, base) {
     sendBridgeClaims([showState.frame], { ...base, keys: [...base.keys, ...SHOW_CLAIMS] });
 }
 
-// A hub app in a URL pane runs the SDK, which hands back these keys (hub protocol §5.2). Only keys with
-// Ctrl, Alt or Meta: the page keeps Escape, brackets and its own letter keys.
-function sendHostKeys(frames, bridged) {
-  const keys = bridged.keys.filter((k) => k.ctrlKey || k.altKey || k.metaKey);
-  const sig = JSON.stringify(keys);
-  for (const f of frames) {
-    const origin = URL.parse(f.src)?.origin;
-    if (!origin || origin === 'null' || f.hostKeysSig === sig) continue;
-    f.hostKeysSig = sig;
-    f.contentWindow?.postMessage({ type: 'hub:hostKeys', keys }, origin);
-  }
-}
-
-const urlPaneFrames = () => [...paneViews.querySelectorAll('.pane-url-frame')];
-
-window.addEventListener('message', (e) => {
-  const type = e.data?.type;
-  if (type !== 'hub:hostKey' && type !== 'hub:hostReady') return;
-  const frame = urlPaneFrames().find((f) => f.contentWindow === e.source);
-  if (!frame || URL.parse(frame.src)?.origin !== e.origin) return;
-  if (type === 'hub:hostReady') frame.parentElement.classList.add('keys-bridged');
-  else replayKey(e.data, frame);
-});
-
 function pushTerminalClaims() {
   if (terminalClaimsQueued) return;
   terminalClaimsQueued = true;
   queueMicrotask(() => {
     terminalClaimsQueued = false;
     const bridged = bridgedFrameEls();
-    const urlFrames = urlPaneFrames();
-    if (!termFrame.inited && !kanbotState.inited && !bridged.length && !urlFrames.length) return;
+    if (!termFrame.inited && !bridged.length) return;
     const claims = keyClaims();
-    const base = bridgeClaims(claims);
-    sendBridgeClaimsAll(bridged, base);
-    sendHostKeys(urlFrames, base);
+    sendBridgeClaimsAll(bridged, bridgeClaims(claims));
+    if (!termFrame.inited) return;
     const sig = JSON.stringify(claims);
-    sendFrameClaims(kanbotState, claims, sig, postToKanbotFrame);
-    sendFrameClaims(termFrame, claims, sig, terminalFrameSend);
+    if (sig === termFrame.claims) return;
+    termFrame.claims = sig;
+    terminalFrameSend('claims', claims);
   });
-}
-
-function sendFrameClaims(frameState, claims, sig, send) {
-  if (!frameState.inited || sig === frameState.claims) return;
-  frameState.claims = sig;
-  send('claims', claims);
 }
 
 function terminalTheme() {
@@ -15402,24 +15056,15 @@ function showTerminalPrompt(sessionId, title, detail, choices, output = '') {
   el.querySelector('button')?.focus();
 }
 
-// Closing the page leaves the PTY running, but Ctrl+W meant for the prompt closes the tab, so ask first.
-// Under the hub the top frame asks: browsers do not reliably show the dialog for a frame.
 function setTerminalAttached(on) {
   termState.attached = on;
-  syncCloseGuard();
   pushTerminalClaims();
 }
 
+// Closing the page leaves the PTY running, but Ctrl+W meant for the prompt closes the tab, so ask first.
 // A hidden pane stays attached, but Ctrl+W can only be meant for a terminal on screen.
-function syncCloseGuard() {
-  const on = (termState.attached && termState.shown) || kanbotOnScreen();
-  if (termState.closeGuard === on) return;
-  termState.closeGuard = on;
-  hub.closeGuard(on);
-}
-
 window.addEventListener('beforeunload', (e) => {
-  if (termState.closeGuard && !hub.inHub) e.preventDefault();
+  if (termState.attached && termState.shown) e.preventDefault();
 });
 
 // A config-dir switch in the hub reloads this page, and coming back should put the cursor where it was.
@@ -15561,18 +15206,11 @@ function dropTerminalFrame() {
   resetTerminalFrame({ el: null, ready: null });
 }
 
-function onTerminalSocketClose(socket, code) {
+function onTerminalSocketClose(socket) {
   termState.socket = null;
   setTerminalAttached(false);
-  const { sessionId, mode, attempt } = socket;
-  // A refusal already shows the server's reason, and retrying would only repeat it, unless the
-  // reason was a token that the hub has since replaced (4001).
-  if (socket.refused && code === 4001) {
-    refreshTerminalToken().then((ok) => {
-      if (ok && termState.sessionId === sessionId) openTerminal(sessionId, mode, attempt + 1);
-    });
-    return;
-  }
+  const { sessionId, attempt } = socket;
+  // A refusal already shows the server's reason, and retrying would only repeat it.
   if (socket.refused || document.getElementById('terminal-prompt').classList.contains('visible')) return;
   const stable = socket.readyAt && Date.now() - socket.readyAt > TERMINAL_STABLE_MS;
   retryTerminal(sessionId, stable ? 0 : attempt);
@@ -15756,7 +15394,7 @@ async function renderTerminalManager() {
   body.innerHTML = list
     .map((t) => {
       const session = sessions.find((s) => s.id === t.id);
-      const name = t.kanbot ? 'Kanbot' : session ? sessionDisplayName(session) : t.id.slice(0, 8);
+      const name = session ? sessionDisplayName(session) : t.id.slice(0, 8);
       const here = t.id === termState.sessionId ? '<span class="terminal-manager-here">this tab</span>' : '';
       const attached = t.clients ? `${t.clients} attached` : 'detached';
       return `<div class="terminal-manager-row${t.clients ? ' attached' : ''}">
@@ -15767,12 +15405,12 @@ async function renderTerminalManager() {
             <span class="terminal-manager-mode">${escapeHtml(t.mode)}</span>
             <span title="${escapeHtml(`pid ${t.pid}`)}">up ${formatDuration(Date.now() - t.startedAt)}</span>
             <span>${attached}</span>
-            <span class="terminal-manager-proc" data-proc="${escapeHtml(t.id)}" title="Memory and CPU of the claude process. Tools it runs are not counted. 100% CPU is one core.">${escapeHtml(formatTerminalProc(terminalProcStats[t.id]))}</span>
+            <span class="terminal-manager-proc" data-proc="${escapeHtml(t.id)}" title="Memory and CPU of the pi process. Tools it runs are not counted. 100% CPU is one core.">${escapeHtml(formatTerminalProc(terminalProcStats[t.id]))}</span>
             <span class="terminal-manager-cwd" title="${escapeHtml(t.cwd)}">${escapeHtml(pathBasename(t.cwd))}</span>
           </div>
         </div>
         <div class="terminal-manager-actions">
-          <button type="button" class="btn btn-secondary" data-open="${escapeHtml(t.id)}"${t.kanbot ? ' data-kanbot' : ''}>Open</button>
+          <button type="button" class="btn btn-secondary" data-open="${escapeHtml(t.id)}">Open</button>
           <button type="button" class="btn btn-secondary terminal-manager-end" data-end="${escapeHtml(t.id)}" data-started="${escapeHtml(String(Number(t.startedAt) || 0))}">End</button>
         </div>
       </div>`;
@@ -15781,8 +15419,7 @@ async function renderTerminalManager() {
   body.querySelectorAll('[data-open]').forEach((b) => {
     b.onclick = () => {
       closeTerminalManager();
-      if ('kanbot' in b.dataset) toggleKanbot(true);
-      else showSessionTerminal(b.dataset.open);
+      showSessionTerminal(b.dataset.open);
     };
   });
   body.querySelectorAll('[data-end]').forEach((b) => {
@@ -15794,10 +15431,8 @@ async function renderTerminalManager() {
   });
 }
 
-async function terminalFetch(url, method, body) {
-  const send = () => api(url, { method, body, headers: { 'X-Terminal-Token': terminalToken || '' } });
-  const res = await send();
-  return res.status === 401 && (await refreshTerminalToken()) ? send() : res;
+function terminalFetch(url, method, body) {
+  return api(url, { method, body, headers: { 'X-Terminal-Token': terminalToken || '' } });
 }
 
 const TERMINAL_DOT_STATE = { working: 'busy', waiting: 'wait', idle: 'idle' };
@@ -15824,7 +15459,7 @@ async function endAllTerminals() {
   if (notIdle) {
     const ok = await confirmModal({
       title: `End ${ids.length} terminals?`,
-      message: 'The Claude Code processes stop. Sessions stay on the board and can be resumed.',
+      message: 'The pi processes stop. Sessions stay on the board and can be resumed.',
       items,
       warn: `${notIdle} ${notIdle === 1 ? 'is' : 'are'} not idle. Work in progress is cut off.`,
       okLabel: `End ${ids.length} terminals`,
@@ -15834,218 +15469,6 @@ async function endAllTerminals() {
   await Promise.all(ids.map((id) => closeTerminalSession(id)));
   renderTerminalManager();
 }
-
-//#endregion
-
-//#region KANBOT
-// The board's own assistant (docs/kanbot.md): a claude session the server keeps hidden from the list,
-// shown in a popover through a second terminal frame on the board terminal's frame origin.
-const KANBOT_SVG =
-  '<svg viewBox="0 0 16 13" width="16" height="13" shape-rendering="crispEdges" aria-hidden="true">' +
-  '<path fill="#d97757" d="M3 0h10v4h3v3h-3v3H3V7H0V4h3z"/>' +
-  '<path fill="#d97757" d="M4 10h1v3H4zM6 10h1v3H6zM9 10h1v3H9zM11 10h1v3h-1z"/>' +
-  '<path fill="#1f1e1d" d="M5 2h1v2H5zM10 2h1v2h-1z"/></svg>';
-const KANBOT_LAYOUT_KEY = 'pk-kanbot-layout';
-const KANBOT_WIDTH_KEY = 'pk-kanbot-width';
-const kanbotState = {
-  el: null,
-  frame: null,
-  origin: null,
-  ptyId: null,
-  inited: false,
-  attached: false,
-  ended: false,
-  socketId: 0,
-  theme: null,
-  claims: null,
-  returnFocus: null,
-};
-
-function kanbotFocused() {
-  return !!kanbotState.el?.contains(document.activeElement);
-}
-
-function kanbotAvailable() {
-  return !!appConfig.kanbot && terminalAvailable();
-}
-
-function kanbotButton() {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.className = 'footer-kanbot';
-  b.title = 'Kanbot, the board assistant';
-  b.setAttribute('aria-label', b.title);
-  b.innerHTML = KANBOT_SVG;
-  b.onclick = toggleKanbot;
-  return b;
-}
-
-function ensureKanbotPopover() {
-  if (kanbotState.el) return kanbotState.el;
-  const el = document.createElement('div');
-  el.className = 'kanbot-popover';
-  el.innerHTML = `<div class="kanbot-head">${KANBOT_SVG}<strong>Kanbot</strong><span class="kanbot-status"></span><button type="button" class="kanbot-collapse" aria-label="Hide" title="Hide, Kanbot keeps running">–</button><button type="button" class="kanbot-dock">${showIcon('dock')}</button><button type="button" class="kanbot-expand"></button><button type="button" class="kanbot-close" aria-label="End" title="End the session, the next open resumes the chat">×</button></div><div class="kanbot-body"></div><div class="panel-resize-handle kanbot-resize"></div>`;
-  el.querySelector('.kanbot-dock').onclick = () => setKanbotLayout(el.classList.contains('docked') ? '' : 'docked');
-  el.querySelector('.kanbot-expand').onclick = () =>
-    setKanbotLayout(el.classList.contains('expanded') ? '' : 'expanded');
-  el.querySelector('.kanbot-collapse').onclick = () => toggleKanbot(false);
-  el.querySelector('.kanbot-close').onclick = endKanbot;
-  const width = store.getItem(KANBOT_WIDTH_KEY);
-  if (width) el.style.setProperty('--kanbot-width', width);
-  initResize(el, el.querySelector('.kanbot-resize'), '--kanbot-width', KANBOT_WIDTH_KEY, 320);
-  document.body.appendChild(el);
-  kanbotState.el = el;
-  setKanbotLayout(store.getItem(KANBOT_LAYOUT_KEY) || '');
-  return el;
-}
-
-function setKanbotLayout(layout) {
-  const el = kanbotState.el;
-  const docked = layout === 'docked';
-  const expanded = layout === 'expanded';
-  el.classList.toggle('docked', docked);
-  el.classList.toggle('expanded', expanded);
-  const dock = el.querySelector('.kanbot-dock');
-  dock.classList.toggle('active', docked);
-  dock.title = docked ? 'Undock' : 'Dock to the right';
-  dock.setAttribute('aria-label', dock.title);
-  dock.setAttribute('aria-pressed', String(docked));
-  const expand = el.querySelector('.kanbot-expand');
-  expand.innerHTML = showIcon(expanded ? 'restore' : 'expand');
-  expand.title = expanded ? 'Restore' : 'Expand';
-  expand.setAttribute('aria-label', expand.title);
-  store.setItem(KANBOT_LAYOUT_KEY, layout);
-  postToKanbotFrame('focus');
-}
-
-function setKanbotStatus(text) {
-  kanbotState.el.querySelector('.kanbot-status').textContent = text;
-}
-
-function postToKanbotFrame(t, data) {
-  kanbotState.frame?.contentWindow?.postMessage({ ...data, type: TERMINAL_MSG + t }, kanbotState.origin);
-}
-
-function kanbotOnScreen() {
-  return kanbotState.attached && !!kanbotState.el?.classList.contains('visible');
-}
-
-function endKanbot() {
-  const id = kanbotState.ptyId;
-  toggleKanbot(false);
-  kanbotState.ptyId = null;
-  if (id) terminalFetch(apiPath`/api/terminals/${id}`, 'DELETE').catch(() => {});
-}
-
-function setKanbotAttached(on) {
-  kanbotState.attached = on;
-  syncCloseGuard();
-}
-
-function toggleKanbot(force) {
-  const el = ensureKanbotPopover();
-  const show = typeof force === 'boolean' ? force : !el.classList.contains('visible');
-  const wasShown = el.classList.contains('visible');
-  el.classList.toggle('visible', show);
-  if (!show) {
-    const hadFocus = kanbotFocused();
-    postToKanbotFrame('detach');
-    setKanbotAttached(false);
-    const back = kanbotState.returnFocus;
-    kanbotState.returnFocus = null;
-    if (hadFocus) {
-      document.activeElement.blur();
-      if (back === 'terminal') focusTerminalPane();
-      else if (back?.isConnected) back.focus();
-    }
-    return;
-  }
-  if (!wasShown && !kanbotFocused()) {
-    kanbotState.returnFocus = terminalPaneFocused() ? 'terminal' : document.activeElement;
-  }
-  kanbotState.frame?.focus();
-  if (!kanbotState.frame) {
-    const frame = document.createElement('iframe');
-    frame.className = 'kanbot-frame';
-    frame.title = 'Kanbot';
-    frame.allow = 'clipboard-read; clipboard-write';
-    kanbotState.origin = termFrame.sameOrigin ? location.origin : terminalFrameOrigin();
-    frame.src = `${kanbotState.origin}/terminal.html#p=${encodeURIComponent(location.origin)}`;
-    kanbotState.frame = frame;
-    el.querySelector('.kanbot-body').appendChild(frame);
-    return;
-  }
-  if (kanbotState.inited) {
-    postToKanbotFrame('refresh');
-    postToKanbotFrame('focus');
-    if (!kanbotState.attached) openKanbot();
-  }
-}
-
-async function openKanbot() {
-  setKanbotStatus('starting…');
-  let res;
-  try {
-    res = await terminalFetch('/api/kanbot/start', 'POST', {});
-  } catch {
-    setKanbotStatus('board unreachable, retrying…');
-    setTimeout(() => {
-      if (kanbotState.el.classList.contains('visible') && !kanbotState.attached) openKanbot();
-    }, 3000);
-    return;
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) return setKanbotStatus(data.error || `error ${res.status}`);
-  kanbotState.ended = false;
-  kanbotState.ptyId = data.ptyId;
-  setKanbotStatus(data.sessionId ? data.sessionId.slice(0, 8) : '');
-  postToKanbotFrame('open', {
-    socketId: ++kanbotState.socketId,
-    reset: true,
-    hello: { token: terminalToken, id: data.ptyId, mode: 'auto' },
-  });
-  postToKanbotFrame('focus');
-}
-
-window.addEventListener('message', (e) => {
-  if (!kanbotState.frame || e.source !== kanbotState.frame.contentWindow || e.origin !== kanbotState.origin) return;
-  const m = e.data;
-  if (typeof m?.type !== 'string' || !m.type.startsWith(TERMINAL_MSG)) return;
-  const t = m.type.slice(TERMINAL_MSG.length);
-  if (t === 'loaded') {
-    const themeOptions = terminalThemeOptions();
-    kanbotState.inited = false;
-    kanbotState.claims = null;
-    kanbotState.theme = JSON.stringify(themeOptions);
-    postToKanbotFrame('init', terminalInitOptions(themeOptions));
-    return;
-  }
-  if (t === 'term') {
-    kanbotState.inited = true;
-    const claims = keyClaims();
-    sendFrameClaims(kanbotState, claims, JSON.stringify(claims), postToKanbotFrame);
-    // The first show created the frame after its focus call, so the frame takes focus once it is up.
-    if (kanbotState.el.classList.contains('visible')) kanbotState.frame.focus();
-    openKanbot();
-    return;
-  }
-  if (t === 'key') {
-    replayKey(m, document.getElementById('terminal-key-proxy'));
-    return;
-  }
-  if (m.socketId !== kanbotState.socketId) return;
-  if (t === 'ws') {
-    if (m.msg?.t === 'ready') setKanbotAttached(true);
-    else if (m.msg?.t === 'exit') {
-      setKanbotAttached(false);
-      kanbotState.ended = true;
-      setKanbotStatus('ended, reopen to resume');
-    } else if (m.msg?.t === 'error') setKanbotStatus(m.msg.msg || 'error');
-  } else if (t === 'close') {
-    setKanbotAttached(false);
-    if (!kanbotState.ended && kanbotState.el.classList.contains('visible')) setTimeout(openKanbot, 1000);
-  }
-});
 
 //#endregion
 
@@ -16279,7 +15702,6 @@ const SHOW_ICONS = {
   uncollapse: '<path d="M6 9l6 6 6-6"/>',
   expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
   restore: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
-  dock: '<path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM15 3v18"/>',
   clear: '<path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>',
   close: '<path d="M18 6L6 18M6 6l12 12"/>',
   pane: '<use href="#icon-pane"/>',
@@ -16350,7 +15772,7 @@ function showCardKey(e) {
     focusShowBody();
     return true;
   }
-  const combo = ClaudeHub.comboOf(e);
+  const combo = comboOf(e);
   const cmd = combo === 'Escape' ? (showState.expanded ? 'expand' : 'collapse') : SHOW_KEY_COMMANDS[combo];
   if (cmd) {
     showCommand(cmd);
@@ -17788,7 +17210,6 @@ function renderSidebarFooter() {
   if (footerState.version) {
     const v = document.createElement('span');
     v.className = 'footer-version';
-    if (kanbotAvailable()) v.append(kanbotButton());
     v.append(`v${footerState.version}`);
     children.push(v);
   }
@@ -17805,7 +17226,6 @@ sessionFilter = urlState.filter || FILTER_DEFAULTS.session;
 // The URL wins; the persisted view only fills in when it carries a project key, so 'all' (null)
 // restores as 'all' and pre-existing blobs without the key still default to '__recent__'.
 filterProject = urlState.project || (lastView && 'project' in lastView ? lastView.project : FILTER_DEFAULTS.project);
-ownerFilter = urlState.owner || '';
 searchQuery = urlState.search || '';
 
 renderFilterState();
@@ -17826,7 +17246,6 @@ if (urlState.search) {
 getJson('/api/config')
   .then((c) => {
     if (c) appConfig = c;
-    if (appConfig.kanbot && footerState.version) renderSidebarFooter();
   })
   .then(restorePendingSessions)
   .then(() =>
@@ -17881,7 +17300,6 @@ window.addEventListener('popstate', () => {
   sessionFilter = s.filter || FILTER_DEFAULTS.session;
   resetSessionPage();
   filterProject = s.project || FILTER_DEFAULTS.project;
-  ownerFilter = s.owner || '';
   searchQuery = s.search || '';
   renderFilterState();
   // fetchSessions derives query params from the globals set above — refetch so
@@ -17899,60 +17317,9 @@ window.addEventListener('popstate', () => {
 });
 //#endregion
 
-// #region HUB_INTEGRATION
-const costDetail = (session) => `?view=detail&session=${encodeURIComponent(session)}`;
-const projectQuery = (project) => `?${new URLSearchParams({ project })}`;
-const hub = ClaudeHub.connect({
-  // A function, because the --*-url flags arrive with /api/config after connect.
-  standalone: () => ({
-    ...(appConfig.costUrl && {
-      'session.cost': (p) => p.session && new URL(costDetail(p.session), appConfig.costUrl).href,
-    }),
-    ...(appConfig.marketplaceUrl && {
-      'project.plugins': (p) => p.project && new URL(projectQuery(p.project), appConfig.marketplaceUrl).href,
-    }),
-    ...(appConfig.memoryUrl && {
-      'project.memory': (p) => p.project && new URL(projectQuery(p.project), appConfig.memoryUrl).href,
-    }),
-  }),
-});
-
-hub.onActive((active) => {
-  onHubActive(active);
-  pushTerminalClaims();
-});
-hub.onStatus(pushTerminalClaims);
-hub.onSettings(applyHubSettings);
-
-// session.changed goes out once the switch settles, so arrowing through the list sends one event.
-let publishTimer = 0;
-let publishedSessionId;
-let cliOpenedId = null;
-
-function schedulePublishSession() {
-  clearTimeout(publishTimer);
-  publishTimer = setTimeout(publishSession, 150);
-}
-
-function publishSession() {
-  if (currentSessionId === publishedSessionId) return;
-  const s = currentSessionId ? sessions.find((x) => x.id === currentSessionId) : null;
-  // A placeholder publishes once its real row replaces it.
-  if (currentSessionId && (!s || s.placeholder)) return;
-  publishedSessionId = currentSessionId;
-  const source = currentSessionId === cliOpenedId ? 'cli' : 'user';
-  cliOpenedId = null;
-  hub.publish(
-    'session.changed',
-    s && {
-      sessionId: s.id,
-      project: s.project,
-      name: s.name || null,
-      gitBranch: s.gitBranch || null,
-      live: isSessionActive(s),
-      source,
-    },
-  );
+//#region LINKS
+function openExternal(url) {
+  window.open(url, '_blank', 'noopener');
 }
 
 function webUrl(href) {
@@ -17974,8 +17341,7 @@ function openLocalHref(href) {
 }
 
 // Capture, because the modals stop a click's propagation, and stopped here so a link in a message
-// preview does not also open the row. Under the hub the SDK has already opened a web link
-// outside (defaultPrevented), and leaves a link to a hub app alone.
+// preview does not also open the row.
 document.addEventListener(
   'click',
   (e) => {
@@ -17989,40 +17355,12 @@ document.addEventListener(
       return;
     }
     const local = isLocalHref(href);
-    if (!local && (!external || hub.inHub)) return;
+    if (!local && !external) return;
     e.preventDefault();
     e.stopPropagation();
     if (local) openLocalHref(href);
-    else hub.openExternal(url.href);
+    else openExternal(url.href);
   },
   true,
 );
-
-(function initHubTheme() {
-  const getTheme = () => (document.body.classList.contains('light') ? 'light' : 'dark');
-  const getColorTheme = () => document.body.dataset.colorTheme || 'ember';
-  const report = hub.bindTheme({
-    get: () => ({ theme: getTheme(), colorTheme: getColorTheme() }),
-    set: ({ theme, colorTheme }) => {
-      if (colorTheme !== getColorTheme()) setColorTheme(colorTheme);
-      if (theme !== getTheme()) window.toggleTheme();
-    },
-  });
-  new MutationObserver(report).observe(document.body, {
-    attributes: true,
-    attributeFilter: ['class', 'data-color-theme'],
-  });
-})();
-
-// Under the hub the picker lists the hub's themes, which include the user's own (protocol section 6, rule 5).
-hub.onThemes((themes) => {
-  buildThemeMenu(themes.map((t) => [t.id, t.label]));
-  syncColorThemeSelect(document.body.dataset.colorTheme);
-});
-
-hub.subscribe('project.changed', (p) => {
-  const dirPath = p?.project;
-  if (typeof dirPath !== 'string' || !dirPath || dirPath === filterProject) return;
-  filterByProject(dirPath);
-});
-// #endregion HUB_INTEGRATION
+//#endregion

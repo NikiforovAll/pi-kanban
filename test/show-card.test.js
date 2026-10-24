@@ -223,12 +223,12 @@ describe('showBridge', () => {
 const press = (key, mods = {}) => ({ key, code: '', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });
 
 describe('showCardKey', () => {
-  const { comboOf } = require('./vendor/claude-hub-sdk.js');
+  const comboOf = appFunction('comboOf');
   function setup(state = {}) {
     const log = [];
     const showState = { idx: 0, posts: [{ id: 'p1', title: 'T' }], expanded: false, ...state };
     const key = appFunction('showCardKey', {
-      ClaudeHub: { comboOf },
+      comboOf,
       showState,
       SHOW_KEY_COMMANDS: appConst('SHOW_KEY_COMMANDS'),
       matchKey: appFunction('matchKey'),
