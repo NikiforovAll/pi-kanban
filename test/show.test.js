@@ -79,7 +79,7 @@ describe('show routes', () => {
   let api;
 
   before(async () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-show-'));
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-show-'));
     b = board(root);
     api = await listen(b.app);
   });
@@ -90,7 +90,7 @@ describe('show routes', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  const showDir = (id) => path.join(root, id, 'scratchpad', '.cck', 'show');
+  const showDir = (id) => path.join(root, id, 'scratchpad', '.pi-kanban', 'show');
 
   it('answers an empty card before the first post', async () => {
     const r = await api.call('GET', showUrl());
@@ -291,7 +291,7 @@ describe('show claims', () => {
   let api;
 
   before(async () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-show-claim-'));
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-show-claim-'));
     b = board(root);
     api = await listen(b.app);
   });
@@ -307,7 +307,7 @@ describe('show claims', () => {
   it('names a file it does not create, and the card waits for it', async () => {
     const r = await api.call('POST', showUrl(), { sessionId: A, title: 'Plan', key: 'plan' });
     assert.equal(r.status, 200);
-    assert.equal(r.body.path, path.join(root, A, 'scratchpad', '.cck', 'show', `${r.body.id}.md`));
+    assert.equal(r.body.path, path.join(root, A, 'scratchpad', '.pi-kanban', 'show', `${r.body.id}.md`));
     assert.equal(fs.existsSync(r.body.path), false);
     const got = await api.call('GET', `${showUrl()}/${r.body.id}`);
     assert.equal(got.body.waiting, true);
@@ -356,7 +356,7 @@ describe('show store', () => {
   });
 
   it('gives a session resumed in a new terminal its posts', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-show-resume-'));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-show-resume-'));
     try {
       let saves = 0;
       const store = createShowStore({

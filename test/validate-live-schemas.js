@@ -10,7 +10,7 @@ const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);
 
 const SCHEMAS_DIR = path.join(__dirname, 'schemas');
-const CLAUDE_DIR = process.env.CLAUDE_DIR || path.join(os.homedir(), '.claude');
+const PI_AGENT_DIR = process.env.PI_AGENT_DIR || path.join(os.homedir(), '.claude');
 
 const schemas = {
   task: ajv.compile(JSON.parse(readFileSync(path.join(SCHEMAS_DIR, 'task.schema.json'), 'utf8'))),
@@ -53,15 +53,15 @@ function validateDir(dir, schemaName, fileFilter = f => f.endsWith('.json')) {
   }
 }
 
-console.log(`Validating live Claude Code files in ${CLAUDE_DIR}\n`);
+console.log(`Validating live Claude Code files in ${PI_AGENT_DIR}\n`);
 
 // 1. Task files
-const tasksDir = path.join(CLAUDE_DIR, 'tasks');
+const tasksDir = path.join(PI_AGENT_DIR, 'tasks');
 console.log('Tasks...');
 validateDir(tasksDir, 'task');
 
 // 2. Agent activity files
-const agentDir = path.join(CLAUDE_DIR, 'agent-activity');
+const agentDir = path.join(PI_AGENT_DIR, 'agent-activity');
 console.log('Agents...');
 if (existsSync(agentDir)) {
   for (const entry of readdirSync(agentDir, { withFileTypes: true })) {
@@ -82,7 +82,7 @@ if (existsSync(agentDir)) {
 }
 
 // 3. Team configs
-const teamsDir = path.join(CLAUDE_DIR, 'teams');
+const teamsDir = path.join(PI_AGENT_DIR, 'teams');
 console.log('Teams...');
 if (existsSync(teamsDir)) {
   for (const entry of readdirSync(teamsDir, { withFileTypes: true })) {
@@ -97,7 +97,7 @@ if (existsSync(teamsDir)) {
 }
 
 // 4. Sessions index files
-const projectsDir = path.join(CLAUDE_DIR, 'projects');
+const projectsDir = path.join(PI_AGENT_DIR, 'projects');
 console.log('Sessions indexes...');
 if (existsSync(projectsDir)) {
   for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {

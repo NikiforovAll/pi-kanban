@@ -207,7 +207,7 @@ describe('createTerminalFrame', () => {
     return { posted, terms, send, docListeners, win, focus, flush, webLinks };
   }
 
-  const init = { type: 'cck-term:init', fontFamily: 'mono', fontSize: 13, scrollback: 1000, themeOptions: { theme: {} } };
+  const init = { type: 'pk-term:init', fontFamily: 'mono', fontSize: 13, scrollback: 1000, themeOptions: { theme: {} } };
 
   it('ignores messages from anything but the board', () => {
     const w = stubWindow();
@@ -219,8 +219,8 @@ describe('createTerminalFrame', () => {
     assert.deepEqual(
       w.posted.map((p) => [p.message.type, p.origin]),
       [
-        ['cck-term:loaded', BOARD],
-        ['cck-term:term', BOARD],
+        ['pk-term:loaded', BOARD],
+        ['pk-term:term', BOARD],
       ],
     );
   });
@@ -235,8 +235,8 @@ describe('createTerminalFrame', () => {
     assert.deepEqual(
       w.posted.slice(-2).map((p) => p.message),
       [
-        { type: 'cck-term:link', href: 'file:///C:/x.md' },
-        { type: 'cck-term:link', href: 'https://git.example.com/mr/1' },
+        { type: 'pk-term:link', href: 'file:///C:/x.md' },
+        { type: 'pk-term:link', href: 'https://git.example.com/mr/1' },
       ],
     );
   });
@@ -259,7 +259,7 @@ describe('createTerminalFrame', () => {
       [['C:/a/b.js:12', { start: { x: 8, y: 5 }, end: { x: 19, y: 5 } }]],
     );
     links[0].activate();
-    assert.deepEqual(w.posted.at(-1).message, { type: 'cck-term:link', href: 'C:/a/b.js' });
+    assert.deepEqual(w.posted.at(-1).message, { type: 'pk-term:link', href: 'C:/a/b.js' });
     term.linkProvider.provideLinks(1, (l) => {
       links = l;
     });
@@ -287,14 +287,14 @@ describe('createTerminalFrame', () => {
   it('hands a claimed key to the board and keeps the rest', () => {
     const w = stubWindow();
     w.send(init);
-    w.send({ type: 'cck-term:claims', keys: [press({ ctrlKey: true, key: '`', code: 'Backquote' })] });
+    w.send({ type: 'pk-term:claims', keys: [press({ ctrlKey: true, key: '`', code: 'Backquote' })] });
     const term = w.terms[0];
     let prevented = false;
     const ev = (e) => ({ type: 'keydown', preventDefault: () => (prevented = true), ...press(e) });
     assert.equal(term.keyFilter(ev({ ctrlKey: true, key: '`', code: 'Backquote' })), false);
     assert.ok(prevented);
     assert.deepEqual(w.posted.at(-1).message, {
-      type: 'cck-term:key',
+      type: 'pk-term:key',
       key: '`',
       code: 'Backquote',
       ctrl: true,
@@ -309,7 +309,7 @@ describe('createTerminalFrame', () => {
     const { comboOf } = require('./vendor/claude-hub-sdk.js');
     const w = stubWindow({ ClaudeHub: { comboOf } });
     w.send(init);
-    w.send({ type: 'cck-term:claims', keys: [], forward: ['ctrl+alt+a'] });
+    w.send({ type: 'pk-term:claims', keys: [], forward: ['ctrl+alt+a'] });
     const term = w.terms[0];
     const ev = (e) => ({ type: 'keydown', preventDefault() {}, ...press({ ctrlKey: true, altKey: true, ...e }) });
     assert.equal(term.keyFilter(ev({ key: 'a', code: 'KeyA' })), false);
@@ -320,13 +320,13 @@ describe('createTerminalFrame', () => {
   it('hands a claimed key to the board when the frame has focus but xterm does not', () => {
     const w = stubWindow();
     w.send(init);
-    w.send({ type: 'cck-term:claims', keys: [press({ altKey: true, key: '`', code: 'Backquote' })] });
+    w.send({ type: 'pk-term:claims', keys: [press({ altKey: true, key: '`', code: 'Backquote' })] });
     const term = w.terms[0];
     const ev = (target) => ({ target, preventDefault() {}, ...press({ altKey: true, key: '`', code: 'Backquote' }) });
     w.docListeners.keydown(ev(term.textarea));
-    assert.equal(w.posted.at(-1).message.type, 'cck-term:term');
+    assert.equal(w.posted.at(-1).message.type, 'pk-term:term');
     w.docListeners.keydown(ev({}));
-    assert.equal(w.posted.at(-1).message.type, 'cck-term:key');
+    assert.equal(w.posted.at(-1).message.type, 'pk-term:key');
   });
 
   function openFrame(WebSocket, socketId = 1) {
@@ -335,7 +335,7 @@ describe('createTerminalFrame', () => {
     w.terms[0].write = () => {};
     w.terms[0].buffer = { active: null };
     w.win.WebSocket = WebSocket;
-    w.send({ type: 'cck-term:open', socketId, hello: {}, reset: false });
+    w.send({ type: 'pk-term:open', socketId, hello: {}, reset: false });
     return w;
   }
 
@@ -350,7 +350,7 @@ describe('createTerminalFrame', () => {
       },
       7,
     );
-    assert.deepEqual(w.posted.at(-1).message, { type: 'cck-term:opening', socketId: 7 });
+    assert.deepEqual(w.posted.at(-1).message, { type: 'pk-term:opening', socketId: 7 });
     assert.equal(sockets.length, 1);
   });
 

@@ -51,9 +51,9 @@ describe('ask routes', () => {
   let api;
 
   before(async () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-ask-'));
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-ask-'));
     card = path.join(root, 'card.html');
-    fs.writeFileSync(card, '<form data-cck-submit="pick"><button>Send</button></form>');
+    fs.writeFileSync(card, '<form data-pk-submit="pick"><button>Send</button></form>');
     fs.writeFileSync(path.join(root, 'card.md'), '# no');
     b = board();
     api = await listen(b.app);
@@ -83,7 +83,7 @@ describe('ask routes', () => {
     const got = await api.call('GET', askUrl(), undefined, null);
     assert.equal(got.body.ask.id, body.id);
     assert.equal(got.body.ask.size, 'lg');
-    assert.match(got.body.ask.content, /data-cck-submit/);
+    assert.match(got.body.ask.content, /data-pk-submit/);
 
     const waiting = api.call('GET', `${askUrl()}/${body.id}/wait?ms=5000`);
     const answered = await api.call('POST', `${askUrl()}/${body.id}`, { status: 'answered', data: { theme: 'light' } });

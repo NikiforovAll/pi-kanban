@@ -21,7 +21,7 @@ after(() => {
 });
 
 function tempDir() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-retention-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-retention-'));
   roots.push(root);
   return root;
 }

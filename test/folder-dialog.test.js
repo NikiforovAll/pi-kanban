@@ -27,7 +27,7 @@ describe('startFolder', () => {
 
   it('drops relative, missing, file and non-string values', () => {
     assert.equal(startFolder('relative/dir'), null);
-    assert.equal(startFolder(path.join(os.tmpdir(), 'cck-no-such-dir-xyz')), null);
+    assert.equal(startFolder(path.join(os.tmpdir(), 'pk-no-such-dir-xyz')), null);
     assert.equal(startFolder(__filename), null);
     assert.equal(startFolder(42), null);
   });
@@ -44,7 +44,7 @@ describe('candidates', () => {
     assert.equal(kdialog[1], start);
   });
 
-  it('leaves the Windows script free of the path (it arrives in CCK_PICK_START)', () => {
+  it('leaves the Windows script free of the path (it arrives in PK_PICK_START)', () => {
     const [[, args]] = candidates('win32', 'C:\\x');
     assert.ok(args.every((a) => !a.includes('C:\\x')));
   });

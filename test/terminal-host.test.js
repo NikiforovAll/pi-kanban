@@ -34,7 +34,7 @@ async function until(check, what, timeoutMs = 15000) {
 // first on PATH. On Windows, like claude, it outlives a closed console and Ctrl+C, so only a tree
 // kill ends it. On POSIX claude exits on the SIGHUP that pty.kill() sends, so the stub does too.
 function stubClaude() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-fake-claude-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-fake-claude-'));
   const js = path.join(dir, 'claude.js');
   fs.writeFileSync(js, [
     "require('node:fs').writeFileSync(require('node:path').join(__dirname, 'ran'), String(process.pid));",
@@ -68,7 +68,7 @@ describe('terminal host process', { skip: !ptyAvailable }, () => {
     terminal = createTerminalClient({
       config: { enabled: true, restore: true, shell: SHELL, maxSessions: 30, scrollback: 100, noFlicker: true },
       net: { EXPOSED: false, upgradeVerdict: () => null },
-      claudeDir: os.tmpdir(),
+      piAgentDir: os.tmpdir(),
       isDefaultDir: false,
       sessionsDir: os.tmpdir(),
       token: TOKEN,
@@ -95,7 +95,7 @@ describe('terminal host process', { skip: !ptyAvailable }, () => {
     fs.rmSync(stubDir, { recursive: true, force: true });
   });
 
-  it('asks cck for the folder and refuses what cck refuses', async () => {
+  it('asks pi-kanban for the folder and refuses what pi-kanban refuses', async () => {
     const started = await terminal.startNew({ cwd: os.tmpdir(), prompt: 'hi' });
     assert.equal(started.status, 404);
     assert.equal(events.asks.length, 1);
@@ -103,7 +103,7 @@ describe('terminal host process', { skip: !ptyAvailable }, () => {
     assert.equal(await terminal.end(SHELL_ID, 'nope'), 'auth');
   });
 
-  it('keeps typing live while cck\'s main thread is blocked', async () => {
+  it('keeps typing live while pi-kanban\'s main thread is blocked', async () => {
     const viewer = fork(path.join(__dirname, 'fixtures', 'terminal-viewer.js'), [String(port), TOKEN, SHELL_ID]);
     const next = (t) => new Promise((resolve) => viewer.on('message', (m) => { if (m.t === t) resolve(m); }));
     await next('ready');
@@ -116,7 +116,7 @@ describe('terminal host process', { skip: !ptyAvailable }, () => {
     const result = next('result');
     viewer.send({ t: 'go', ms: BLOCK_MS });
     const blockedUntil = Date.now() + BLOCK_MS;
-    while (Date.now() < blockedUntil) { /* cck busy */ }
+    while (Date.now() < blockedUntil) { /* pi-kanban busy */ }
     const { latencies } = await result;
     assert.ok(latencies.length >= 3, `keys answered while blocked: ${latencies.length}`);
     assert.ok(Math.max(...latencies) < BLOCK_MS / 2, `slowest echo ${Math.max(...latencies)} ms`);

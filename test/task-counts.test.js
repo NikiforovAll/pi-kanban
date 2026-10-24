@@ -10,7 +10,7 @@ const fresh = () => {
   return require(MODULE);
 };
 
-const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'cck-task-counts-')));
+const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pk-task-counts-')));
 after(() => rmSync(root, { recursive: true, force: true }));
 
 const OLD = new Date('2026-01-01T00:00:00Z');

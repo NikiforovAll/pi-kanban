@@ -6,7 +6,7 @@ const path = require('node:path');
 const { createLinkedDocStore, linkUrl, MAX_LINKED_DOCS } = require('../lib/linked-docs');
 
 function fileStore() {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cck-links-')), 'linked-docs.json');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-links-')), 'linked-docs.json');
   const open = () =>
     createLinkedDocStore({
       load: () => {

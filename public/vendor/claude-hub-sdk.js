@@ -14,7 +14,7 @@ var ClaudeHubKeys = (() => {
   // when AltGr types a character, and that press is text. Takes a real KeyboardEvent or a forwarded
   // {key, code} payload; a payload without code degrades to key. A payload needs no AltGraph: the
   // SDK forwards only a press whose key already names a bound combo.
-  // Self-contained on purpose: cck puts its source text into a sandboxed frame.
+  // Self-contained on purpose: pi-kanban puts its source text into a sandboxed frame.
   function comboOf(e) {
     const lower = typeof e.key === 'string' ? e.key.toLowerCase() : '';
     const m = !e.getModifierState?.('AltGraph') && /^(?:Key|Digit)([A-Z1-9])$/.exec(e.code || '');
@@ -36,7 +36,7 @@ var ClaudeHubKeys = (() => {
   // A host claim (protocol §5.2) names a press by its physical code, or by its character when the layout
   // moves the key: {ctrlKey?, altKey?, shiftKey?, metaKey?, code, key: 'Unidentified'} or {…, key, code: ''}.
   // A press matches a claim when one of its two signatures is the claim's first. AltGr types a
-  // character, so its press matches by character only. cck's frames use the same format.
+  // character, so its press matches by character only. pi-kanban's frames use the same format.
   function keySigs(e) {
     const mods = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'meta']
       .filter(Boolean)

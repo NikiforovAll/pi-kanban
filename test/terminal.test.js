@@ -21,10 +21,10 @@ const SHELL = process.platform === 'win32' ? 'cmd.exe' : 'sh';
 
 function startServer(extraArgs) {
   // os.tmpdir() can be an 8.3 short path, and libuv's Windows watcher asserts on an event
-  // under one (fs-event.c), which kills the server the first time it writes to .cck.
-  const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'cck-term-')));
+  // under one (fs-event.c), which kills the server the first time it writes to .pi-kanban.
+  const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pk-term-')));
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js'), ...extraArgs], {
-    env: { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, CCK_TERMINAL_TOKEN: TOKEN, CLAUDE_HUB: '' },
+    env: { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, PK_TERMINAL_TOKEN: TOKEN, CLAUDE_HUB: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const port = new Promise((resolve, reject) => {
@@ -219,7 +219,7 @@ describe('edit before run', () => {
       net: { EXPOSED: false },
       pty,
       token: TOKEN,
-      claudeDir: os.tmpdir(),
+      piAgentDir: os.tmpdir(),
       which: (n) => n,
       isLiveElsewhere: () => false,
       resolveCwd,
@@ -297,7 +297,7 @@ async function startWithPrompt(id, overrides, spec) {
     net: { EXPOSED: false },
     pty,
     token: TOKEN,
-    claudeDir: os.tmpdir(),
+    piAgentDir: os.tmpdir(),
     which: (n) => n,
     isLiveElsewhere: () => false,
     resolveCwd: () => null,
@@ -457,9 +457,9 @@ describe('resolveShell', () => {
 });
 
 describe('ptyEnv', () => {
-  it('pins the session to this board with CCK_URL', () => {
-    const env = ptyEnv({ claudeDir: '/c', isDefaultDir: false, cckUrl: 'http://127.0.0.1:4795' });
-    assert.equal(env.CCK_URL, 'http://127.0.0.1:4795');
+  it('pins the session to this board with PK_URL', () => {
+    const env = ptyEnv({ piAgentDir: '/c', isDefaultDir: false, pkUrl: 'http://127.0.0.1:4795' });
+    assert.equal(env.PK_URL, 'http://127.0.0.1:4795');
     assert.equal(env.CLAUDE_CONFIG_DIR, '/c');
     assert.equal(env.PORT, undefined);
   });
@@ -469,9 +469,9 @@ describe('ptyEnv', () => {
     process.env.TERM_PROGRAM = 'vscode';
     try {
       delete process.env.CLAUDE_HUB;
-      assert.equal(ptyEnv({ claudeDir: '/c', isDefaultDir: true }).TERM_PROGRAM, 'claude-code-kanban');
+      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).TERM_PROGRAM, 'pi-kanban');
       process.env.CLAUDE_HUB = '1';
-      assert.equal(ptyEnv({ claudeDir: '/c', isDefaultDir: true }).TERM_PROGRAM, 'claude-code-hub');
+      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).TERM_PROGRAM, 'claude-code-hub');
     } finally {
       for (const [k, v] of [['CLAUDE_HUB', saved.hub], ['TERM_PROGRAM', saved.tp]]) {
         if (v === undefined) delete process.env[k];
@@ -480,27 +480,27 @@ describe('ptyEnv', () => {
     }
   });
 
-  it('names the terminal with CCK_TERMINAL_ID and drops an inherited one', () => {
+  it('names the terminal with PK_TERMINAL_ID and drops an inherited one', () => {
     const TID = 'dddddddd-0000-0000-0000-000000000001';
-    assert.equal(ptyEnv({ claudeDir: '/c', isDefaultDir: true, cckUrl: 'http://127.0.0.1:1', terminalId: TID }).CCK_TERMINAL_ID, TID);
-    const saved = process.env.CCK_TERMINAL_ID;
-    process.env.CCK_TERMINAL_ID = TID;
+    assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true, pkUrl: 'http://127.0.0.1:1', terminalId: TID }).PK_TERMINAL_ID, TID);
+    const saved = process.env.PK_TERMINAL_ID;
+    process.env.PK_TERMINAL_ID = TID;
     try {
-      assert.equal(ptyEnv({ claudeDir: '/c', isDefaultDir: true }).CCK_TERMINAL_ID, undefined);
+      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).PK_TERMINAL_ID, undefined);
     } finally {
-      if (saved === undefined) delete process.env.CCK_TERMINAL_ID;
-      else process.env.CCK_TERMINAL_ID = saved;
+      if (saved === undefined) delete process.env.PK_TERMINAL_ID;
+      else process.env.PK_TERMINAL_ID = saved;
     }
   });
 
-  it('drops an inherited CCK_URL when the port is not known yet', () => {
-    const saved = process.env.CCK_URL;
-    process.env.CCK_URL = 'http://127.0.0.1:1';
+  it('drops an inherited PK_URL when the port is not known yet', () => {
+    const saved = process.env.PK_URL;
+    process.env.PK_URL = 'http://127.0.0.1:1';
     try {
-      assert.equal(ptyEnv({ claudeDir: '/c', isDefaultDir: true }).CCK_URL, undefined);
+      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).PK_URL, undefined);
     } finally {
-      if (saved === undefined) delete process.env.CCK_URL;
-      else process.env.CCK_URL = saved;
+      if (saved === undefined) delete process.env.PK_URL;
+      else process.env.PK_URL = saved;
     }
   });
 
@@ -508,7 +508,7 @@ describe('ptyEnv', () => {
     const saved = process.env.CLAUDE_CODE_TASK_LIST_ID;
     process.env.CLAUDE_CODE_TASK_LIST_ID = 'inherited';
     try {
-      assert.equal(ptyEnv({ claudeDir: '/c', isDefaultDir: true }).CLAUDE_CODE_TASK_LIST_ID, undefined);
+      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).CLAUDE_CODE_TASK_LIST_ID, undefined);
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_CODE_TASK_LIST_ID;
       else process.env.CLAUDE_CODE_TASK_LIST_ID = saved;
@@ -519,7 +519,7 @@ describe('ptyEnv', () => {
     const saved = process.env.CLAUDE_EFFORT;
     process.env.CLAUDE_EFFORT = 'max';
     try {
-      assert.equal(ptyEnv({ claudeDir: '/c', isDefaultDir: true }).CLAUDE_EFFORT, undefined);
+      assert.equal(ptyEnv({ piAgentDir: '/c', isDefaultDir: true }).CLAUDE_EFFORT, undefined);
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_EFFORT;
       else process.env.CLAUDE_EFFORT = saved;
@@ -532,23 +532,23 @@ describe('readTerminalConfig', () => {
     assert.equal(readTerminalConfig({ argv: [], env: {} }).enabled, false);
     assert.equal(readTerminalConfig({ argv: [], env: {} }).maxSessions, 30);
     assert.equal(readTerminalConfig({ argv: ['--enable-terminal'], env: {} }).enabled, true);
-    const c = readTerminalConfig({ argv: [], env: { CCK_TERMINAL: '{"enabled":true,"maxSessions":2,"noFlicker":false}' } });
+    const c = readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"enabled":true,"maxSessions":2,"noFlicker":false}' } });
     assert.equal(c.enabled, true);
     assert.equal(c.maxSessions, 2);
     assert.equal(c.noFlicker, false);
   });
   it('restores terminals unless the block turns it off', () => {
     assert.equal(readTerminalConfig({ argv: [], env: {} }).restore, true);
-    assert.equal(readTerminalConfig({ argv: [], env: { CCK_TERMINAL: '{"restore":false}' } }).restore, false);
+    assert.equal(readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"restore":false}' } }).restore, false);
   });
   it('takes the shell from the flag, then the env var, then the hub block', () => {
-    const env = { CCK_TERMINAL: '{"shell":"pwsh"}', CCK_TERMINAL_SHELL: 'gitbash' };
+    const env = { PK_TERMINAL: '{"shell":"pwsh"}', PK_TERMINAL_SHELL: 'gitbash' };
     assert.equal(readTerminalConfig({ argv: [], env }).shell, 'gitbash');
     assert.equal(readTerminalConfig({ argv: [], env, getArgValue: () => 'cmd' }).shell, 'cmd');
-    assert.equal(readTerminalConfig({ argv: [], env: { CCK_TERMINAL: '{"shell":"pwsh"}' } }).shell, 'pwsh');
+    assert.equal(readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"shell":"pwsh"}' } }).shell, 'pwsh');
   });
   it('ignores a malformed block', () => {
-    assert.equal(readTerminalConfig({ argv: [], env: { CCK_TERMINAL: '{' } }).enabled, false);
+    assert.equal(readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{' } }).enabled, false);
   });
 });
 
@@ -587,7 +587,7 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
     const got = await session(port, { id: SESSION, mode: 'resume' }, (g) => g.closeCode !== null);
     assert.equal(got.closeCode, 4004);
   });
-  const missingDir = path.join(os.tmpdir(), 'cck-no-such-folder');
+  const missingDir = path.join(os.tmpdir(), 'pk-no-such-folder');
   it('refuses a new session in a folder that does not exist', async () => {
     const got = await session(port, { id: SESSION, mode: 'new', cwd: missingDir }, (g) => g.closeCode !== null);
     assert.equal(got.closeCode, 4004);
@@ -608,14 +608,14 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
   it('round-trips input, survives a reconnect, and ends on kill', async () => {
     const first = await session(port, { id: SESSION, mode: 'shell' }, (g) => g.control.some((m) => m.t === 'ready'));
     assert.equal(first.control[0].attached, false);
-    first.ws.send(JSON.stringify({ t: 'in', d: 'echo cck-round-trip\r' }));
-    await waitFor(first.ws, (d, bin) => bin && (first.out += d.toString()).includes('cck-round-trip'), 'echo');
+    first.ws.send(JSON.stringify({ t: 'in', d: 'echo pk-round-trip\r' }));
+    await waitFor(first.ws, (d, bin) => bin && (first.out += d.toString()).includes('pk-round-trip'), 'echo');
     first.ws.close();
 
     const list = (await api(port, 'GET', '/api/terminals')).json;
     assert.equal(list.sessions.length, 1);
 
-    const second = await session(port, { id: SESSION, mode: 'auto' }, (g) => g.out.includes('cck-round-trip'));
+    const second = await session(port, { id: SESSION, mode: 'auto' }, (g) => g.out.includes('pk-round-trip'));
     assert.equal(second.control[0].t, 'ready');
     assert.equal(second.control[0].attached, true);
 
@@ -626,12 +626,12 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
     assert.equal(after.sessions.length, 0);
   });
 
-  it('hands the shell this board as CCK_URL', async () => {
+  it('hands the shell this board as PK_URL', async () => {
     const got = await session(port, { id: SESSION, mode: 'shell' }, (g) => g.control.some((m) => m.t === 'ready'));
-    const ref = process.platform === 'win32' ? '%CCK_URL%' : '$CCK_URL';
-    const want = `cck-url=http://127.0.0.1:${port}`;
-    got.ws.send(JSON.stringify({ t: 'in', d: `echo cck-url=${ref}\r` }));
-    await waitFor(got.ws, (d, bin) => bin && (got.out += d.toString()).includes(want), 'CCK_URL');
+    const ref = process.platform === 'win32' ? '%PK_URL%' : '$PK_URL';
+    const want = `pk-url=http://127.0.0.1:${port}`;
+    got.ws.send(JSON.stringify({ t: 'in', d: `echo pk-url=${ref}\r` }));
+    await waitFor(got.ws, (d, bin) => bin && (got.out += d.toString()).includes(want), 'PK_URL');
     const del = await api(port, 'DELETE', `/api/terminals/${SESSION}`, { origin: `http://localhost:${port}`, 'x-terminal-token': TOKEN });
     assert.equal(del.status, 204);
   });
@@ -731,7 +731,7 @@ describe('terminal restore', () => {
       save: (data) => { store.saves++; store.data = data; },
       restoreGapMs: GAP_MS,
       saveDelayMs: SAVE_MS,
-      claudeDir: os.tmpdir(),
+      piAgentDir: os.tmpdir(),
       which: (n) => n,
       isLiveElsewhere: (id) => id === ELSEWHERE,
       resolveCwd: (id) => ([A, B, ELSEWHERE].includes(id) ? os.tmpdir() : null),
@@ -835,14 +835,14 @@ describe('terminal restore', () => {
     t.restore();
     await until(() => t.list().length === 1);
     assert.equal(t.list()[0].terminalId, TID);
-    assert.equal(pty.spawned[0].env.CCK_TERMINAL_ID, TID);
+    assert.equal(pty.spawned[0].env.PK_TERMINAL_ID, TID);
 
     const r = await t.startNew({ id: UNKNOWN, cwd: os.tmpdir() });
     assert.equal(r.id, UNKNOWN);
     const fresh = t.list().find((s) => s.id === UNKNOWN).terminalId;
     assert.match(fresh, /^[0-9a-f-]{36}$/);
     assert.notEqual(fresh, TID);
-    assert.equal(pty.spawned[1].env.CCK_TERMINAL_ID, fresh);
+    assert.equal(pty.spawned[1].env.PK_TERMINAL_ID, fresh);
     await until(() => store.data.sessions.length === 2);
     assert.deepEqual(store.data.terminalIds, { [A]: TID, [UNKNOWN]: fresh });
     t.shutdown();
@@ -918,7 +918,7 @@ describe('terminal reopen', { skip: !WebSocket }, () => {
       net: { EXPOSED: false, upgradeVerdict: () => null },
       pty,
       token: TOKEN,
-      claudeDir: os.tmpdir(),
+      piAgentDir: os.tmpdir(),
       which: (n) => n,
       isLiveElsewhere: () => false,
       resolveCwd: () => null,

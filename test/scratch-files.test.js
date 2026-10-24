@@ -7,7 +7,7 @@ const { resolveScratchSubdir, listScratchDir } = require('../lib/scratch-files')
 
 let root;
 before(() => {
-  root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'cck-scratch-')));
+  root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pk-scratch-')));
   mkdirSync(path.join(root, 'clone', 'inner'), { recursive: true });
   writeFileSync(path.join(root, 'clone', 'inner', 'deep.txt'), 'y');
   writeFileSync(path.join(root, 'notes.md'), 'x');

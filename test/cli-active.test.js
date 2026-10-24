@@ -58,9 +58,9 @@ async function withBoard(fn, { groups = GROUPS, sessions = SESSIONS } = {}) {
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   try {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-cli-active-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-cli-active-'));
     const run = (args) => new Promise((resolve) => {
-      const env = { ...process.env, PI_CODING_AGENT_DIR: dir, CCK_URL: `http://127.0.0.1:${srv.address().port}` };
+      const env = { ...process.env, PI_CODING_AGENT_DIR: dir, PK_URL: `http://127.0.0.1:${srv.address().port}` };
       delete env.PORT;
       execFile(process.execPath, [SERVER, ...args], { env }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
     });

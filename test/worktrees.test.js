@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { createWorktreeStore } = require('../lib/worktrees');
 const { GRACE_MS } = require('../lib/retention');
-const { encodeProjectDirName } = require('../lib/claude-dir');
+const { encodeProjectDirName } = require('../lib/board-dir');
 
 const REPO = path.resolve('/dev/repo');
 const SIDE = path.resolve('/dev/repo-feature');

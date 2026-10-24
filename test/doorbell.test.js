@@ -30,15 +30,15 @@ describe('session event doorbell', () => {
 
   it('evicts a bucket once its queue is drained', async () => {
     const { sessionEventBuckets, enqueueSessionEvent, poll } = loadDoorbell();
-    enqueueSessionEvent('s1', 'cck:1 task.moved T-1 pending>in_progress');
+    enqueueSessionEvent('s1', 'pk:1 task.moved T-1 pending>in_progress');
     assert.equal(sessionEventBuckets.size, 1);
-    assert.deepEqual((await poll('s1')).events, ['cck:1 task.moved T-1 pending>in_progress']);
+    assert.deepEqual((await poll('s1')).events, ['pk:1 task.moved T-1 pending>in_progress']);
     assert.equal(sessionEventBuckets.size, 0);
   });
 
   it('never replays a delivered event', async () => {
     const { enqueueSessionEvent, poll } = loadDoorbell();
-    enqueueSessionEvent('s1', 'cck:1 task.moved T-1 a>b');
+    enqueueSessionEvent('s1', 'pk:1 task.moved T-1 a>b');
     await poll('s1');
     assert.deepEqual((await poll('s1')).events, []);
   });
@@ -47,14 +47,14 @@ describe('session event doorbell', () => {
     const { sessionEventBuckets, enqueueSessionEvent, poll } = loadDoorbell();
     const pending = poll('s2', 60);
     assert.equal(sessionEventBuckets.size, 1);
-    enqueueSessionEvent('s2', 'cck:1 task.moved T-9 a>b');
-    assert.deepEqual((await pending).events, ['cck:1 task.moved T-9 a>b']);
+    enqueueSessionEvent('s2', 'pk:1 task.moved T-9 a>b');
+    assert.deepEqual((await pending).events, ['pk:1 task.moved T-9 a>b']);
     assert.equal(sessionEventBuckets.size, 0);
   });
 
   it('caps an undrained queue and keeps the newest events', () => {
     const { sessionEventBuckets, enqueueSessionEvent } = loadDoorbell();
-    for (let i = 0; i < 500; i++) enqueueSessionEvent('s3', `cck:1 task.moved T-${i} a>b`);
+    for (let i = 0; i < 500; i++) enqueueSessionEvent('s3', `pk:1 task.moved T-${i} a>b`);
     const { queue } = sessionEventBuckets.get('s3');
     assert.equal(queue.length, 50);
     assert.match(queue[49].text, /T-499/);
@@ -62,38 +62,38 @@ describe('session event doorbell', () => {
 
   it('bounds a line built from a caller-supplied task id', async () => {
     const { enqueueSessionEvent, poll } = loadDoorbell();
-    enqueueSessionEvent('s4', `cck:1 task.moved ${'A'.repeat(9000)} a>b`);
+    enqueueSessionEvent('s4', `pk:1 task.moved ${'A'.repeat(9000)} a>b`);
     assert.equal((await poll('s4')).events[0].length, 1500);
   });
 
   it('strips control characters so one event cannot forge a second line', async () => {
     const { enqueueSessionEvent, poll } = loadDoorbell();
-    enqueueSessionEvent('s5', 'cck:1 task.moved T-1\nINJECTED a>b');
+    enqueueSessionEvent('s5', 'pk:1 task.moved T-1\nINJECTED a>b');
     const [line] = (await poll('s5')).events;
     assert.doesNotMatch(line, /[\r\n]/);
   });
 
   it('discards the whole backlog on a first attach', async () => {
     const { sessionEventBuckets, enqueueSessionEvent, poll } = loadDoorbell();
-    for (let i = 0; i < 5; i++) enqueueSessionEvent('s6', `cck:1 task.moved T-${i} a>b`);
+    for (let i = 0; i < 5; i++) enqueueSessionEvent('s6', `pk:1 task.moved T-${i} a>b`);
     assert.deepEqual((await poll('s6', 0, { first: '1' })).events, []);
     assert.equal(sessionEventBuckets.size, 0);
   });
 
   it('delivers normally on every attach after the first', async () => {
     const { enqueueSessionEvent, poll } = loadDoorbell();
-    enqueueSessionEvent('s7', 'cck:1 task.moved T-1 a>b');
+    enqueueSessionEvent('s7', 'pk:1 task.moved T-1 a>b');
     await poll('s7', 0, { first: '1' });
-    enqueueSessionEvent('s7', 'cck:1 task.moved T-2 a>b');
-    assert.deepEqual((await poll('s7')).events, ['cck:1 task.moved T-2 a>b']);
+    enqueueSessionEvent('s7', 'pk:1 task.moved T-2 a>b');
+    assert.deepEqual((await poll('s7')).events, ['pk:1 task.moved T-2 a>b']);
   });
 
   it('keeps waiting after discarding, so a move during the same poll still lands', async () => {
     const { enqueueSessionEvent, poll } = loadDoorbell();
-    enqueueSessionEvent('s8', 'cck:1 task.moved OLD a>b');
+    enqueueSessionEvent('s8', 'pk:1 task.moved OLD a>b');
     const pending = poll('s8', 60, { first: '1' });
-    enqueueSessionEvent('s8', 'cck:1 task.moved NEW a>b');
-    assert.deepEqual((await pending).events, ['cck:1 task.moved NEW a>b']);
+    enqueueSessionEvent('s8', 'pk:1 task.moved NEW a>b');
+    assert.deepEqual((await pending).events, ['pk:1 task.moved NEW a>b']);
   });
 });
 
@@ -265,23 +265,23 @@ describe('task.moved line format', () => {
 
   it('keeps dispatch reports and task moves in separate topics', async () => {
     const { enqueueSessionEvent, topicKey, poll } = loadDoorbell();
-    enqueueSessionEvent('s1', 'cck:1 task.moved T-1 pending>in_progress');
-    enqueueSessionEvent(topicKey('dispatch', 's1'), 'cck:1 dispatch.succeeded d_1 session=c');
-    assert.deepEqual((await poll('s1', 0, { topic: 'dispatch' })).events, ['cck:1 dispatch.succeeded d_1 session=c']);
-    assert.deepEqual((await poll('s1')).events, ['cck:1 task.moved T-1 pending>in_progress']);
+    enqueueSessionEvent('s1', 'pk:1 task.moved T-1 pending>in_progress');
+    enqueueSessionEvent(topicKey('dispatch', 's1'), 'pk:1 dispatch.succeeded d_1 session=c');
+    assert.deepEqual((await poll('s1', 0, { topic: 'dispatch' })).events, ['pk:1 dispatch.succeeded d_1 session=c']);
+    assert.deepEqual((await poll('s1')).events, ['pk:1 task.moved T-1 pending>in_progress']);
   });
 
   it('drops a topic backlog on the first attach, and keeps it without first', async () => {
     const { enqueueSessionEvent, topicKey, poll } = loadDoorbell();
-    enqueueSessionEvent(topicKey('dispatch', 's1'), 'cck:1 dispatch.failed d_1 session=c');
+    enqueueSessionEvent(topicKey('dispatch', 's1'), 'pk:1 dispatch.failed d_1 session=c');
     assert.equal((await poll('s1', 0, { topic: 'dispatch' })).events.length, 1);
-    enqueueSessionEvent(topicKey('dispatch', 's1'), 'cck:1 dispatch.failed d_2 session=c');
+    enqueueSessionEvent(topicKey('dispatch', 's1'), 'pk:1 dispatch.failed d_2 session=c');
     assert.equal((await poll('s1', 0, { topic: 'dispatch', first: '1' })).events.length, 0);
   });
 
   it('refuses a malformed topic rather than reading the task-move bucket', async () => {
     const { enqueueSessionEvent, poll } = loadDoorbell();
-    enqueueSessionEvent('s1', 'cck:1 task.moved T-1 pending>in_progress');
+    enqueueSessionEvent('s1', 'pk:1 task.moved T-1 pending>in_progress');
     assert.equal((await poll('s1', 0, { topic: '../x' })).statusCode, 400);
     assert.equal((await poll('s1')).events.length, 1);
   });
@@ -297,10 +297,10 @@ describe('task.moved line format', () => {
 
   it('keeps a review file path with spaces whole at the end of the line', () => {
     const { formatReviewSubmitted, sanitizeEventLine } = loadDoorbell();
-    const line = sanitizeEventLine(formatReviewSubmitted(3, 'plan.md', 'C:\\Users\\A B\\.claude\\.cck\\reviews\\s\\1.md'));
+    const line = sanitizeEventLine(formatReviewSubmitted(3, 'plan.md', 'C:\\Users\\A B\\.claude\\.pi-kanban\\reviews\\s\\1.md'));
     assert.equal(
       line,
-      '[kanban board] Address 3 review comments on plan.md: C:\\Users\\A B\\.claude\\.cck\\reviews\\s\\1.md',
+      '[kanban board] Address 3 review comments on plan.md: C:\\Users\\A B\\.claude\\.pi-kanban\\reviews\\s\\1.md',
     );
     assert.match(formatReviewSubmitted(1, 'plan.md', 'x'), /Address 1 review comment on/);
   });

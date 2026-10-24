@@ -26,7 +26,7 @@ describe('priority', () => {
   it('does nothing when turned off', () => {
     const pid = idle();
     const before = os.getPriority(pid);
-    assert.equal(raise(pid, 'win32', { CCK_PRIORITY_BOOST: '0' }), null);
+    assert.equal(raise(pid, 'win32', { PK_PRIORITY_BOOST: '0' }), null);
     assert.equal(os.getPriority(pid), before);
   });
 

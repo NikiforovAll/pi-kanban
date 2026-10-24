@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { getClaudeDir, boardDir, displayPath } = require('./lib/claude-dir');
+const { resolvePiAgentDir, boardDir, displayPath } = require('./lib/board-dir');
 const { linkUrl } = require('./public/link-url');
 const { sessionProjectKey } = require('./public/project-match');
 // Help is auto-generated from this table — keep flags/usage in sync with `run` behavior.
@@ -13,31 +13,31 @@ const COMMANDS = {
     verbs: {
       link: {
         summary: 'Link a file or URL to a session, with no modal',
-        usage: 'claude-code-kanban doc link <file|url> [--session <id>]',
+        usage: 'pi-kanban doc link <file|url> [--session <id>]',
         flags: {
           '<file|url>': 'Any file type; one the preview cannot render opens in the editor. An http(s) URL opens in a new tab.',
           [SESSION_FLAG]: SESSION_FLAG_HELP,
         },
         notes: 'The server keeps the link, so it shows when a browser tab opens later. Prefer this over `doc preview` while the user works.',
         examples: [
-          'claude-code-kanban doc link ./design.md',
-          'claude-code-kanban doc link https://github.com/org/repo/pull/12',
+          'pi-kanban doc link ./design.md',
+          'pi-kanban doc link https://github.com/org/repo/pull/12',
         ],
         run: runDocLinkCli,
       },
       unlink: {
         summary: 'Remove a linked file or URL from a session',
-        usage: 'claude-code-kanban doc unlink <file|url> [--session <id>]',
+        usage: 'pi-kanban doc unlink <file|url> [--session <id>]',
         flags: {
           '<file|url>': 'The linked path or URL; the file need not exist',
           [SESSION_FLAG]: SESSION_FLAG_HELP,
         },
-        examples: ['claude-code-kanban doc unlink ./design.md'],
+        examples: ['pi-kanban doc unlink ./design.md'],
         run: runDocLinkCli,
       },
       list: {
         summary: 'Print the docs linked to a session',
-        usage: 'claude-code-kanban doc list [--session <id>] [--json]',
+        usage: 'pi-kanban doc list [--session <id>] [--json]',
         flags: {
           [SESSION_FLAG]: SESSION_FLAG_HELP,
           '--json': 'Output JSON',
@@ -46,13 +46,13 @@ const COMMANDS = {
       },
       preview: {
         summary: 'Open a markdown or HTML file in the preview modal on connected browser tabs',
-        usage: 'claude-code-kanban doc preview <file.md|file.html|url> [--session <id>]',
+        usage: 'pi-kanban doc preview <file.md|file.html|url> [--session <id>]',
         flags: {
           [SESSION_FLAG]: 'Switch focused session in the browser (does not link the file; default: $PREVIEW_SESSION). For a URL, the session it links to (default: $PREVIEW_SESSION, else $CLAUDE_CODE_SESSION_ID).',
         },
         notes: 'The modal opens on the user\'s screen: the only command that does. HTML renders in a sandboxed iframe; local stylesheets, scripts and images are inlined. Relative paths resolve against the current dir. An http(s) URL is linked to the session instead, and the tab on screen shows an Open button.',
         examples: [
-          'claude-code-kanban doc preview ./notes.md --session $CLAUDE_SESSION_ID',
+          'pi-kanban doc preview ./notes.md --session $CLAUDE_SESSION_ID',
         ],
         run: runPreviewCli,
       },
@@ -63,7 +63,7 @@ const COMMANDS = {
     verbs: {
       add: {
         summary: 'Add a pane to a session; it opens as a tab next to Board, in the background',
-        usage: 'claude-code-kanban pane add <url|file> [--title <text>] [--session <id>] [--json]',
+        usage: 'pi-kanban pane add <url|file> [--title <text>] [--session <id>] [--json]',
         flags: {
           '<url|file>': 'An http(s) URL, or a local HTML, markdown, text or image file (relative paths resolve against the current dir)',
           '--title <text>': 'Tab title (default: the host or file name)',
@@ -72,24 +72,24 @@ const COMMANDS = {
         },
         notes: 'The board does not switch to the new pane; the user opens it. Prints the pane id. The same target added again prints the pane it already has. A URL on the board\'s or the hub\'s own origin is refused, and a file must be one the board can preview. A site whose headers refuse framing (X-Frame-Options, CSP frame-ancestors) is still added, but its pane shows an "Open in new tab" card, and a note line says so.',
         examples: [
-          'claude-code-kanban pane add http://localhost:5173',
-          'claude-code-kanban pane add ./report.html --title Report',
+          'pi-kanban pane add http://localhost:5173',
+          'pi-kanban pane add ./report.html --title Report',
         ],
         run: runPaneAddCli,
       },
       rm: {
         summary: 'Remove a pane from a session',
-        usage: 'claude-code-kanban pane rm <pane-id> [--session <id>]',
+        usage: 'pi-kanban pane rm <pane-id> [--session <id>]',
         flags: {
           '<pane-id>': 'The id `pane add` or `pane list` printed',
           [SESSION_FLAG]: SESSION_FLAG_HELP,
         },
-        examples: ['claude-code-kanban pane rm p3'],
+        examples: ['pi-kanban pane rm p3'],
         run: runPaneRmCli,
       },
       list: {
         summary: 'List the panes of a session, in tab order',
-        usage: 'claude-code-kanban pane list [--session <id>] [--json]',
+        usage: 'pi-kanban pane list [--session <id>] [--json]',
         flags: {
           [SESSION_FLAG]: SESSION_FLAG_HELP,
           '--json': 'Output JSON ({rev, panes: [{id, kind, target, title, addedAt}], updatedAt})',
@@ -103,7 +103,7 @@ const COMMANDS = {
     verbs: {
       list: {
         summary: 'List the active sessions, as the sidebar\'s Active view shows them (pinned/sticky always included)',
-        usage: 'claude-code-kanban session list [--all] [--days <n>] [--project <name>] [--limit <n|all>] [--no-pins] [--json]',
+        usage: 'pi-kanban session list [--all] [--days <n>] [--project <name>] [--limit <n|all>] [--no-pins] [--json]',
         flags: {
           '--all': 'Every session, active or not',
           '--days <n>': 'Only sessions modified within the last N days (fractional ok, e.g. 0.5)',
@@ -114,93 +114,93 @@ const COMMANDS = {
         },
         notes: 'Active: running in the terminal, or with messages and open tasks, live agents, a wait on the user or recent activity. STATUS is idle, active, busy (a task in progress) or wait. When --limit cuts the list, a last line says how many rows it shows of how many (on stderr with --json).',
         examples: [
-          'claude-code-kanban session list',
-          'claude-code-kanban session list --all --days 0.5 --limit 20 --project my-repo',
+          'pi-kanban session list',
+          'pi-kanban session list --all --days 0.5 --limit 20 --project my-repo',
         ],
         run: runSessionListCli,
       },
       search: {
         summary: 'Find sessions whose name or id contains the text, from any transcript',
-        usage: 'claude-code-kanban session search <text> [--limit <n>] [--json]',
+        usage: 'pi-kanban session search <text> [--limit <n>] [--json]',
         flags: {
           '<text>': 'At least 3 characters; matched against the session name and id',
           '--limit <n>': 'Max rows (default and max: 20)',
           '--json': 'Output JSON instead of a table',
         },
         examples: [
-          'claude-code-kanban session search login-redirect',
+          'pi-kanban session search login-redirect',
         ],
         run: runSessionSearchCli,
       },
       open: {
         summary: 'Focus a session in the browser (Active tab)',
-        usage: 'claude-code-kanban session open <id>',
+        usage: 'pi-kanban session open <id>',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
         },
-        examples: ['claude-code-kanban session open $CLAUDE_SESSION_ID'],
+        examples: ['pi-kanban session open $CLAUDE_SESSION_ID'],
         run: runSessionOpenCli,
       },
       cost: {
         summary: 'Show a session (or one subagent) in the Cost app',
-        usage: 'claude-code-kanban session cost <id> [--agent <agent id>]',
+        usage: 'pi-kanban session cost <id> [--agent <agent id>]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
           '--agent <agent id>': 'A subagent of the session (agent-…), as claude-code-cost session prints it',
         },
         notes: 'Under the hub the board switches to the Cost tab. The command also prints the cost link, for a board that runs alone.',
-        examples: ['claude-code-kanban session cost 3fa9c1 --agent agent-a10ff42'],
+        examples: ['pi-kanban session cost 3fa9c1 --agent agent-a10ff42'],
         run: runSessionCostCli,
       },
       view: {
         summary: 'Show full session stats (metadata + context window + cost) and the transcript path',
-        usage: 'claude-code-kanban session view <id> [--json]',
+        usage: 'pi-kanban session view <id> [--json]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
           '--json': 'Output JSON instead of formatted sections',
         },
         notes: 'To learn what a session did, read its transcript (a .jsonl file, newest lines last).',
-        examples: ['claude-code-kanban session view $CLAUDE_SESSION_ID'],
+        examples: ['pi-kanban session view $CLAUDE_SESSION_ID'],
         run: runSessionViewCli,
       },
       plan: {
         summary: 'Print the plan saved for a session (plan mode)',
-        usage: 'claude-code-kanban session plan <id> [--json]',
+        usage: 'pi-kanban session plan <id> [--json]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
           '--json': 'Output JSON ({content, slug}); content is null when there is no plan',
         },
-        examples: ['claude-code-kanban session plan 3fa9c1'],
+        examples: ['pi-kanban session plan 3fa9c1'],
         run: runSessionPlanCli,
       },
       agents: {
         summary: 'List the subagents a session has run, and whether it waits for the user',
-        usage: 'claude-code-kanban session agents <id> [--json]',
+        usage: 'pi-kanban session agents <id> [--json]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
           '--json': 'Output JSON ({agents, waitingForUser})',
         },
-        notes: 'Needs the cck hooks in this config dir (claude-code-kanban --install); without them the list is empty.',
-        examples: ['claude-code-kanban session agents $CLAUDE_SESSION_ID'],
+        notes: 'Needs the pi-kanban hooks in this config dir (pi-kanban --install); without them the list is empty.',
+        examples: ['pi-kanban session agents $CLAUDE_SESSION_ID'],
         run: runSessionAgentsCli,
       },
       pin: {
         summary: 'Pin (or unpin) a session in the sidebar; every board on this config dir shows it',
-        usage: 'claude-code-kanban session pin <id> [--sticky] [--unpin]',
+        usage: 'pi-kanban session pin <id> [--sticky] [--unpin]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
           '--sticky': 'Set sticky state (always shown in the list)',
           '--unpin': 'Clear pin/sticky state',
         },
         examples: [
-          'claude-code-kanban session pin $CLAUDE_SESSION_ID --sticky',
-          'claude-code-kanban session pin $CLAUDE_SESSION_ID --unpin',
+          'pi-kanban session pin $CLAUDE_SESSION_ID --sticky',
+          'pi-kanban session pin $CLAUDE_SESSION_ID --unpin',
         ],
         run: runSessionPinCli,
       },
       group: {
         summary: 'Move a session into a group in the sidebar',
-        usage: 'claude-code-kanban session group <id> (<group> | --with <session> | --parent <session>) [--no-parent] [--create] [--json]',
+        usage: 'pi-kanban session group <id> (<group> | --with <session> | --parent <session>) [--no-parent] [--create] [--json]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
           '<group>': 'Group name (any case), path from the top (parent/child) or id, from `group list`',
@@ -212,22 +212,22 @@ const COMMANDS = {
         },
         notes: 'The session leaves the group it was in. In a group that holds its project, it shows in that project\'s block.',
         examples: [
-          'claude-code-kanban session group $CLAUDE_SESSION_ID "Auth refactor"',
-          'claude-code-kanban session group 3fa9c1 auth-refactor/swarm-1 --create',
-          'claude-code-kanban session group 3fa9c1 --with $CLAUDE_SESSION_ID --create',
-          'claude-code-kanban session group 3fa9c1 --parent $CLAUDE_SESSION_ID',
+          'pi-kanban session group $CLAUDE_SESSION_ID "Auth refactor"',
+          'pi-kanban session group 3fa9c1 auth-refactor/swarm-1 --create',
+          'pi-kanban session group 3fa9c1 --with $CLAUDE_SESSION_ID --create',
+          'pi-kanban session group 3fa9c1 --parent $CLAUDE_SESSION_ID',
         ],
         run: runSessionGroupCli,
       },
       ungroup: {
         summary: 'Take a session out of its group',
-        usage: 'claude-code-kanban session ungroup <id> [--json]',
+        usage: 'pi-kanban session ungroup <id> [--json]',
         flags: {
           '<id>': 'Full session id, or a unique prefix',
           '--json': 'Output JSON ({left, rev})',
         },
         notes: 'A session whose project is in a group still shows there; move the project on the board.',
-        examples: ['claude-code-kanban session ungroup $CLAUDE_SESSION_ID'],
+        examples: ['pi-kanban session ungroup $CLAUDE_SESSION_ID'],
         run: runSessionUngroupCli,
       },
     },
@@ -237,58 +237,58 @@ const COMMANDS = {
     verbs: {
       list: {
         summary: 'List the groups in sidebar order, nested groups under their parent, with the members the sidebar\'s Active view shows (active, pinned or sticky)',
-        usage: 'claude-code-kanban group list [--all] [--json]',
+        usage: 'pi-kanban group list [--all] [--json]',
         flags: {
           '--all': 'Every member, active or not',
           '--json': 'Output JSON ({rev, groups: [{id, name, parent, transient?, visible, total, members}]}); a session member has title, branch, status, pinned and age, or missing: true; a project member has sessions (its shown sessions)',
         },
         notes: 'A project member shows when it has a session the Active view shows. visible/total counts the members shown. A group marked (transient) goes when the board\'s Active view shows none of its sessions; Keep or a rename on the board, or `group rename`, keeps it. `dispatch start --group` and `group create --transient` make transient groups. Pass a group\'s name, path (parent/child) or id to `session group`.',
-        examples: ['claude-code-kanban group list', 'claude-code-kanban group list --all --json'],
+        examples: ['pi-kanban group list', 'pi-kanban group list --all --json'],
         run: runGroupListCli,
       },
       create: {
         summary: 'Make a group, and the missing parents of a path',
-        usage: 'claude-code-kanban group create <name|path> [--transient] [--json]',
+        usage: 'pi-kanban group create <name|path> [--transient] [--json]',
         flags: {
           '<name|path>': 'Name of a new top-level group, or a path from the top (parent/child)',
           '--transient': 'The groups it makes go when the Active view shows none of their sessions',
           '--json': 'Output JSON ({group, name, path, rev})',
         },
         notes: 'Fails when the group exists.',
-        examples: ['claude-code-kanban group create "Auth refactor"', 'claude-code-kanban group create auth-refactor/swarm-1'],
+        examples: ['pi-kanban group create "Auth refactor"', 'pi-kanban group create auth-refactor/swarm-1'],
         run: runGroupCreateCli,
       },
       rename: {
         summary: 'Rename a group; it keeps its place, parent and members',
-        usage: 'claude-code-kanban group rename <group> <new name> [--json]',
+        usage: 'pi-kanban group rename <group> <new name> [--json]',
         flags: {
           '<group>': 'Group name (any case), path from the top (parent/child) or id, from `group list`',
           '<new name>': 'The new name',
           '--json': 'Output JSON ({group, name, path, rev})',
         },
-        examples: ['claude-code-kanban group rename auth-refactor "Auth v2"'],
+        examples: ['pi-kanban group rename auth-refactor "Auth v2"'],
         run: runGroupRenameCli,
       },
       rm: {
         summary: 'Remove a group, as Delete on the board does',
-        usage: 'claude-code-kanban group rm <group> [--json]',
+        usage: 'pi-kanban group rm <group> [--json]',
         flags: {
           '<group>': 'Group name (any case), path from the top (parent/child) or id, from `group list`',
           '--json': 'Output JSON ({removed: {id, name, path}, ungrouped, rev})',
         },
         notes: 'Its members leave the group and show as with no group: in their project\'s group or the top level. Its child groups move up one level.',
-        examples: ['claude-code-kanban group rm presales-cloud'],
+        examples: ['pi-kanban group rm presales-cloud'],
         run: runGroupRmCli,
       },
       prune: {
         summary: 'Remove every empty group',
-        usage: 'claude-code-kanban group prune [--dry-run] [--json]',
+        usage: 'pi-kanban group prune [--dry-run] [--json]',
         flags: {
           '--dry-run': 'List the groups it would remove, and remove none',
           '--json': 'Output JSON ({removed: [{id, name, path}], dryRun, rev})',
         },
         notes: 'Empty: no session whose transcript still exists, no project, and no child group that is not empty. It checks every member, not only the ones the Active view shows.',
-        examples: ['claude-code-kanban group prune --dry-run', 'claude-code-kanban group prune'],
+        examples: ['pi-kanban group prune --dry-run', 'pi-kanban group prune'],
         run: runGroupPruneCli,
       },
     },
@@ -298,7 +298,7 @@ const COMMANDS = {
     verbs: {
       list: {
         summary: 'List the tasks of a session, a project, or every session',
-        usage: 'claude-code-kanban task list (<session> | --project <path> | --all) [--status <s>] [--json]',
+        usage: 'pi-kanban task list (<session> | --project <path> | --all) [--status <s>] [--json]',
         flags: {
           '<session>': 'Full session id, or a unique prefix',
           '--project <path>': 'Every task of the sessions in this project (absolute path, as in `project list`)',
@@ -307,8 +307,8 @@ const COMMANDS = {
           '--json': 'Output JSON instead of a table',
         },
         examples: [
-          'claude-code-kanban task list $CLAUDE_SESSION_ID',
-          'claude-code-kanban task list --all --status in_progress',
+          'pi-kanban task list $CLAUDE_SESSION_ID',
+          'pi-kanban task list --all --status in_progress',
         ],
         run: runTaskListCli,
       },
@@ -319,7 +319,7 @@ const COMMANDS = {
     verbs: {
       list: {
         summary: 'List known project paths, newest activity first',
-        usage: 'claude-code-kanban project list [--json]',
+        usage: 'pi-kanban project list [--json]',
         flags: {
           '--json': 'Output JSON instead of a table',
         },
@@ -329,11 +329,11 @@ const COMMANDS = {
     },
   },
   dispatch: {
-    summary: 'Start, list and end Claude Code sessions for tasks in cck\'s terminal',
+    summary: 'Start, list and end Claude Code sessions for tasks in pi-kanban\'s terminal',
     verbs: {
       start: {
-        summary: 'Start claude in cck\'s terminal with a task; prints the session id',
-        usage: 'claude-code-kanban dispatch start --cwd <dir> (--spec <text> | --spec-file <path>) [--name <n>] [--group <g>] [--model <m>] [--worktree [name]] [--task-list [id]] [--json] [-- <claude args>...]',
+        summary: 'Start claude in pi-kanban\'s terminal with a task; prints the session id',
+        usage: 'pi-kanban dispatch start --cwd <dir> (--spec <text> | --spec-file <path>) [--name <n>] [--group <g>] [--model <m>] [--worktree [name]] [--task-list [id]] [--json] [-- <claude args>...]',
         flags: {
           '--cwd <dir>': 'Folder to run in (any existing folder, default: current dir)',
           '--spec <text>': 'The task, self-contained; sent as the first message',
@@ -344,18 +344,18 @@ const COMMANDS = {
           '--worktree [name]': 'Run in a new git worktree',
           '--task-list [id]': 'Use this task list instead of its own (default: this session\'s list), so its cards show on one board with yours. Off unless given',
           '--json': 'Output JSON',
-          '-- <claude args>': 'Passed to claude as they are, e.g. --permission-mode auto. No quotes, % or control characters; cck sets --session-id, --name, --model and --worktree',
+          '-- <claude args>': 'Passed to claude as they are, e.g. --permission-mode auto. No quotes, % or control characters; pi-kanban sets --session-id, --name, --model and --worktree',
         },
-        notes: 'Needs the terminal token, so it runs on the machine of the cck server. cck sends no report: say in the spec how the session reports back. Run `claude-code-kanban skills get dispatch` for how to write the spec.',
+        notes: 'Needs the terminal token, so it runs on the machine of the pi-kanban server. pi-kanban sends no report: say in the spec how the session reports back. Run `pi-kanban skills get dispatch` for how to write the spec.',
         examples: [
-          'claude-code-kanban dispatch start --cwd . --spec-file spec.md --name fix-login-redirect --group auth-refactor --model sonnet -- --permission-mode auto',
-          'claude-code-kanban dispatch start --cwd . --spec-file spec.md --name api-worker --task-list',
+          'pi-kanban dispatch start --cwd . --spec-file spec.md --name fix-login-redirect --group auth-refactor --model sonnet -- --permission-mode auto',
+          'pi-kanban dispatch start --cwd . --spec-file spec.md --name api-worker --task-list',
         ],
         run: runDispatchStartCli,
       },
       list: {
-        summary: 'List sessions this session started that still run in cck\'s terminal',
-        usage: 'claude-code-kanban dispatch list [--all] [--json]',
+        summary: 'List sessions this session started that still run in pi-kanban\'s terminal',
+        usage: 'pi-kanban dispatch list [--all] [--json]',
         flags: {
           '--all': 'Every dispatch on this board',
           '--json': 'Output JSON',
@@ -364,24 +364,24 @@ const COMMANDS = {
       },
       end: {
         summary: 'End the terminal of a session this session started',
-        usage: 'claude-code-kanban dispatch end (<session id or prefix> | --name <n>) [--json]',
+        usage: 'pi-kanban dispatch end (<session id or prefix> | --name <n>) [--json]',
         flags: {
           '<session id or prefix>': 'A session from `dispatch list`',
           '--name <n>': 'The session\'s --name from dispatch start',
           '--json': 'Output JSON',
         },
         notes: 'Needs the terminal token, like dispatch start. The worktree stays.',
-        examples: ['claude-code-kanban dispatch end --name api-worker'],
+        examples: ['pi-kanban dispatch end --name api-worker'],
         run: runDispatchEndCli,
       },
     },
   },
   terminal: {
-    summary: 'Read the terminals running in cck',
+    summary: 'Read the terminals running in pi-kanban',
     verbs: {
       list: {
-        summary: 'List every terminal in cck: dispatched and opened by hand',
-        usage: 'claude-code-kanban terminal list [--json]',
+        summary: 'List every terminal in pk: dispatched and opened by hand',
+        usage: 'pi-kanban terminal list [--json]',
         flags: {
           '--json': 'Output JSON',
         },
@@ -395,9 +395,9 @@ const COMMANDS = {
     verbs: {
       get: {
         summary: 'Print the guide for a skill',
-        usage: 'claude-code-kanban skills get <name>',
+        usage: 'pi-kanban skills get <name>',
         flags: { '<name>': 'Skill name, e.g. dispatch' },
-        examples: ['claude-code-kanban skills get dispatch'],
+        examples: ['pi-kanban skills get dispatch'],
         run: runSkillsGetCli,
       },
     },
@@ -470,19 +470,19 @@ const SERVER_FLAGS = [
   ['--open', '', 'Open the board in the browser'],
   ['--dir <path>', 'PI_CODING_AGENT_DIR', 'pi agent dir (default ~/.pi/agent)'],
   ['--enable-terminal', '', 'Turn on the embedded terminal'],
-  ['--terminal-shell <shell>', 'CCK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
+  ['--terminal-shell <shell>', 'PK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
   ['--host <addr>', 'HOST', 'Listen address (default 127.0.0.1)'],
   ['--allowed-hosts <list>', 'ALLOWED_HOSTS', 'Extra Host header values, comma-separated'],
   ['--<app>-url <url>', '<APP>_URL', 'Link to app: marketplace, cost, memory'],
 ];
 
 function topHelp() {
-  const lines = ['Usage: claude-code-kanban <command> [args] [--flags]\n', 'Commands:'];
+  const lines = ['Usage: pi-kanban <command> [args] [--flags]\n', 'Commands:'];
   for (const [name, cmd] of Object.entries(COMMANDS)) {
     const verbs = cmd.verbs ? ` (${Object.keys(cmd.verbs).join(', ')})` : '';
     lines.push(`  ${name.padEnd(20)}${cmd.summary}${verbs}`);
   }
-  lines.push(`  ${'help'.padEnd(20)}Show help for a command (claude-code-kanban help <command>)`);
+  lines.push(`  ${'help'.padEnd(20)}Show help for a command (pi-kanban help <command>)`);
   lines.push('\nFlags:');
   lines.push('  --help, -h            Show help (top-level, noun-level, or leaf-level)');
   lines.push('  --version, -v         Print version and exit');
@@ -491,10 +491,10 @@ function topHelp() {
   const envPad = Math.max(...SERVER_FLAGS.map(([, env]) => env.length)) + 2;
   for (const [flag, env, desc] of SERVER_FLAGS) lines.push(`  ${flag.padEnd(flagPad)}${env.padEnd(envPad)}${desc}`);
   lines.push('\nCommand env:');
-  lines.push('  CCK_URL               Server base URL, e.g. http://127.0.0.1:4795 (wins over PORT)');
+  lines.push('  PK_URL               Server base URL, e.g. http://127.0.0.1:4795 (wins over PORT)');
   lines.push('  PORT                  Server port (default: the one this config dir\'s server reports, else 3460)');
   lines.push('  PI_CODING_AGENT_DIR   pi agent dir whose board to use');
-  lines.push('\nRun `claude-code-kanban help <command>` for its subcommands, and `help <command> <subcommand>` for flags and examples.');
+  lines.push('\nRun `pi-kanban help <command>` for its subcommands, and `help <command> <subcommand>` for flags and examples.');
   return lines.join('\n');
 }
 
@@ -506,12 +506,12 @@ function printNounHelp(noun) {
   const entry = COMMANDS[noun];
   console.log(`${entry.summary}\n`);
   if (entry.verbs) {
-    console.log(`Usage: claude-code-kanban ${noun} <subcommand> [args] [--flags]\n`);
+    console.log(`Usage: pi-kanban ${noun} <subcommand> [args] [--flags]\n`);
     console.log('Subcommands:');
     for (const [vName, v] of Object.entries(entry.verbs)) {
       console.log(`  ${vName.padEnd(12)}${v.summary}`);
     }
-    console.log(`\nRun \`claude-code-kanban help ${noun} <subcommand>\` for flags and examples.`);
+    console.log(`\nRun \`pi-kanban help ${noun} <subcommand>\` for flags and examples.`);
   } else {
     printLeafHelp(entry);
   }
@@ -536,7 +536,7 @@ function printLeafHelp(entry) {
 // For a bad value: the leaf help would bury the one line that says what is wrong.
 function usageError(entry, message) {
   console.error(message);
-  console.error(`Run \`claude-code-kanban help ${entry.name}\` for usage.`);
+  console.error(`Run \`pi-kanban help ${entry.name}\` for usage.`);
   return 1;
 }
 
@@ -560,18 +560,18 @@ function cliPort() {
 }
 
 function cliBaseUrl() {
-  if (process.env.CCK_URL) return process.env.CCK_URL.replace(/\/+$/, '');
+  if (process.env.PK_URL) return process.env.PK_URL.replace(/\/+$/, '');
   const port = cliPort();
   return port === null ? null : `http://127.0.0.1:${port}`;
 }
 
 function cliTargetPort() {
-  if (!process.env.CCK_URL) return cliPort();
-  try { return new URL(process.env.CCK_URL).port; } catch (_) { return ''; }
+  if (!process.env.PK_URL) return cliPort();
+  try { return new URL(process.env.PK_URL).port; } catch (_) { return ''; }
 }
 
 function readCckJson(name) {
-  try { return JSON.parse(fs.readFileSync(path.join(boardDir(getClaudeDir()), name), 'utf8')); } catch (_) { return null; }
+  try { return JSON.parse(fs.readFileSync(path.join(boardDir(resolvePiAgentDir()), name), 'utf8')); } catch (_) { return null; }
 }
 
 // EPERM means the process exists but belongs to someone else.
@@ -579,12 +579,12 @@ function isPidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 function unreachable() {
-  const dir = displayPath(getClaudeDir());
-  const start = 'Start it first with "claude-code-kanban".';
-  if (process.env.CCK_URL) return `Cannot reach cck server for ${dir} at ${cliBaseUrl()} (CCK_URL). ${start}`;
+  const dir = displayPath(resolvePiAgentDir());
+  const start = 'Start it first with "pi-kanban".';
+  if (process.env.PK_URL) return `Cannot reach pi-kanban server for ${dir} at ${cliBaseUrl()} (PK_URL). ${start}`;
   const port = cliPort();
-  if (port === null) return `Cannot reach cck server for ${dir}: its server.json names a server that is no longer running. ${start}`;
-  return `Cannot reach cck server for ${dir} on port ${port}. ${start}`;
+  if (port === null) return `Cannot reach pi-kanban server for ${dir}: its server.json names a server that is no longer running. ${start}`;
+  return `Cannot reach pi-kanban server for ${dir} on port ${port}. ${start}`;
 }
 
 class CliUnreachable extends Error { constructor() { super(unreachable()); this.code = 'unreachable'; } }
@@ -1412,7 +1412,7 @@ function readTerminalToken() {
   }
   const token = port && readCckJson(`terminal-tokens/${port}.json`)?.token;
   if (!token) {
-    console.error(`No terminal token for ${displayPath(getClaudeDir())} at ${cliBaseUrl()}. The cck server must be running with the terminal enabled.`);
+    console.error(`No terminal token for ${displayPath(resolvePiAgentDir())} at ${cliBaseUrl()}. The pi-kanban server must be running with the terminal enabled.`);
     return null;
   }
   return token;
@@ -1493,7 +1493,7 @@ async function runDispatchEndCli(args) {
   try {
     const matches = (await fetchDispatches(false)).filter(r => name ? r.name === name : r.session.startsWith(id));
     if (!matches.length) {
-      console.error(`No running dispatch matches "${name || id}". Run "claude-code-kanban dispatch list".`);
+      console.error(`No running dispatch matches "${name || id}". Run "pi-kanban dispatch list".`);
       return 1;
     }
     if (matches.length > 1) {
@@ -1530,7 +1530,7 @@ async function runTerminalListCli(args) {
   const self = process.env.CLAUDE_CODE_SESSION_ID;
   printTable(['SESSION', 'AGE', 'KIND', 'NAME', 'CWD'], rows.map(t => [t.id, ageOf(t.startedAt), terminalKind(t, self), t.name || '-', t.cwd || '-']));
   if (rows.some(t => self && t.dispatched?.parent === self)) {
-    console.log('\nEnd one of yours with `claude-code-kanban dispatch end <session>`. The user ends the others from the board.');
+    console.log('\nEnd one of yours with `pi-kanban dispatch end <session>`. The user ends the others from the board.');
   }
   return 0;
 }

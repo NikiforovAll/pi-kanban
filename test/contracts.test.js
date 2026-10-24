@@ -427,7 +427,7 @@ describe('Parser: findTerminatedTeammates', () => {
   const os = require('os');
   let tmpDir;
 
-  tmpDir = mkdtempSync(path.join(os.tmpdir(), 'cck-test-'));
+  tmpDir = mkdtempSync(path.join(os.tmpdir(), 'pk-test-'));
 
   it('returns empty map for non-existent file', async () => {
     const result = await findTerminatedTeammates('/nonexistent/path.jsonl');
@@ -599,7 +599,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   });
 
   it('keeps the agent name apart from the title, and takes the last one as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'cck-name-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-name-'));
     const p = path.join(dir, 's.jsonl');
     const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
     try {
@@ -617,7 +617,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   });
 
   it('finds the agent name on a first read when it comes before the custom title', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'cck-name-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-name-'));
     const p = path.join(dir, 's.jsonl');
     const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
     try {
@@ -629,7 +629,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   });
 
   it('reads the scratchpad dir from the last environment attachment, as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'cck-scratch-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-scratch-'));
     const p = path.join(dir, 's.jsonl');
     const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
     const env = (scratchpadDirectory) => line({ type: 'attachment', attachment: { type: 'environment', snapshot: { scratchpadDirectory } } });
@@ -646,7 +646,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   });
 
   it('drops the head scratchpad dir when a cold scan skips the middle of a large transcript', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'cck-scratch-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-scratch-'));
     const line = (o) => `${JSON.stringify({ ...o, sessionId: 's' })}\n`;
     const env = (scratchpadDirectory) => line({ type: 'attachment', attachment: { type: 'environment', snapshot: { scratchpadDirectory } } });
     const filler = line({ type: 'user', cwd: '/p', timestamp: 't', pad: 'x'.repeat(1000) }).repeat(1300);
@@ -664,7 +664,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   });
 
   it('reads permissionMode from the last prompt, permission-mode line or auto-mode attachment, as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'cck-mode-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-mode-'));
     const p = path.join(dir, 's.jsonl');
     const prompt = (permissionMode) => `${JSON.stringify({ type: 'user', cwd: 'C:/proj', permissionMode, message: { role: 'user', content: 'hi' } })}\n`;
     const toolResult = `${JSON.stringify({ type: 'user', cwd: 'C:/proj', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }] } })}\n`;
@@ -687,7 +687,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   });
 
   it('reads cacheTtl from the last main-thread cache write, as the file grows', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'cck-ttl-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-ttl-'));
     const p = path.join(dir, 's.jsonl');
     const reply = (h1, m5, isSidechain = false) => `${JSON.stringify({
       type: 'assistant', cwd: 'C:/proj', isSidechain,
@@ -717,7 +717,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
     let dir;
     let p;
     beforeEach(() => {
-      dir = mkdtempSync(path.join(os.tmpdir(), 'cck-reply-'));
+      dir = mkdtempSync(path.join(os.tmpdir(), 'pk-reply-'));
       p = path.join(dir, 's.jsonl');
     });
     afterEach(() => rmSync(dir, { recursive: true, force: true }));
@@ -779,7 +779,7 @@ describe('Parser: updateLoopInfo', () => {
   const otherTools = toolUse('toolu_b1', 'Bash', { command: 'ls' }) + toolResult('toolu_b1', 'not-a-cron');
 
   let dir;
-  before(() => { dir = mkdtempSync(path.join(os.tmpdir(), 'cck-loop-')); });
+  before(() => { dir = mkdtempSync(path.join(os.tmpdir(), 'pk-loop-')); });
   after(() => rmSync(dir, { recursive: true, force: true }));
 
   it('resolves a cron task id from its result and drops a deleted cron', () => {
@@ -868,7 +868,7 @@ describe('Session cache across restarts', () => {
 
   let dir, cacheFile, jsonl;
   before(() => {
-    dir = mkdtempSync(path.join(os.tmpdir(), 'cck-cache-'));
+    dir = mkdtempSync(path.join(os.tmpdir(), 'pk-cache-'));
     cacheFile = path.join(dir, 'session-cache.json');
     jsonl = path.join(dir, 's1.jsonl');
   });
@@ -951,7 +951,7 @@ describe('Parent verdict cache', () => {
   };
 
   before(() => {
-    root = mkdtempSync(path.join(os.tmpdir(), 'cck-parent-'));
+    root = mkdtempSync(path.join(os.tmpdir(), 'pk-parent-'));
     proj = path.join(root, 'proj');
     mkdirSync(proj);
   });

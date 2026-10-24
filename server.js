@@ -44,7 +44,7 @@ const {
 } = require('./lib/parsers');
 const { inlineHtmlAssets, MIME_BY_EXT } = require('./lib/inline-assets');
 const { buildDecision, decisionFileName, isDecisionFile, approvalsFrom, boardRefusal } = require('./lib/approvals');
-const { getClaudeDir, boardDir, getArgValue,storageNamespace, isDefaultClaudeDir } = require('./lib/claude-dir');
+const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace, isDefaultPiAgentDir } = require('./lib/board-dir');
 const { readTerminalConfig } = require('./lib/terminal');
 const { createTerminalClient } = require('./lib/terminal-client');
 const { AGENT_ID_RE } = require('./cli');
@@ -97,39 +97,39 @@ function getArgUrl(argName, envName) {
 const MARKETPLACE_URL = getArgUrl('marketplace-url', 'MARKETPLACE_URL');
 const COST_URL = getArgUrl('cost-url', 'COST_URL');
 const MEMORY_URL = getArgUrl('memory-url', 'MEMORY_URL');
-const CLAUDE_DIR = getClaudeDir();
-const CCK_DIR = boardDir(CLAUDE_DIR);
-const TASKS_DIR = path.join(CCK_DIR, 'tasks');
-// TODO(port wave 1): point at path.join(CLAUDE_DIR, 'sessions') once lib/parsers reads pi JSONL.
-const PROJECTS_DIR = path.join(CCK_DIR, 'projects');
-const TEAMS_DIR = path.join(CCK_DIR, 'teams');
-const PLANS_DIR = path.join(CCK_DIR, 'plans');
-const SESSIONS_DIR = path.join(CCK_DIR, 'live');
-const AGENT_ACTIVITY_DIR = path.join(CCK_DIR, 'agent-activity');
-const CONTEXT_STATUS_DIR = path.join(CCK_DIR, 'context-status');
-const ATTACHMENTS_DIR = path.join(CCK_DIR, 'attachments');
-const PINS_FILE = path.join(CCK_DIR, 'pins.json');
-const USER_GROUPS_FILE = path.join(CCK_DIR, 'groups.json');
-const DISPATCHED_FILE = path.join(CCK_DIR, 'dispatched.json');
-const WORKTREES_FILE = path.join(CCK_DIR, 'worktrees.json');
-const LINKED_DOCS_FILE = path.join(CCK_DIR, 'linked-docs.json');
-const PANES_FILE = path.join(CCK_DIR, 'panes.json');
-const SERVER_INFO_FILE = path.join(CCK_DIR, 'server.json');
-const TERMINAL_TOKENS_DIR = path.join(CCK_DIR, 'terminal-tokens');
-const SESSION_CACHE_FILE = path.join(CCK_DIR, 'session-cache.json');
+const PI_AGENT_DIR = resolvePiAgentDir();
+const PK_DIR = boardDir(PI_AGENT_DIR);
+const TASKS_DIR = path.join(PK_DIR, 'tasks');
+// TODO(port wave 1): point at path.join(PI_AGENT_DIR, 'sessions') once lib/parsers reads pi JSONL.
+const PROJECTS_DIR = path.join(PK_DIR, 'projects');
+const TEAMS_DIR = path.join(PK_DIR, 'teams');
+const PLANS_DIR = path.join(PK_DIR, 'plans');
+const SESSIONS_DIR = path.join(PK_DIR, 'live');
+const AGENT_ACTIVITY_DIR = path.join(PK_DIR, 'agent-activity');
+const CONTEXT_STATUS_DIR = path.join(PK_DIR, 'context-status');
+const ATTACHMENTS_DIR = path.join(PK_DIR, 'attachments');
+const PINS_FILE = path.join(PK_DIR, 'pins.json');
+const USER_GROUPS_FILE = path.join(PK_DIR, 'groups.json');
+const DISPATCHED_FILE = path.join(PK_DIR, 'dispatched.json');
+const WORKTREES_FILE = path.join(PK_DIR, 'worktrees.json');
+const LINKED_DOCS_FILE = path.join(PK_DIR, 'linked-docs.json');
+const PANES_FILE = path.join(PK_DIR, 'panes.json');
+const SERVER_INFO_FILE = path.join(PK_DIR, 'server.json');
+const TERMINAL_TOKENS_DIR = path.join(PK_DIR, 'terminal-tokens');
+const SESSION_CACHE_FILE = path.join(PK_DIR, 'session-cache.json');
 // Every board on a config dir rewrites the whole file, so a test board points this elsewhere.
-const TERMINALS_FILE = process.env.CCK_TERMINALS_FILE ? path.resolve(process.env.CCK_TERMINALS_FILE) : path.join(CCK_DIR, 'terminals.json');
+const TERMINALS_FILE = process.env.PK_TERMINALS_FILE ? path.resolve(process.env.PK_TERMINALS_FILE) : path.join(PK_DIR, 'terminals.json');
 // os.tmpdir() can be an 8.3 short path on Windows; transcripts record the long form.
 const TEMP_ROOT = (() => {
   try { return realpathSync.native(os.tmpdir()); } catch { return os.tmpdir(); }
 })();
 // Harness-owned scratchpad root; the per-session dir under it is created lazily.
 // Used only for a transcript that does not record its scratchpad dir. Settings come first:
-// cck often runs under the hub or a tray, not in the shell where `claude` ran.
+// pi-kanban often runs under the hub or a tray, not in the shell where `claude` ran.
 const SCRATCHPAD_ROOT = (() => {
   const root = scratchpadRoot({
     platform: process.platform,
-    overrides: [readSettings(path.join(CLAUDE_DIR, 'settings.json'))?.env?.CLAUDE_CODE_TMPDIR, process.env.CLAUDE_CODE_TMPDIR],
+    overrides: [readSettings(path.join(PI_AGENT_DIR, 'settings.json'))?.env?.CLAUDE_CODE_TMPDIR, process.env.CLAUDE_CODE_TMPDIR],
     tmpdir: os.tmpdir(),
     uid: process.getuid?.(),
   });
@@ -204,12 +204,12 @@ function writeServerInfo(port) {
 // For `dispatch start`: a local process as the same user can already run claude itself,
 // so handing it the token adds little. A browser still cannot read the file.
 // One file per port: two boards on one config dir each keep a token, so the CLI can
-// reach the board CCK_URL names even when the other one owns server.json.
+// reach the board PK_URL names even when the other one owns server.json.
 // The sweep also drops terminal-token.json, the single file that older versions wrote.
 let terminalTokenFile = null;
 function writeTerminalToken(port) {
   if (terminal.unavailableReason()) return;
-  let stale = [path.join(CCK_DIR, 'terminal-token.json')];
+  let stale = [path.join(PK_DIR, 'terminal-token.json')];
   try { stale = stale.concat(readdirSync(TERMINAL_TOKENS_DIR).map(name => path.join(TERMINAL_TOKENS_DIR, name))); } catch (_) { /* no dir yet */ }
   for (const file of stale) {
     const pid = ownerPid(file);
@@ -288,18 +288,18 @@ function persistAgent(dir, agent) {
   fs.appendFile(file, `${JSON.stringify({ ...agent, event: 'server-update' })}\n`, 'utf8').catch(() => {});
 }
 
-// <CCK_DIR>/config.json — cck's own settings, per Claude config dir.
+// <PK_DIR>/config.json — pi-kanban's own settings, per Claude config dir.
 // Normalization lives in lib/approvals (kept in sync with the gate's own parse).
-const CCK_CONFIG_FILE = path.join(CCK_DIR, 'config.json');
-const LEGACY_APPROVALS_FILE = path.join(CCK_DIR, 'approvals.json');
-const cckConfigCache = new Map();
-const readCckConfig = () => JSON.parse(readFileSync(CCK_CONFIG_FILE, 'utf8'));
+const PK_CONFIG_FILE = path.join(PK_DIR, 'config.json');
+const LEGACY_APPROVALS_FILE = path.join(PK_DIR, 'approvals.json');
+const pkConfigCache = new Map();
+const readCckConfig = () => JSON.parse(readFileSync(PK_CONFIG_FILE, 'utf8'));
 function approvalsConfig() {
-  return cachedByMtime(cckConfigCache, 'approvals', CCK_CONFIG_FILE,
+  return cachedByMtime(pkConfigCache, 'approvals', PK_CONFIG_FILE,
     () => approvalsFrom(readCckConfig()), approvalsFrom(null));
 }
 function boardEventsEnabled() {
-  return cachedByMtime(cckConfigCache, 'boardEvents', CCK_CONFIG_FILE,
+  return cachedByMtime(pkConfigCache, 'boardEvents', PK_CONFIG_FILE,
     () => boardEventsOn(readCckConfig()), boardEventsOn(null));
 }
 // approvals.json predates config.json (and was opt-in). Fold it into
@@ -309,12 +309,12 @@ function migrateLegacyApprovalsConfig() {
   try {
     const legacy = JSON.parse(readFileSync(LEGACY_APPROVALS_FILE, 'utf8'));
     let cfg = {};
-    try { cfg = JSON.parse(readFileSync(CCK_CONFIG_FILE, 'utf8')) || {}; } catch { /* absent */ }
-    if (!cfg.approvals) writeJsonAtomicOrLog(CCK_CONFIG_FILE, { ...cfg, approvals: legacy });
+    try { cfg = JSON.parse(readFileSync(PK_CONFIG_FILE, 'utf8')) || {}; } catch { /* absent */ }
+    if (!cfg.approvals) writeJsonAtomicOrLog(PK_CONFIG_FILE, { ...cfg, approvals: legacy });
     unlinkSync(LEGACY_APPROVALS_FILE);
-    cckConfigCache.clear();
+    pkConfigCache.clear();
   } catch (e) {
-    console.error(`[cck] could not migrate ${LEGACY_APPROVALS_FILE}: ${e.message}`);
+    console.error(`[pi-kanban] could not migrate ${LEGACY_APPROVALS_FILE}: ${e.message}`);
   }
 }
 
@@ -659,7 +659,7 @@ if (process.env.HUB_SDK_SERVER) require(process.env.HUB_SDK_SERVER).mount(app);
 
 // app.js reads localStorage synchronously at startup, before any fetch could deliver the
 // namespace, so it is injected into the page instead of served from /hub-config.
-const STORAGE_NS = storageNamespace(CLAUDE_DIR);
+const STORAGE_NS = storageNamespace(PI_AGENT_DIR);
 const NS_DECL = 'window.__STORAGE_NS__ = null;';
 const RAW_INDEX = readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
 if (!RAW_INDEX.includes(NS_DECL)) throw new Error(`public/index.html is missing "${NS_DECL}"`);
@@ -1634,7 +1634,7 @@ app.get('/api/sessions', async (req, res) => {
       if (lite) continue;
       s.loopInfo = getLoopInfoSummary(s);
       if (!s.contextStatus) continue;
-      if (!autoCompactByProject.has(s.project)) autoCompactByProject.set(s.project, getAutoCompact(CLAUDE_DIR, s.project));
+      if (!autoCompactByProject.has(s.project)) autoCompactByProject.set(s.project, getAutoCompact(PI_AGENT_DIR, s.project));
       s.autoCompact = autoCompactByProject.get(s.project);
     }
 
@@ -1857,7 +1857,7 @@ app.get('/api/sessions/:sessionId/artifacts', async (req, res) => {
 });
 
 // A scratchpad is a folder plus a `scratchpad.json` manifest, rendered by the
-// external `scratch` CLI. cck only recognizes the shape and launches the viewer —
+// external `scratch` CLI. pi-kanban only recognizes the shape and launches the viewer —
 // it reads nothing from the manifest but `name`, `created` and `id`, so the two stay
 // independently versioned.
 const SCRATCHPAD_MANIFEST = 'scratchpad.json';
@@ -2306,7 +2306,7 @@ app.post('/api/sessions/:sessionId/plan/open', (req, res) => {
 app.post('/api/open-folder', (req, res) => {
   try {
     const { folder, file } = req.body;
-    const targets = [folder ? assertOpenTarget(folder, 'folder') : CLAUDE_DIR];
+    const targets = [folder ? assertOpenTarget(folder, 'folder') : PI_AGENT_DIR];
     if (file) targets.push(assertOpenTarget(file, 'file'));
     openInEditor(targets);
     res.json({ success: true });
@@ -2352,7 +2352,7 @@ function resolveScratchpad(value) {
 }
 
 // API: Open a scratchpad in the external `scratch` viewer — the window outlives
-// this request and cck never waits on it.
+// this request and pi-kanban never waits on it.
 app.post('/api/scratchpad/open', (req, res) => {
   try {
     const bin = whichSync('scratch');
@@ -3219,7 +3219,7 @@ app.get('/api/sessions/:sessionId/tool-result-image/:toolUseId/:n', asyncRoute((
   sendTranscriptImage(req, res, (p) => readToolResultImage(p, req.params.toolUseId, req.params.n))));
 
 app.get('/api/sessions/:sessionId/cached-image/:n', (req, res) => {
-  const img = readCachedImage(req.params.sessionId, req.params.n, CLAUDE_DIR);
+  const img = readCachedImage(req.params.sessionId, req.params.n, PI_AGENT_DIR);
   if (!img) return res.status(404).end();
   res.setHeader('Content-Type', img.mediaType);
   res.setHeader('Cache-Control', 'no-store');
@@ -3279,7 +3279,7 @@ function resolveSessionFolder(id) {
   return meta ? meta.project || meta.cwd || null : null;
 }
 
-// The host saves its terminals; cck adds the show map (terminal id → session id) beside them.
+// The host saves its terminals; pi-kanban adds the show map (terminal id → session id) beside them.
 const terminalsFile = jsonFile(TERMINALS_FILE);
 let savedTerminals = terminalsFile.load() || {};
 
@@ -3293,10 +3293,10 @@ function saveTerminals() {
 const terminal = createTerminalClient({
   config: readTerminalConfig({ getArgValue }),
   net,
-  claudeDir: CLAUDE_DIR,
-  isDefaultDir: isDefaultClaudeDir(CLAUDE_DIR),
+  piAgentDir: PI_AGENT_DIR,
+  isDefaultDir: isDefaultPiAgentDir(PI_AGENT_DIR),
   sessionsDir: SESSIONS_DIR,
-  token: process.env.CCK_TERMINAL_TOKEN,
+  token: process.env.PK_TERMINAL_TOKEN,
   load: terminalsFile.load,
   save: (data) => {
     savedTerminals = data;
@@ -3391,7 +3391,7 @@ app.get('/api/terminals/stats', terminalRoute(async (_req, res) => {
   const byPid = await terminalProcStats([process.pid, hostPid, ...Object.values(claudePids)].filter(Boolean));
   const terminals = {};
   for (const [id, pid] of Object.entries(claudePids)) if (byPid[pid]) terminals[id] = byPid[pid];
-  res.json({ cck: byPid[process.pid] || null, host: byPid[hostPid] || null, terminals });
+  res.json({ pk: byPid[process.pid] || null, host: byPid[hostPid] || null, terminals });
 }));
 
 app.delete('/api/terminals/:id', terminalRoute(async (req, res) => {
@@ -3913,7 +3913,7 @@ app.get('/api/session/resolve', (req, res) => {
       const m = metadata[idArg];
       return res.json({ id: idArg, customTitle: m?.customTitle || null });
     }
-    // A session cck just dispatched has no transcript yet, and its starter groups it at once.
+    // A session pi-kanban just dispatched has no transcript yet, and its starter groups it at once.
     const started = dispatched.get(idArg);
     if (started) return res.json({ id: idArg, customTitle: started.name || null });
     const matches = ids.filter(id => id.startsWith(idArg));
@@ -4306,7 +4306,7 @@ app.delete('/api/panes/:sessionId/:paneId', (req, res) => {
 // session. The source is described, not interpreted, so a new kind of preview needs a
 // client change only. The batch is always written to a file: the doorbell is lossy and
 // carries one line, and the file is what each route points at.
-const REVIEW_DIR = path.join(CCK_DIR, 'reviews');
+const REVIEW_DIR = path.join(PK_DIR, 'reviews');
 
 // `<ts>.pending` holds the doorbell line of a review the mod has not acked yet.
 configureSessionEvents({
@@ -4734,7 +4734,7 @@ async function cleanupAgentActivity() {
 async function runRetention() {
   try {
     const scan = await scanTranscripts(PROJECTS_DIR);
-    const opts = { known: scan?.ids, maxAgeMs: retentionMs(CLAUDE_DIR) };
+    const opts = { known: scan?.ids, maxAgeMs: retentionMs(PI_AGENT_DIR) };
     const markers = dispatched.prune(opts);
     const layouts = panes.prune(opts);
     if (layouts) queuePaneFileWatch();

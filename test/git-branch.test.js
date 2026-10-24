@@ -23,10 +23,10 @@ describe('readGitBranch', () => {
   });
 
   it('follows a relative gitdir pointer, as a submodule has', () => {
-    const sub = path.join(REPO, 'cck');
+    const sub = path.join(REPO, 'pi-kanban');
     const read = fakeFs({
-      [path.join(sub, '.git')]: 'gitdir: ../.git/modules/cck\n',
-      [path.join(repoGit, 'modules', 'cck', 'HEAD')]: 'ref: refs/heads/main\n',
+      [path.join(sub, '.git')]: 'gitdir: ../.git/modules/pi-kanban\n',
+      [path.join(repoGit, 'modules', 'pi-kanban', 'HEAD')]: 'ref: refs/heads/main\n',
       [path.join(repoGit, 'HEAD')]: 'ref: refs/heads/master\n',
     }, [repoGit]);
     assert.equal(readGitBranch(sub, read), 'main');

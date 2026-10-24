@@ -6,7 +6,7 @@
   'use strict';
 
   const ACK_BATCH_BYTES = 32 * 1024;
-  const MSG = 'cck-term:';
+  const MSG = 'pk-term:';
 
   const modsOf = (e) =>
     [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'meta'].filter(Boolean).join('+');

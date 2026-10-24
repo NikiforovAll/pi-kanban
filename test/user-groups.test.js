@@ -35,7 +35,7 @@ const status = (fn) => {
 
 describe('user groups file errors', () => {
   it('keeps the last good groups and writes nothing while the file cannot be read', () => {
-    const file = path.join(mkdtempSync(path.join(os.tmpdir(), 'cck-groups-')), 'groups.json');
+    const file = path.join(mkdtempSync(path.join(os.tmpdir(), 'pk-groups-')), 'groups.json');
     const s = createUserGroupStore(stampedJsonFile(file, (f, data) => writeFileSync(f, JSON.stringify(data))));
     s.create({ name: 'Work' });
     const good = JSON.parse(JSON.stringify(s.state()));

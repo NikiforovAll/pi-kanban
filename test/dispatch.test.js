@@ -25,9 +25,9 @@ describe('claude args pass-through', () => {
     assert.deepEqual(spec(undefined).extraArgs, []);
   });
 
-  it('refuses flags cck sets, in both spellings', () => {
+  it('refuses flags pi-kanban sets, in both spellings', () => {
     for (const flag of ['--session-id', '-n', '--name=y', '--model', '-w', '--resume', '-c', '--fork-session', '-p', '--print']) {
-      assert.match(spec([flag]), /cck sets/, flag);
+      assert.match(spec([flag]), /pi-kanban sets/, flag);
     }
   });
 

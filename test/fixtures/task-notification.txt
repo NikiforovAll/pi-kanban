@@ -7,10 +7,10 @@
 <result>test agent A done
 
 Summary of read-only busy-work (no files modified):
-- Top-level files globbed at C:/Users/nikiforovall/dev/claude-code-hub (root + submodules: marketplace, cck, cost/memory dirs).
-- cck/public/app.js (first 30 lines): module-level state declarations for the Kanban dashboard frontend — session/task tracking, filters, agent polling, and UI selection state.
+- Top-level files globbed at C:/Users/nikiforovall/dev/claude-code-hub (root + submodules: marketplace, pi-kanban, cost/memory dirs).
+- pi-kanban/public/app.js (first 30 lines): module-level state declarations for the Kanban dashboard frontend — session/task tracking, filters, agent polling, and UI selection state.
 - `node --version` -&gt; v24.15.0
-- `git status --short` -&gt; ` M cck` (cck submodule modified)
+- `git status --short` -&gt; ` M pi-kanban` (pi-kanban submodule modified)
 - Total active time ~90s via spaced waits.</result>
 <usage><subagent_tokens>22316</subagent_tokens><tool_uses>6</tool_uses><duration_ms>118942</duration_ms></usage>
 </task-notification>

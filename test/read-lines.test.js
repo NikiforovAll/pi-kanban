@@ -43,7 +43,7 @@ describe('readLines', () => {
 
   it('rejects for a missing file', async () => {
     await assert.rejects(async () => {
-      for await (const _ of readLines(path.join(os.tmpdir(), 'cck-no-such-file.jsonl'))) {}
+      for await (const _ of readLines(path.join(os.tmpdir(), 'pk-no-such-file.jsonl'))) {}
     });
   });
 

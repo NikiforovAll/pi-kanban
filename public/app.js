@@ -128,7 +128,7 @@ let currentMessages = [];
 let agentDurationInterval = null;
 let agentPollInterval = null;
 // Inside the hub an inactive app is a display:none iframe whose document.hidden stays false,
-// so the hub tells us via hub:active. Standalone, or if that message is lost, cck stays active.
+// so the hub tells us via hub:active. Standalone, or if that message is lost, pi-kanban stays active.
 let hubActive = true;
 // setupEventSource runs before HUB_INTEGRATION connects, so it hands its handler over here.
 let onHubActive = () => {};
@@ -4497,7 +4497,7 @@ function renderOwnerBadge(task) {
 }
 
 // Card chips that a tool writing the task file adds: metadata.chips = [{label, title?, tone?}], tone one of
-// muted, warn, accent. The writer is outside cck, so the list is capped and every field is checked.
+// muted, warn, accent. The writer is outside pi-kanban, so the list is capped and every field is checked.
 function taskChips(task) {
   const chips = task.metadata?.chips;
   if (!Array.isArray(chips)) return [];
@@ -5540,7 +5540,7 @@ function initSessionGroupsDnd() {
     const input = e.target.closest?.('.sg-name-input');
     if (input && sgEditingId) sgCommitRename(input, true);
   });
-  // HTML5 drag-and-drop never fires on touch, and cck ships as a PWA.
+  // HTML5 drag-and-drop never fires on touch, and pi-kanban ships as a PWA.
   sessionsList.addEventListener('touchstart', sgOnTouchStart, { passive: true });
   sessionsList.addEventListener('touchend', sgCancelLongPress);
   sessionsList.addEventListener('touchmove', sgCancelLongPress, { passive: true });
@@ -6308,7 +6308,7 @@ async function saveTaskField(taskId, sessionId, field, value) {
   }
 }
 
-const DETAIL_LAYOUT_KEY = 'cck-detail-layout';
+const DETAIL_LAYOUT_KEY = 'pk-detail-layout';
 
 function setDetailExpanded(expanded) {
   detailPanel.classList.toggle('expanded', expanded);
@@ -8191,7 +8191,7 @@ if (reviewHighlight) {
   CSS.highlights.set('review-hot', reviewHotHighlight);
   CSS.highlights.set('review-pending', reviewPendingHighlight);
 }
-const REVIEW_MSG = 'cck-review:';
+const REVIEW_MSG = 'pk-review:';
 let activeReview = null;
 let reviewMarkSeq = 0;
 let reviewPopMode = null;
@@ -8495,7 +8495,7 @@ function postToReviewFrame(type, id) {
 // Runs inside the preview iframe as source text, so it must not close over anything outside
 // its own body and arguments.
 function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector) {
-  const P = 'cck-review:';
+  const P = 'pk-review:';
   const marks = new Map();
   let pending = null;
   let hotId = 0;
@@ -8505,12 +8505,12 @@ function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector
   const hot = hl ? new Highlight() : null;
   const pend = hl ? new Highlight() : null;
   if (hl) {
-    CSS.highlights.set('cck-review', hl);
-    CSS.highlights.set('cck-review-hot', hot);
-    CSS.highlights.set('cck-review-pending', pend);
+    CSS.highlights.set('pk-review', hl);
+    CSS.highlights.set('pk-review-hot', hot);
+    CSS.highlights.set('pk-review-pending', pend);
     const style = document.createElement('style');
     style.textContent =
-      '::highlight(cck-review){background-color:rgba(240,180,41,.35)}::highlight(cck-review-hot),::highlight(cck-review-pending){background-color:rgba(240,180,41,.7)}';
+      '::highlight(pk-review){background-color:rgba(240,180,41,.35)}::highlight(pk-review-hot),::highlight(pk-review-pending){background-color:rgba(240,180,41,.7)}';
     (document.head || document.documentElement).append(style);
   }
   const send = (msg) => parent.postMessage({ ...msg, type: P + msg.type }, '*');
@@ -8524,19 +8524,19 @@ function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector
   };
   const labelOf = (el, fallback) => (el?.textContent || el?.value || '').trim().slice(0, 200) || fallback;
   addEventListener('click', (e) => {
-    const b = e.target.closest?.('[data-cck-action]');
-    if (!b || (b.form?.matches('[data-cck-submit]') && b.type === 'submit')) return;
+    const b = e.target.closest?.('[data-pk-action]');
+    if (!b || (b.form?.matches('[data-pk-submit]') && b.type === 'submit')) return;
     e.preventDefault();
-    const action = b.dataset.cckAction;
+    const action = b.dataset.pkAction;
     send({ type: 'action', action, label: labelOf(b, action), data: b.form ? fields(b.form) : {} });
   });
   // The sandbox allows forms so validation runs. Every submit stops here, so a page still cannot
   // navigate its frame with a form: a show card's form-action 'none' does not stop a GET to about:srcdoc.
   addEventListener('submit', (e) => {
     e.preventDefault();
-    const f = e.target.closest?.('form[data-cck-submit]');
+    const f = e.target.closest?.('form[data-pk-submit]');
     if (!f) return;
-    const action = f.dataset.cckSubmit;
+    const action = f.dataset.pkSubmit;
     send({ type: 'action', action, label: labelOf(e.submitter, action), data: fields(f, e.submitter) });
   });
   const describe = (node) => {
@@ -9031,7 +9031,7 @@ async function toastDelivery({ delivered, markdown }, noun) {
       copied ? `Copied the ${noun}. Paste it into the session.` : `Failed to copy the ${noun}`,
       'info',
       { label: 'Copy again', onClick: copy },
-      `Sessions get ${noun}s directly when the cck plugin runs there and board events are on.`,
+      `Sessions get ${noun}s directly when the pi-kanban plugin runs there and board events are on.`,
     );
   };
   await copy();
@@ -9900,7 +9900,7 @@ function renderWorkflowLiveHtml(sessionId) {
 
 // Every agent start and stop already re-renders the sidebar through the agent-activity
 // feed, which is what keeps the card current. The timer is the fallback for a config dir
-// with no cck hooks installed: there the last agent's result reaches nobody, and the card
+// with no pi-kanban hooks installed: there the last agent's result reaches nobody, and the card
 // would sit on a finished run until the next render. Slow on purpose — the hooked case
 // never waits for it. The generation guard drops a chain left mid-fetch by an earlier
 // render, so renders can't stack up chains.
@@ -10321,7 +10321,7 @@ function setupEventSource() {
     };
   }
 
-  // When cck comes back on screen (tab visible or hub:active), catch up immediately
+  // When pi-kanban comes back on screen (tab visible or hub:active), catch up immediately
   async function catchUp() {
     markOpenSessionRead();
     if (!isOnScreen() || !missedWhileHidden) return;
@@ -12238,7 +12238,7 @@ function showInfoModal(session, teamConfig, tasks, planContent, parentInfo) {
     if (opts?.openClaudeDir || opts?.openPath) {
       const folder = opts.openClaudeDir ? '' : escapeHtml(opts.openPath);
       const file = opts.openFile ? escapeHtml(opts.openFile) : '';
-      openBtn = `<button data-folder="${folder}" data-file="${file}" data-claude-dir="${opts.openClaudeDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.claudeDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>`;
+      openBtn = `<button data-folder="${folder}" data-file="${file}" data-pi-agent-dir="${opts.openClaudeDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.piAgentDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>`;
     }
     html += `<span class="row-actions">${copyBtn}${openBtn}</span>`;
   });
@@ -13948,7 +13948,7 @@ async function loadPaneView(sid, pane, view, scroll) {
     ? ['Preview unavailable', 'The server could not read this file.']
     : data.exists === false
       ? ['File not found', pane.target]
-      : ['Nothing to preview', 'cck cannot render this file.'];
+      : ['Nothing to preview', 'pi-kanban cannot render this file.'];
   const button = data && data.exists !== false ? 'Open in editor' : 'Try in preview';
   view.insertAdjacentHTML('beforeend', paneCardHtml(title, text, button));
 }
@@ -14154,7 +14154,7 @@ function unmountPane(sid, paneId) {
   view?.remove();
   paneFrames.delete(key);
   // Chrome leaves the window without focus when a focused frame is removed, so no key reaches
-  // the board until a click. Only when it had focus: under the hub, cck may be off screen.
+  // the board until a click. Only when it had focus: under the hub, pi-kanban may be off screen.
   if (hadFocus) window.focus();
 }
 
@@ -15092,7 +15092,7 @@ const TERMINAL_FONT_MAX = 32;
 const TERMINAL_FRAME_ISOLATED_MS = 5000;
 const TERMINAL_FRAME_LOAD_MS = 10000;
 const TERMINAL_FRAME_ALIVE_MS = 5000;
-const TERMINAL_MSG = 'cck-term:';
+const TERMINAL_MSG = 'pk-term:';
 const TERMINAL_RETRY_MS = [500, 1000, 2000, 4000, 8000];
 const TERMINAL_STABLE_MS = 5000;
 const STALE_TOKEN_MSG = 'The terminal token is out of date. Reload the hub window.';
@@ -15963,7 +15963,7 @@ function adoptPickedSession(oldId, id) {
   fetchTasks(id);
 }
 
-// The PTY outlives the socket, so a dropped connection (cck restart, sleep, proxy hiccup) reattaches
+// The PTY outlives the socket, so a dropped connection (pi-kanban restart, sleep, proxy hiccup) reattaches
 // to the same screen. Only a socket that stayed up resets the backoff, so a server that accepts and
 // then drops every socket still runs out of attempts.
 function retryTerminal(sessionId, attempt) {
@@ -16091,12 +16091,12 @@ function formatTerminalProc(s) {
 
 async function pollTerminalProcStats() {
   if (!isOnScreen()) return;
-  let cck;
+  let pi-kanban;
   let host;
   const stats = await getJson('/api/terminals/stats', null, { cache: 'no-store' });
   if (!stats) return;
-  ({ cck, host, terminals: terminalProcStats } = stats);
-  const parts = [cck && `cck ${formatTerminalProc(cck)}`, host && `terminal host ${formatTerminalProc(host)}`];
+  ({ pi-kanban, host, terminals: terminalProcStats } = stats);
+  const parts = [pi-kanban && `pi-kanban ${formatTerminalProc(pi-kanban)}`, host && `terminal host ${formatTerminalProc(host)}`];
   document.getElementById('terminal-manager-stats').textContent = parts.filter(Boolean).join(' · ');
   for (const el of document.querySelectorAll('#terminal-manager-body [data-proc]')) {
     el.textContent = formatTerminalProc(terminalProcStats[el.dataset.proc]);
@@ -16214,8 +16214,8 @@ const KANBOT_SVG =
   '<path fill="#d97757" d="M3 0h10v4h3v3h-3v3H3V7H0V4h3z"/>' +
   '<path fill="#d97757" d="M4 10h1v3H4zM6 10h1v3H6zM9 10h1v3H9zM11 10h1v3h-1z"/>' +
   '<path fill="#1f1e1d" d="M5 2h1v2H5zM10 2h1v2h-1z"/></svg>';
-const KANBOT_LAYOUT_KEY = 'cck-kanbot-layout';
-const KANBOT_WIDTH_KEY = 'cck-kanbot-width';
+const KANBOT_LAYOUT_KEY = 'pk-kanbot-layout';
+const KANBOT_WIDTH_KEY = 'pk-kanbot-width';
 const kanbotState = {
   el: null,
   frame: null,
@@ -16422,14 +16422,14 @@ window.addEventListener('message', (e) => {
 // The question the session in the embedded terminal asks with the ask tool; the tool call waits for
 // the answer. Hiding keeps the frame, so a half-filled card comes back as it was. Only an answer, a
 // skip or the agent's interrupt ends the question.
-const ASK_MSG = 'cck-ask:';
+const ASK_MSG = 'pk-ask:';
 const askState = { terminalId: null, ask: null, frame: null, frameH: 0, hidden: false, busy: false, seq: 0 };
 
 // Runs inside the card as source text, ahead of the card's own scripts. The JSON round trip makes
 // the answer cloneable, and a value that is not JSON throws in the card.
 function askBridge() {
-  window.cck = {
-    send: (data) => parent.postMessage({ type: 'cck-ask:send', data: JSON.parse(JSON.stringify(data ?? null)) }, '*'),
+  window.pi-kanban = {
+    send: (data) => parent.postMessage({ type: 'pk-ask:send', data: JSON.parse(JSON.stringify(data ?? null)) }, '*'),
   };
 }
 
@@ -16593,9 +16593,9 @@ function initAsk() {
 // The card the session in the embedded terminal posts to with the show tool. It belongs to the
 // terminal, not the session: /clear and the --resume picker change the session id, the terminal id
 // stays. Nothing here runs until the terminal view shows a terminal that has posts.
-const SHOW_MSG = 'cck-show:';
-const SHOW_SIZE_KEY = 'cck-show-size-v2';
-const SHOW_VIEW_KEY = 'cck-show-view-v1';
+const SHOW_MSG = 'pk-show:';
+const SHOW_SIZE_KEY = 'pk-show-size-v2';
+const SHOW_VIEW_KEY = 'pk-show-view-v1';
 const SHOW_MIN_W = 280;
 const SHOW_MIN_H = 120;
 const SHOW_INSET = 8;
@@ -17067,7 +17067,7 @@ function showSrcdoc(content, restoreY, extraHead = '') {
 // An HTML file preview gets only the tokens, first in its head: its own :root rules win, and
 // a page that declares its defaults in :where(:root) follows the board theme.
 function themedSrcdoc(content) {
-  const head = `<style id="cck-tokens">:root{${showTokenCss()}}${FRAME_SCROLLBAR_CSS}</style>`;
+  const head = `<style id="pk-tokens">:root{${showTokenCss()}}${FRAME_SCROLLBAR_CSS}</style>`;
   return withHeadFirst(content, head) + THEME_BRIDGE_TAG + REVIEW_BRIDGE_TAG;
 }
 
@@ -17076,7 +17076,7 @@ function themedSrcdoc(content) {
 function themeBridge(prefix) {
   addEventListener('message', (e) => {
     if (e.source !== parent || e.data?.type !== `${prefix}tokens`) return;
-    const rule = document.getElementById('cck-tokens')?.sheet?.cssRules[0];
+    const rule = document.getElementById('pk-tokens')?.sheet?.cssRules[0];
     if (!rule) return;
     for (const [k, v] of Object.entries(e.data.tokens)) rule.style.setProperty(k, v);
   });
@@ -17087,7 +17087,7 @@ const THEME_BRIDGE_TAG = `<script>(${themeBridge})(${JSON.stringify(SHOW_MSG)});
 // Runs inside the card as source text, so it must not close over anything outside its own body.
 // Keys and links go through reviewBridge, which the card loads next to this.
 function showBridge(restoreY, textZoom) {
-  const P = 'cck-show:';
+  const P = 'pk-show:';
   const send = (msg) => parent.postMessage({ ...msg, type: P + msg.type }, '*');
   const restore = () => {
     if (restoreY) scrollTo(0, restoreY);

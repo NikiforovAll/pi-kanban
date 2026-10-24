@@ -114,7 +114,7 @@ describe('session pin store', () => {
 
 describe('stamped JSON file', () => {
   const tmp = () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'cck-stamped-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pk-stamped-'));
     return path.join(dir, 'pins.json');
   };
   const atomic = (file, data) => writeFileSync(file, JSON.stringify(data));

@@ -2,13 +2,13 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { createScratchpadDirResolver, scratchpadRoot } = require('../lib/scratchpad-dir');
-const { encodeProjectDirName } = require('../lib/claude-dir');
+const { encodeProjectDirName } = require('../lib/board-dir');
 
 const ROOT = path.resolve('/tmp/claude');
 const PROJECTS = path.resolve('/home/.claude/projects');
 const ID = '64601a65-8a20-45e6-aa35-5211fcfa4350';
 const HUB = path.resolve('/dev/claude-code-hub');
-const SUB = path.join(HUB, 'cck');
+const SUB = path.join(HUB, 'pi-kanban');
 const SUB_WT = path.join(SUB, '.claude', 'worktrees', 'tree-highlight');
 
 const dirFor = (cwd) => path.join(ROOT, encodeProjectDirName(cwd), ID, 'scratchpad');

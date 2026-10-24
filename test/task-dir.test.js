@@ -6,7 +6,7 @@ const path = require('node:path');
 const { readTaskDir } = require('../lib/task-dir');
 
 function makeDir(files) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-task-dir-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-task-dir-'));
   for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
   return dir;
 }
@@ -29,7 +29,7 @@ describe('readTaskDir', () => {
   });
 
   it('gives no tasks for a missing dir', async () => {
-    assert.deepEqual(await readTaskDir(path.join(os.tmpdir(), 'cck-no-such-task-dir')), []);
+    assert.deepEqual(await readTaskDir(path.join(os.tmpdir(), 'pk-no-such-task-dir')), []);
   });
 
   it('throws other read errors', async () => {

@@ -9,7 +9,7 @@ const path = require('node:path');
 const SERVER = path.join(__dirname, '..', 'server.js');
 
 function tempConfigDir(beacon, token) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-cli-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-cli-'));
   if (beacon) {
     fs.mkdirSync(path.join(dir, 'kanban'));
     fs.writeFileSync(path.join(dir, 'kanban', 'server.json'), JSON.stringify(beacon));
@@ -24,8 +24,8 @@ function tempConfigDir(beacon, token) {
 function runCli(args, env) {
   const clean = { ...process.env };
   delete clean.PORT;
-  delete clean.CLAUDE_DIR;
-  delete clean.CCK_URL;
+  delete clean.PI_AGENT_DIR;
+  delete clean.PK_URL;
   return new Promise((resolve) => {
     execFile(process.execPath, [SERVER, ...args], { env: { ...clean, ...env } }, (err, stdout, stderr) => {
       resolve({ code: err ? err.code : 0, stdout, stderr });
@@ -61,7 +61,7 @@ describe('CLI server resolution', () => {
       const dir = tempConfigDir({ port: srv.address().port, pid: child.pid });
       const { code, stderr } = await runCli(['session', 'list'], { PI_CODING_AGENT_DIR: dir });
       assert.equal(code, 1);
-      assert.match(stderr, /Cannot reach cck server for .+cck-cli-.+: its server\.json names a server that is no longer running/);
+      assert.match(stderr, /Cannot reach pi-kanban server for .+pk-cli-.+: its server\.json names a server that is no longer running/);
       assert.deepEqual(hits, []);
     } finally {
       srv.close();
@@ -74,7 +74,7 @@ describe('CLI server resolution', () => {
     assert.match(stderr, /on port 1\b/);
   });
 
-  it('uses CCK_URL before the beacon', async () => {
+  it('uses PK_URL before the beacon', async () => {
     const hits = [];
     const srv = http.createServer((req, res) => {
       hits.push(req.url);
@@ -86,7 +86,7 @@ describe('CLI server resolution', () => {
       const dir = tempConfigDir({ port: 9, pid: 999999999 });
       const { code } = await runCli(['project', 'list', '--json'], {
         PI_CODING_AGENT_DIR: dir,
-        CCK_URL: `http://127.0.0.1:${srv.address().port}/`,
+        PK_URL: `http://127.0.0.1:${srv.address().port}/`,
       });
       assert.equal(code, 0);
       assert.deepEqual(hits, ['/api/projects']);
@@ -114,7 +114,7 @@ describe('CLI server resolution', () => {
       }
       const start = ['dispatch', 'start', '--spec', 'x', '--cwd', dir];
       assert.equal((await runCli(start, { PI_CODING_AGENT_DIR: dir })).code, 0);
-      assert.equal((await runCli(start, { PI_CODING_AGENT_DIR: dir, CCK_URL: `http://127.0.0.1:${pinnedPort}` })).code, 0);
+      assert.equal((await runCli(start, { PI_CODING_AGENT_DIR: dir, PK_URL: `http://127.0.0.1:${pinnedPort}` })).code, 0);
       assert.deepEqual(seen, [{ port: ownerPort, token: 'owner-token' }, { port: pinnedPort, token: 'pinned-token' }]);
     } finally {
       for (const s of boards) s.close();
@@ -182,7 +182,7 @@ describe('CLI server resolution', () => {
 
       const none = await runCli(['dispatch', 'end'], env);
       assert.equal(none.code, 1);
-      assert.match(none.stdout, /Usage: claude-code-kanban dispatch end/);
+      assert.match(none.stdout, /Usage: pi-kanban dispatch end/);
       const both = await runCli(['dispatch', 'end', 'aaaa1111', '--name', 'api-worker'], env);
       assert.equal(both.code, 1);
       assert.match(both.stderr, /Give one of <session id or prefix> or --name/);
@@ -234,7 +234,7 @@ describe('CLI server resolution', () => {
     const dir = tempConfigDir();
     const { code, stderr } = await runCli(['session', 'list'], { PI_CODING_AGENT_DIR: dir, PORT: '1' });
     assert.notEqual(code, 0);
-    assert.match(stderr, /Cannot reach cck server for .+cck-cli-.+ on port 1\b/);
+    assert.match(stderr, /Cannot reach pi-kanban server for .+pk-cli-.+ on port 1\b/);
   });
 });
 
@@ -254,8 +254,8 @@ describe('CLI help', () => {
     assert.match(noun.stdout, /Subcommands:\n\s+list/);
     const leaf = await runCli(['help', 'session', 'search'], env());
     assert.equal(leaf.code, 0);
-    assert.match(leaf.stdout, /Usage: claude-code-kanban session search <text>/);
-    assert.match(leaf.stdout, /Examples:\n\s+claude-code-kanban session search/);
+    assert.match(leaf.stdout, /Usage: pi-kanban session search <text>/);
+    assert.match(leaf.stdout, /Examples:\n\s+pi-kanban session search/);
     const flag = await runCli(['task', 'list', '--help'], env());
     assert.match(flag.stdout, /--status <s>/);
   });
@@ -268,7 +268,7 @@ describe('CLI help', () => {
 
 describe('CLI argument parsing', () => {
   const env = () => ({ PI_CODING_AGENT_DIR: tempConfigDir(), PORT: '1' });
-  const usage = (cmd) => new RegExp(`Usage: claude-code-kanban ${cmd}`);
+  const usage = (cmd) => new RegExp(`Usage: pi-kanban ${cmd}`);
 
   for (const [args, cmd] of [
     [['session', 'search'], 'session search'],
@@ -311,7 +311,7 @@ describe('CLI argument parsing', () => {
     for (const args of [['task', 'list', '--all'], ['project', 'list']]) {
       const { code, stderr } = await runCli(args, env());
       assert.equal(code, 1);
-      assert.match(stderr, /Cannot reach cck server/);
+      assert.match(stderr, /Cannot reach pi-kanban server/);
     }
   });
 

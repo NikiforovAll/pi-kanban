@@ -168,7 +168,7 @@ describe('themedSrcdoc', () => {
     REVIEW_BRIDGE_TAG: '<script>review</script>',
     FRAME_SCROLLBAR_CSS: 'html{bar}',
   });
-  const style = '<style id="cck-tokens">:root{--color-bg:#111}html{bar}</style>';
+  const style = '<style id="pk-tokens">:root{--color-bg:#111}html{bar}</style>';
 
   it('puts only the tokens first in the head, before the page styles', () => {
     const doc = themed('<!doctype html><html><head><meta charset="utf-8"><style>:root{--color-bg:#fff}</style></head><body>b</body></html>');
@@ -198,12 +198,12 @@ describe('themeBridge', () => {
         onMessage = fn;
       },
       Object,
-      document: { getElementById: (id) => (id === 'cck-tokens' ? { sheet: { cssRules: [rule] } } : null) },
+      document: { getElementById: (id) => (id === 'pk-tokens' ? { sheet: { cssRules: [rule] } } : null) },
     });
-    bridge('cck-show:');
-    onMessage({ source: {}, data: { type: 'cck-show:tokens', tokens: { '--color-bg': '#000' } } });
+    bridge('pk-show:');
+    onMessage({ source: {}, data: { type: 'pk-show:tokens', tokens: { '--color-bg': '#000' } } });
     assert.deepEqual(props, {});
-    onMessage({ source: parent, data: { type: 'cck-show:tokens', tokens: { '--color-bg': '#000', '--color-text': '#fff' } } });
+    onMessage({ source: parent, data: { type: 'pk-show:tokens', tokens: { '--color-bg': '#000', '--color-text': '#fff' } } });
     assert.deepEqual(props, { '--color-bg': '#000', '--color-text': '#fff' });
   });
 
@@ -346,7 +346,7 @@ describe('PANE_CLAIMS', () => {
   });
 });
 
-// The gates of the dataviz skill's validate_palette.js, run against every cck theme's surface.
+// The gates of the dataviz skill's validate_palette.js, run against every pi-kanban theme's surface.
 describe('show chart palette', () => {
   const palette = appConst('SHOW_PALETTE');
   const series = { light: palette.light.series, dark: palette.dark.series };
