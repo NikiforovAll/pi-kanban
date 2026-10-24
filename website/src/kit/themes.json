@@ -1,0 +1,34 @@
+[
+  {
+    "id": "pi",
+    "label": "pi",
+    "dark": {
+      "ember": "#6a9fcc",
+      "emberGlow": "#8fb6d8",
+      "emberDim": "rgba(106,159,204,0.25)",
+      "field": "#0d1116",
+      "surface": "#161d27",
+      "elevated": "#212730",
+      "hover": "#252f3d",
+      "border": "#3a424d",
+      "ink1": "#ebe7e4",
+      "ink2": "#d5d8db",
+      "ink3": "#9fa4ab",
+      "inkMuted": "#757d89"
+    },
+    "light": {
+      "ember": "#2f5f8a",
+      "emberGlow": "#1d4870",
+      "emberDim": "rgba(47,95,138,0.18)",
+      "field": "#ebe7e4",
+      "surface": "#f4f1ee",
+      "elevated": "#fbf9f7",
+      "hover": "#d5d1cd",
+      "border": "#cfc9c3",
+      "ink1": "#0d1116",
+      "ink2": "#212730",
+      "ink3": "#495059",
+      "inkMuted": "#757d89"
+    }
+  }
+]

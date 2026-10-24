@@ -1,0 +1,58 @@
+---
+title: Getting started
+description: Install pi-kanban as a pi package, start the board, and see your sessions live.
+---
+
+import Shot from '../../kit/Shot.astro';
+import Lightbox from '../../kit/Lightbox.astro';
+
+pi-kanban shows your pi coding agent sessions in the browser. Each session gets a board with Pending, In Progress and Completed columns, a session log, and a list of its subagents.
+
+<Shot themed="board" alt="The board with the session sidebar and the Pending, In Progress and Completed columns of one session" eager />
+
+## Requirements
+
+- **Node.js 20 or later.**
+- **The pi coding agent.** pi-kanban reads the session files pi writes to `~/.pi/agent/sessions`.
+
+## Install
+
+```sh
+pi install npm:pi-kanban
+```
+
+This adds the `/kanban` command to pi.
+
+## Start the board
+
+Run these inside pi:
+
+```text
+/kanban start
+/kanban open web
+```
+
+The server runs on port 3460. Use pi as usual, and sessions, todos and subagents appear on the board. See the [user guide](../guides/user-guide/) for every `/kanban` command.
+
+:::note[Run it without pi packages]
+`npx pi-kanban` starts the board on its own, outside pi.
+:::
+
+## Fill the board
+
+pi-kanban shows data that other pi packages write. Install them next to it:
+
+```sh
+pi install npm:pi-subagents
+pi install npm:@juicesharp/rpiv-todo
+```
+
+- [`pi-subagents`](https://www.npmjs.com/package/pi-subagents) starts named subagent sessions. The board shows them under each parent session.
+- [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) tracks todos. The board shows them as columns.
+- [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) asks you questions. The board shows them as cards.
+
+## Try it first
+
+The [live demo](../demo/) runs in your browser with sample sessions. No install.
+
+<Lightbox />

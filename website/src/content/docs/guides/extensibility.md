@@ -1,4 +1,7 @@
-# Extensibility
+---
+title: Extensibility
+description: Attach plans with the bind_plan tool, add themes, and let other pi packages feed the board.
+---
 
 pi-kanban exposes a small surface so you can plug your own workflows into it without forking. Today that surface is:
 
@@ -41,7 +44,7 @@ pi-kanban intentionally does not ship a planning extension itself. Pick (or buil
 
 ## Themes
 
-Themes are JSON files declaring 15 design-token colors. Ship your own under `~/.pi/agent/kanban/themes/` and reference it from `~/.pi/agent/kanban/settings.json`. See [Theming](./theming.md) for the full token list, env-var overrides, and authoring guide.
+Themes are JSON files declaring 15 design-token colors. Ship your own under `~/.pi/agent/kanban/themes/` and reference it from `~/.pi/agent/kanban/settings.json`. See [Theming](../../reference/theming/) for the full token list, env-var overrides, and authoring guide.
 
 ## Sessions
 

@@ -11,16 +11,15 @@
     "dev": "node --watch server.js",
     "build:demo": "node scripts/build-demo.js",
     "preview:demo": "npm run build:demo && npx --yes http-server dist -p 8765 -c-1",
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs",
+    "site:dev": "npm --prefix website run dev",
+    "site:build": "npm --prefix website run build",
+    "site:shots": "npm run build:demo && npm --prefix website run shots",
     "release:local": "npm version \"$(git describe --tags --exact-match)\" --no-git-tag-version --allow-same-version && npm publish --access public && git checkout -- package.json package-lock.json",
     "typecheck:extensions": "tsc -p extensions/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^25.9.9",
-    "typescript": "^5.9.3",
-    "vitepress": "^1.6.4"
+    "typescript": "^5.9.3"
   },
   "keywords": [
     "pi-package",

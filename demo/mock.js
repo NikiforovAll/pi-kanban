@@ -14,6 +14,8 @@
   // Default to dark theme on first visit. Users can still toggle via the UI.
   if (!localStorage.getItem('theme')) localStorage.setItem('theme', 'dark');
 
+  if (navigator.serviceWorker) navigator.serviceWorker.register = () => Promise.resolve();
+
   const origFetch = window.fetch.bind(window);
 
   function jsonResponse(body, status = 200) {
@@ -147,6 +149,7 @@
   // Banner so visitors know it's a demo.
   window.addEventListener('DOMContentLoaded', () => {
     const banner = document.createElement('div');
+    banner.id = 'demo-banner';
     banner.textContent = 'DEMO — synthesized data, no live updates';
     banner.style.cssText = [
       'position:fixed', 'bottom:8px', 'right:12px', 'z-index:99999',

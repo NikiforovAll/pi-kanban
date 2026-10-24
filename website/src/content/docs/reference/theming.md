@@ -1,4 +1,7 @@
-# Theming
+---
+title: Theming
+description: Built-in themes, the 15 color tokens, and how to add your own theme.
+---
 
 pi-kanban ships with four built-in themes and supports user-defined themes. Themes are simple JSON files declaring 15 design-token colors; derived `*-dim` / `*-glow` variants are computed automatically.
 

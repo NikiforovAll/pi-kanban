@@ -68,9 +68,6 @@ const appTag = /<script\s+([^>]*\b)?src=["']\/?app\.js["']/;
 if (!appTag.test(html)) throw new Error('could not find <script src="app.js">');
 html = html.replace(appTag, (m) => inject + m);
 
-// Stub service-worker registration (sw.js still ships but won't activate).
-html = html.replace(/navigator\.serviceWorker\.register\([^)]*\)/g, 'Promise.resolve()');
-
 writeFileSafe('index.html', html);
 writeFileSafe('sw.js', '// disabled in static demo\n');
 
