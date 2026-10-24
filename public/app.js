@@ -8149,7 +8149,6 @@ document.addEventListener('keydown', (e) => {
     lastTasksHash = '';
     const refreshes = [fetchSessions()];
     if (currentSessionId) refreshes.push(fetchTasks(currentSessionId));
-    refreshRateLimits();
     Promise.all(refreshes)
       .then(() => showToast('Data refreshed', 'success'))
       .finally(() => {
@@ -10275,7 +10274,6 @@ function setupEventSource() {
 
       if (data.type === 'context-update') {
         debouncedRefresh(data.sessionId, true);
-        if (!skipOffScreen()) refreshRateLimits();
       }
 
       if (data.type === 'preview:open') {
@@ -10342,7 +10340,6 @@ function setupEventSource() {
       await refreshSessionDetail(currentSessionId);
     }
     refreshOpenPlan();
-    refreshRateLimits();
     renderAgentFooter();
   }
   document.addEventListener('visibilitychange', catchUp);
@@ -18152,122 +18149,23 @@ msgContentEl.addEventListener('wheel', function (e) {
   }
 });
 
-const footerState = { version: null, plugin: null, limitsKey: null, timer: null, resetTimer: null };
-function formatResetIn(epochSec) {
-  if (!epochSec) return null;
-  const ms = epochSec * 1000 - Date.now();
-  if (ms <= 0) return 'now';
-  const m = Math.round(ms / 60000);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  const rm = m % 60;
-  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
-  const d = Math.floor(h / 24);
-  const rh = h % 24;
-  return rh ? `${d}d ${rh}h` : `${d}d`;
-}
-function makeLimitCell(label, bucket) {
-  const pct = bucket?.used_percentage;
-  const cell = document.createElement('span');
-  cell.className = 'footer-limit-cell';
-  const reset = formatResetIn(bucket?.resets_at);
-  if (reset) cell.title = `${label}: resets in ${reset}`;
-  cell.append(document.createTextNode(`${label} `));
-  const strong = document.createElement('strong');
-  strong.textContent = pct == null ? '-%' : `${Math.ceil(pct)}%`;
-  cell.appendChild(strong);
-  if (reset) {
-    const r = document.createElement('span');
-    r.className = 'footer-limit-reset';
-    r.textContent = ` (${reset})`;
-    cell.appendChild(r);
-  }
-  return cell;
-}
-function makeLimitSpan(rl) {
-  const span = document.createElement('span');
-  span.className = 'footer-limits';
-  span.append(makeLimitCell('5h', rl?.five_hour), document.createTextNode(' · '), makeLimitCell('7d', rl?.seven_day));
-  return span;
-}
-function renderSidebarFooter(rateLimits) {
+const footerState = { version: null };
+function renderSidebarFooter() {
   const el = document.getElementById('sidebar-footer');
   if (!el) return;
-  footerState.rl = rateLimits;
-  const fh = rateLimits?.five_hour?.used_percentage ?? null;
-  const sd = rateLimits?.seven_day?.used_percentage ?? null;
   const children = [];
   if (footerState.version) {
     const v = document.createElement('span');
     v.className = 'footer-version';
     if (kanbotAvailable()) v.append(kanbotButton());
     v.append(`v${footerState.version}`);
-    const warn = pluginWarning(footerState.plugin);
-    if (warn) v.append(warn);
     children.push(v);
   }
-  if (fh != null || sd != null) children.push(makeLimitSpan(rateLimits));
   el.replaceChildren(...children);
-}
-function pluginWarning(plugin) {
-  const problem =
-    plugin &&
-    {
-      missing: 'The claude-code-kanban plugin is not installed',
-      disabled: `The claude-code-kanban plugin ${plugin.installed} is disabled`,
-      mismatch: `Plugin ${plugin.installed} is installed, this board ships ${plugin.bundled}`,
-    }[plugin.state];
-  if (!problem) return null;
-  const fix =
-    plugin.state === 'disabled'
-      ? 'Enable it with /plugin in Claude Code.'
-      : `Click to copy: ${plugin.installCommand}\nThen restart open sessions, they keep the old hooks.`;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'footer-plugin-warning';
-  btn.textContent = '⚠';
-  btn.title = `${problem} (${plugin.configDir}).\n${fix}`;
-  btn.setAttribute('aria-label', problem);
-  if (plugin.state !== 'disabled') {
-    btn.addEventListener('click', () => copyText(plugin.installCommand, 'install command'));
-  }
-  return btn;
-}
-
-function refreshRateLimits() {
-  if (footerState.timer) return;
-  footerState.timer = setTimeout(() => {
-    footerState.timer = null;
-    // The route answers null when no session has reported limits, so failure needs its own value.
-    getJson('/api/rate-limits', false).then((rl) => {
-      if (rl === false) return;
-      scheduleRateLimitReset(rl);
-      const fh = rl?.five_hour?.used_percentage ?? null;
-      const sd = rl?.seven_day?.used_percentage ?? null;
-      const key = `${fh}|${sd}`;
-      if (key === footerState.limitsKey) return;
-      footerState.limitsKey = key;
-      renderSidebarFooter(rl);
-    });
-  }, 1500);
-}
-
-// No context-update comes when a window resets on an idle board, so refetch at the earliest reset.
-function scheduleRateLimitReset(rl) {
-  clearTimeout(footerState.resetTimer);
-  footerState.resetTimer = null;
-  const resets = Object.values(rl || {})
-    .map((b) => b?.resets_at)
-    .filter((s) => s > 0);
-  if (!resets.length) return;
-  const ms = Math.min(...resets) * 1000 - Date.now() + 1000;
-  footerState.resetTimer = setTimeout(refreshRateLimits, Math.min(Math.max(ms, 0), 2 ** 31 - 1));
 }
 getJson('/api/version', {}).then((d) => {
   footerState.version = d.version;
-  footerState.plugin = d.plugin ?? null;
-  renderSidebarFooter(null);
-  refreshRateLimits();
+  renderSidebarFooter();
 });
 
 const urlState = getUrlState();
@@ -18297,7 +18195,7 @@ if (urlState.search) {
 getJson('/api/config')
   .then((c) => {
     if (c) appConfig = c;
-    if (appConfig.kanbot && footerState.version) renderSidebarFooter(footerState.rl);
+    if (appConfig.kanbot && footerState.version) renderSidebarFooter();
   })
   .then(restorePendingSessions)
   .then(() =>

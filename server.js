@@ -16,7 +16,6 @@ const { isContained, realpathDeepest } = require('./lib/contain');
 const { resolveScratchSubdir, listScratchDir } = require('./lib/scratch-files');
 const { fileUrlToPath } = require('./lib/file-url');
 const { httpError: previewError } = require('./lib/http-error');
-const { pluginStatus } = require('./lib/plugin-status');
 const { getAutoCompact } = require('./lib/auto-compact');
 
 const {
@@ -48,7 +47,6 @@ const { buildDecision, decisionFileName, isDecisionFile, approvalsFrom, boardRef
 const { getClaudeDir, getArgValue, storageNamespace, isDefaultClaudeDir } = require('./lib/claude-dir');
 const { readTerminalConfig } = require('./lib/terminal');
 const { createTerminalClient } = require('./lib/terminal-client');
-const { kanbotOn, kanbotModel, createKanbot, findCostCli, readCostServer } = require('./lib/kanbot');
 const { AGENT_ID_RE } = require('./cli');
 const { createShowStore, mountShowRoutes, showBodyParser, SHOW_PATH } = require('./lib/show');
 const { createAskStore, mountAskRoutes, askBodyParser, ASK_PATH } = require('./lib/ask');
@@ -57,10 +55,8 @@ const { createProcStats } = require('./lib/proc-stats');
 const { createUserGroupStore } = require('./lib/user-groups');
 const { createSessionPinStore } = require('./lib/session-pins');
 const { stampedJsonFile } = require('./lib/stamped-json-file');
-const { ownerLinks, moveRecipients } = require('./lib/owner-routing');
 const { parseReviewSource, parseActionBody, formatActionMarkdown } = require('./lib/preview-action');
 const { createDispatchedStore, scanTranscripts, pruneSessionDirs, pruneContextStatus, pruneTaskMaps, retentionMs } = require('./lib/retention');
-const { freshRateLimits } = require('./lib/rate-limits');
 const { createWorktreeStore } = require('./lib/worktrees');
 const { createScratchpadDirResolver, scratchpadRoot } = require('./lib/scratchpad-dir');
 const { readSettings } = require('./lib/claude-settings');
@@ -76,13 +72,7 @@ const { foldAgentLines } = require('./lib/agent-log');
 const { projectMatcher, normalizeProjectPath, sessionProjectKey } = require('./public/project-match');
 const { getParentVerdict, setParentVerdict } = require('./lib/parent-cache');
 
-if (process.argv.includes("--install") || process.argv.includes("--uninstall")) {
-  const { runInstall, runUninstall } = require("./install");
-  const yes = process.argv.includes("--yes");
-  (process.argv.includes("--install") ? runInstall({ yes }) : runUninstall())
-    .then(() => process.exit(0))
-    .catch(e => { console.error(e.message); process.exit(1); });
-} else if (!require("./cli").runCli(process.argv)) {
+if (!require("./cli").runCli(process.argv)) {
   startServer();
 }
 
@@ -311,17 +301,6 @@ function boardEventsEnabled() {
   return cachedByMtime(cckConfigCache, 'boardEvents', CCK_CONFIG_FILE,
     () => boardEventsOn(readCckConfig()), boardEventsOn(null));
 }
-function kanbotEnabled() {
-  return cachedByMtime(cckConfigCache, 'kanbot', CCK_CONFIG_FILE,
-    () => kanbotOn(readCckConfig()), kanbotOn(null));
-}
-function kanbotModelSetting() {
-  return cachedByMtime(cckConfigCache, 'kanbotModel', CCK_CONFIG_FILE,
-    () => kanbotModel(readCckConfig()), kanbotModel(null));
-}
-// Kanbot's transcripts all land in one project folder, which the board never lists (docs/kanbot.md).
-const kanbot = createKanbot({ cckDir: CCK_DIR, projectsDir: PROJECTS_DIR });
-
 // approvals.json predates config.json (and was opt-in). Fold it into
 // config.json once so an existing opt-in keeps its tuning, then drop it.
 function migrateLegacyApprovalsConfig() {
@@ -940,7 +919,7 @@ function loadSessionMetadata() {
     }
 
     const projectDirs = readdirSync(PROJECTS_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory() && !kanbot.isOwnProjectDirName(d.name));
+      .filter(d => d.isDirectory());
 
     for (const projectDir of projectDirs) {
       const projectPath = path.join(PROJECTS_DIR, projectDir.name);
@@ -1531,8 +1510,6 @@ app.get('/api/sessions', async (req, res) => {
       } catch (_) {}
     }
 
-    // Task dirs and agent-activity name Kanbot's sessions too.
-    for (const sid of sessionsMap.keys()) if (kanbot.isOwnSession(sid)) sessionsMap.delete(sid);
 
     // Correlate plan sessions with their implementation sessions (same slug)
     const slugGroups = new Map();
@@ -1698,7 +1675,7 @@ app.get('/api/sessions/known', (_req, res) => {
       known.set(id, { id, project: meta.project || null, name: getSessionDisplayName(id, meta) });
     }
     const add = (id, project = null) => {
-      if (!known.has(id) && !kanbot.isOwnSession(id)) known.set(id, { id, project, name: null });
+      if (!known.has(id)) known.set(id, { id, project, name: null });
     };
     for (const dir of [TASKS_DIR, AGENT_ACTIVITY_DIR]) {
       if (!existsSync(dir)) continue;
@@ -1760,23 +1737,6 @@ app.get('/api/projects', (_req, res) => {
   res.json(projects);
 });
 
-const ownerRoutingInputs = () => ({
-  dispatched,
-  listToSessions: loadAllTaskMaps().listToSessions,
-  metadata: loadSessionMetadata,
-});
-
-// API: Get tasks for a session
-function addOwnerSessions(tasks, listIdOf) {
-  const lists = new Set(tasks.filter((t) => t.owner).map(listIdOf));
-  if (!lists.size) return;
-  const linkOf = ownerLinks(lists, ownerRoutingInputs());
-  for (const t of tasks) {
-    const id = t.owner && linkOf(listIdOf(t), t.owner);
-    if (id) t.ownerSessionId = id;
-  }
-}
-
 app.get('/api/sessions/:sessionId', async (req, res) => {
   try {
     // A session that never used the board has no task dir. That is the common case and
@@ -1785,7 +1745,6 @@ app.get('/api/sessions/:sessionId', async (req, res) => {
 
     // Sort by ID (numeric)
     tasks.sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10));
-    addOwnerSessions(tasks, () => req.params.sessionId);
 
     res.json(tasks);
   } catch (error) {
@@ -1816,7 +1775,6 @@ app.get('/api/projects/:encodedPath/tasks', async (req, res) => {
       }
     }
     tasks.sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10));
-    addOwnerSessions(tasks, (t) => t._taskDir);
     res.json(tasks);
   } catch (error) {
     console.error('Error getting project tasks:', error);
@@ -3272,7 +3230,7 @@ app.get('/api/sessions/:sessionId/cached-image/:n', (req, res) => {
 // #region META_ROUTES
 app.get('/api/version', (_req, res) => {
   const pkg = require('./package.json');
-  res.json({ version: pkg.version, plugin: pluginStatus(CLAUDE_DIR) });
+  res.json({ version: pkg.version });
 });
 
 app.get('/api/config', (_req, res) => {
@@ -3282,7 +3240,6 @@ app.get('/api/config', (_req, res) => {
     memoryUrl: MEMORY_URL,
     scratchAvailable: !!whichSync('scratch'),
     terminal: terminal.clientConfig(),
-    kanbot: kanbotEnabled(),
   });
 });
 
@@ -3304,7 +3261,7 @@ function resolveSessionFolder(id) {
   }
   try {
     for (const dir of readdirSync(PROJECTS_DIR, { withFileTypes: true })) {
-      if (!dir.isDirectory() || kanbot.isOwnProjectDirName(dir.name)) continue;
+      if (!dir.isDirectory()) continue;
       const jsonlPath = path.join(PROJECTS_DIR, dir.name, `${id}.jsonl`);
       if (!existsSync(jsonlPath)) continue;
       let indexProject = null;
@@ -3420,7 +3377,6 @@ app.get('/api/terminals', terminalRoute(async (_req, res) => {
   const sessions = await terminal.sessions();
   res.json({
     sessions: sessions.map((t) => {
-      if (t.id === kanbot.ptyId) return { ...t, kanbot: true };
       const marker = dispatched.get(t.id);
       return marker ? { ...t, dispatched: { parent: marker.parent || null } } : t;
     }),
@@ -3542,46 +3498,6 @@ app.get('/api/dispatch', (req, res) => {
   const parent = typeof req.query.parent === 'string' && req.query.parent ? req.query.parent : null;
   res.json({ running: dispatched.running(terminal.isRunning, { parent }) });
 });
-// #endregion
-
-// #region KANBOT
-function kanbotRoute(fn) {
-  return terminalRoute(async (req, res) => {
-    if (!kanbotEnabled()) return res.status(404).json({ error: 'kanbot is turned off in .cck/config.json' });
-    return fn(req, res);
-  });
-}
-
-const kanbotState = () => ({ ptyId: kanbot.ptyId, sessionId: kanbot.sessionId });
-
-// After /exit the PTY lives on as a plain shell, so it is ended and the chat resumed in a new one.
-async function ensureKanbot() {
-  if (kanbot.ptyId && terminal.isRunning(kanbot.ptyId)) {
-    const row = (await terminal.sessions()).find((t) => t.id === kanbot.ptyId);
-    if (row && !row.claudeExited) return null;
-    if (row) await terminal.end(kanbot.ptyId, terminal.token);
-  }
-  const started = await terminal.startNew(kanbot.startSpec({
-    model: kanbotModelSetting(),
-    boardUrl: `http://127.0.0.1:${boardPort}`,
-    costCli: findCostCli({ claudeDir: CLAUDE_DIR, which: whichSync }),
-  }));
-  if (started.error) return started;
-  kanbot.ptyId = started.id;
-  kanbot.own(started.id);
-  return null;
-}
-
-// Two opens at once would start two claude processes on the same transcript.
-let kanbotStarting = null;
-
-app.post('/api/kanbot/start', kanbotRoute(async (req, res) => {
-  if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
-  kanbotStarting ||= ensureKanbot().finally(() => { kanbotStarting = null; });
-  const failed = await kanbotStarting;
-  if (failed) return res.status(failed.status).json({ error: failed.error });
-  res.json(kanbotState());
-}));
 // #endregion
 
 // #region TASK_ROUTES
@@ -3712,9 +3628,7 @@ app.put('/api/tasks/:sessionId/:taskId', async (req, res) => {
       // not a session id -- and the doorbell polls with its own session id, so an unresolved
       // name would queue the line where nobody drains it.
       const line = formatTaskMoved(taskId, prevStatus, task);
-      const recipients =
-        moveRecipients(sessionId, task.owner, ownerRoutingInputs()) ?? resolveSessionsForTaskDir(sessionId);
-      for (const sid of recipients) enqueueSessionEvent(sid, line);
+      for (const sid of resolveSessionsForTaskDir(sessionId)) enqueueSessionEvent(sid, line);
     }
 
     res.json({ success: true, task });
@@ -4036,7 +3950,7 @@ app.post('/api/session/cost', (req, res) => {
   }
   broadcast({ type: 'session:cost', id, ...(agent && { agent }) });
   const query = new URLSearchParams({ view: 'detail', session: id, ...(agent && { agent }) });
-  const costUrl = COST_URL || readCostServer(CLAUDE_DIR)?.url;
+  const costUrl = COST_URL;
   // A page opens the Cost tab only under the hub.
   res.json({ delivered: process.env.CLAUDE_HUB ? clients.size : 0, url: costUrl ? `${new URL(`?${query}`, costUrl)}` : null });
 });
@@ -4564,10 +4478,6 @@ app.get('/api/context-status', (_req, res) => {
   res.json(Object.fromEntries(contextStatusCache));
 });
 
-app.get('/api/rate-limits', (_req, res) => {
-  res.json(freshRateLimits(contextStatusCache.values(), Date.now() / 1000));
-});
-
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -4665,7 +4575,6 @@ const projectsWatcher = chokidar.watch(PROJECTS_DIR, {
 
 projectsWatcher.on('all', (event, filePath) => {
   if (event !== 'add' && event !== 'change' && event !== 'unlink') return;
-  if (kanbot.isOwnPath(filePath)) return kanbot.onTranscript(filePath, event);
   if (filePath.endsWith('.jsonl')) {
     if (event === 'unlink') {
       loopInfoStateByPath.delete(filePath);

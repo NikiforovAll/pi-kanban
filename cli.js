@@ -380,7 +380,7 @@ const COMMANDS = {
     summary: 'Read the terminals running in cck',
     verbs: {
       list: {
-        summary: 'List every terminal in cck: dispatched, opened by hand, and Kanbot',
+        summary: 'List every terminal in cck: dispatched and opened by hand',
         usage: 'claude-code-kanban terminal list [--json]',
         flags: {
           '--json': 'Output JSON',
@@ -1174,7 +1174,6 @@ async function runSessionViewCli(args) {
     return 1;
   }
   const asJson = args.includes('--json');
-  const rateLimits = asJson ? null : cliGetJson('/api/rate-limits', 'Rate limits').catch(() => ({}));
   const resolved = await resolveSessionByIdOrPrefix(idArg);
   if (!resolved) return 1;
   let list;
@@ -1217,11 +1216,6 @@ async function runSessionViewCli(args) {
       ? ` · ${cost.total_api_duration_ms != null ? formatAge(cost.total_api_duration_ms) : '-'} api / ${formatAge(cost.total_duration_ms)} total · +${cost.total_lines_added || 0}/-${cost.total_lines_removed || 0}`
       : '';
     lines.push(`  Cost: ${fmtCost(cost.total_cost_usd)}${timing}`);
-  }
-  // Account-wide, so not read from this session's file, which can be days old.
-  const rl = await rateLimits;
-  if (rl.five_hour || rl.seven_day) {
-    lines.push(`  Limits: 5h ${rl.five_hour?.used_percentage ?? '-'}% · 7d ${rl.seven_day?.used_percentage ?? '-'}%`);
   }
   if (s.jsonlPath) lines.push(`  Transcript: ${s.jsonlPath}`);
   console.log(lines.join('\n'));
@@ -1518,7 +1512,6 @@ async function runDispatchEndCli(args) {
 }
 
 function terminalKind(t, self) {
-  if (t.kanbot) return 'kanbot';
   if (t.dispatched) return self && t.dispatched.parent === self ? 'dispatch (yours)' : 'dispatch';
   return t.mode === 'shell' ? 'shell' : 'claude';
 }

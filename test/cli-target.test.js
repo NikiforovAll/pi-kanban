@@ -195,7 +195,7 @@ describe('CLI server resolution', () => {
   it('terminal list shows every terminal, newest first, and hints at dispatch end for its own', async () => {
     const self = '11111111-1111-4111-8111-111111111111';
     const sessions = [
-      { id: 'aaaa1111-0000-4000-8000-000000000001', mode: 'resume', cwd: 'C:/a', startedAt: Date.now() - 60000, kanbot: true },
+      { id: 'aaaa1111-0000-4000-8000-000000000001', mode: 'resume', cwd: 'C:/a', startedAt: Date.now() - 60000 },
       { id: 'aaaa2222-0000-4000-8000-000000000002', mode: 'new', cwd: 'C:/b', name: 'api-worker', startedAt: Date.now() - 1000, dispatched: { parent: self } },
       { id: 'aaaa3333-0000-4000-8000-000000000003', mode: 'new', cwd: 'C:/c', startedAt: Date.now() - 5000, dispatched: { parent: null } },
       { id: 'aaaa4444-0000-4000-8000-000000000004', mode: 'shell', cwd: 'C:/d', startedAt: Date.now() - 9000 },
@@ -216,7 +216,7 @@ describe('CLI server resolution', () => {
       assert.match(lines[1], /^aaaa2222-\S+\s+\S+\s+dispatch \(yours\)\s+api-worker\s+C:\/b$/);
       assert.match(lines[2], /^aaaa3333-\S+\s+\S+\s+dispatch\s+-\s+C:\/c$/);
       assert.match(lines[3], /^aaaa4444-\S+\s+\S+\s+shell\s+/);
-      assert.match(lines[4], /^aaaa1111-\S+\s+\S+\s+kanbot\s+/);
+      assert.match(lines[4], /^aaaa1111-\S+\s+\S+\s+claude\s+/);
       assert.match(mine.stdout, /dispatch end <session>/);
 
       const other = await runCli(['terminal', 'list'], { CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_SESSION_ID: '' });
