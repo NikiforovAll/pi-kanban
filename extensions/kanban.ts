@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const extDir = fileURLToPath(new URL('.', import.meta.url));
 
@@ -21,7 +21,7 @@ let child: ChildProcess | null = null;
 let lastStderr = "";
 const port = 3460;
 
-const KANBAN_DIR = joinPath(homedir(), ".pi", "agent", "kanban");
+const KANBAN_DIR = joinPath(getAgentDir(), "kanban");
 const SETTINGS_PATH = joinPath(KANBAN_DIR, "settings.json");
 const DEFAULT_THEME_DIR = joinPath(KANBAN_DIR, "themes");
 

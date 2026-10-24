@@ -10,6 +10,7 @@ const chokidar = require('chokidar');
 const open = require('open').default || require('open');
 const parsers = require('./lib/pi-parsers');
 const taskStore = require('./lib/task-store');
+const { getAgentDir } = require('./lib/agent-dir');
 const pkg = require('./package.json');
 
 function sendWithETag(req, res, data) {
@@ -63,7 +64,7 @@ const shouldOpen = args.includes('--open');
 
 const BUILTIN_THEME_DIR = path.join(__dirname, 'themes');
 const USER_THEME_DIR = process.env.KANBAN_THEME_DIR
-  || path.join(os.homedir(), '.pi', 'agent', 'kanban', 'themes');
+  || path.join(getAgentDir(), 'kanban', 'themes');
 const LIGHT_THEME_ID = process.env.KANBAN_LIGHT_THEME || 'pi-light';
 const DARK_THEME_ID = process.env.KANBAN_DARK_THEME || 'pi-dark';
 
