@@ -549,6 +549,15 @@ function fuzzyMatch(text, query) {
   return false;
 }
 
+const SESSION_SEARCH_FIELDS = ['name', 'id', 'project', 'firstPrompt'];
+const SIDEBAR_SEARCH_FIELDS = [...SESSION_SEARCH_FIELDS, 'description'];
+const PICKER_SEARCH_FIELDS = [...SESSION_SEARCH_FIELDS, 'gitBranch'];
+const TASK_SEARCH_FIELDS = ['subject', 'description', 'activeForm'];
+
+function matchesAnyField(obj, fields, query) {
+  return fields.some((f) => fuzzyMatch(obj[f], query));
+}
+
 //#endregion
 
 //#region SESSION_ACTIVITY
@@ -3844,20 +3853,11 @@ function getFilteredSessions() {
   if (searchQuery) {
     const taskMatchIds = new Set();
     for (const t of allTasksCache) {
-      if (
-        (t.subject && fuzzyMatch(t.subject, searchQuery)) ||
-        (t.description && fuzzyMatch(t.description, searchQuery)) ||
-        (t.activeForm && fuzzyMatch(t.activeForm, searchQuery))
-      )
-        taskMatchIds.add(t.sessionId);
+      if (matchesAnyField(t, TASK_SEARCH_FIELDS, searchQuery)) taskMatchIds.add(t.sessionId);
     }
     const groupMatchIds = sgSearchMatchIds(searchQuery);
     const matchesSearch = (s) =>
-      (s.name && fuzzyMatch(s.name, searchQuery)) ||
-      (s.id && fuzzyMatch(s.id, searchQuery)) ||
-      (s.project && fuzzyMatch(s.project, searchQuery)) ||
-      (s.description && fuzzyMatch(s.description, searchQuery)) ||
-      (s.firstPrompt && fuzzyMatch(s.firstPrompt, searchQuery)) ||
+      matchesAnyField(s, SIDEBAR_SEARCH_FIELDS, searchQuery) ||
       taskMatchIds.has(s.id) ||
       groupMatchIds.has(s.id);
 
@@ -4034,8 +4034,6 @@ function renderSessions() {
               <span class="session-indicators">
                 ${isTeam ? `<span class="team-badge" title="${memberCount} team members"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>${memberCount}</span>` : ''}
                 ${isTeam || session.project || showCtx ? `<span class="team-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="View session info"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>` : ''}
-                ${renderWorkflowBadge(session)}
-                ${renderLoopBadge(session)}
                 ${hasScratchpad ? `<span class="scratchpad-badge${padEmoji ? ' has-emoji' : ''}" onclick="event.stopPropagation(); openSessionScratchpad('${sid}')" title="Open scratchpad">${padEmoji ? escapeHtml(padEmoji) : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`}</span>` : ''}
                 ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${sid}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}">${BOOKMARK_SVG}${bookmarksCount}</span>` : ''}
                 ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
@@ -4121,13 +4119,11 @@ function renderSessions() {
         ${renderArtifactsHtml(zenSession.id)}
         ${renderZenBookmarksHtml(zenSession.id)}
       </div>
-      ${zenSession.hasWorkflow ? renderWorkflowLiveHtml(zenSession.id) : ''}
       <div class="zen-agents"></div>`;
     renderZenAgents(visibleAgents());
     bindLinkedDocsHandlers(sessionsList.querySelector('.linked-docs-section'), zenSession.id);
     artifactsSection.load(zenSession.id);
     scratchFilesSection.load(zenSession.id);
-    if (zenSession.hasWorkflow) pollWorkflowLive(zenSession.id);
     restoreSessionCursor();
     return;
   }
@@ -7737,8 +7733,6 @@ const MODAL_ESC_PRIORITY = [
   'msg-detail-modal',
   'tool-stats-modal',
   'plan-modal',
-  'loop-modal',
-  'workflow-modal',
 ];
 const MODAL_CLOSERS = {
   'preview-modal': () => closePreviewModal(),
@@ -7748,8 +7742,6 @@ const MODAL_CLOSERS = {
   },
   'tool-stats-modal': () => closeToolStatsModal(),
   'plan-modal': () => closePlanModal(),
-  'loop-modal': () => closeLoopModal(),
-  'workflow-modal': () => closeWorkflowModal(),
   'team-modal': () => closeTeamModal(),
   'agent-modal': () => closeAgentModal(),
   'help-modal': () => closeHelpModal(),
@@ -9852,81 +9844,6 @@ const artifactsSection = makeSectionLoader({
   pick: (data) => data.artifacts || [],
   innerHtml: (sessionId) => artifactsInnerHtml(sessionId),
 });
-
-// The server decides liveness (a run has no terminal journal entry) and answers with
-// nothing once the workflow finishes, so the section empties itself and disappears.
-const workflowLiveSection = makeSectionLoader({
-  attr: 'data-workflow-live-for',
-  endpoint: 'workflow-live',
-  pick: (data) => (data.workflow ? [data.workflow] : []),
-  innerHtml: (sessionId) => workflowLiveInnerHtml(sessionId),
-  // The agent hooks re-render the sidebar on every subagent start and stop, so the TTL is
-  // what keeps that burst down to one ask per run step.
-  ttlMs: 4000,
-});
-
-function workflowLiveInnerHtml(sessionId) {
-  const run = workflowLiveSection.get(sessionId)[0];
-  if (!run) return '';
-  const pct = run.startedCount ? Math.round((run.doneCount / run.startedCount) * 100) : 0;
-  const phases = (run.phases || [])
-    .map((p) => {
-      const state = p.started === 0 ? 'pending' : p.done >= p.started ? 'done' : 'running';
-      const count = p.started ? `${p.done}/${p.started}` : '';
-      return `<span class="wf-live-phase ${escapeHtml(state)}">
-        <span class="wf-live-phase-title">${escapeHtml(p.title)}</span>
-        <span class="wf-live-phase-count">${count}</span>
-      </span>`;
-    })
-    .join('');
-  const running = run.running?.length
-    ? `<div class="wf-live-running" title="${escapeHtml(run.running.join(', '))}">${escapeHtml(run.running.join(' · '))}</div>`
-    : '';
-  return `<div class="panel-section-header">
-      ${WORKFLOW_GEAR_SVG}
-      <span>Workflow</span>
-      <span class="panel-section-count">${run.doneCount}/${run.startedCount} agents</span>
-    </div>
-    <div class="wf-live" onclick="showWorkflowModal('${escAttrJs(sessionId)}')" title="Open workflow run">
-      <div class="wf-live-name"><span class="pulse"></span>${escapeHtml(run.name || run.id)}</div>
-      <div class="progress-bar wf-live-bar"><div class="progress-fill" style="width: ${pct}%"></div></div>
-      ${phases ? `<div class="wf-live-phases">${phases}</div>` : ''}
-      ${running}
-    </div>`;
-}
-
-function renderWorkflowLiveHtml(sessionId) {
-  return `<div class="workflow-live-section" data-workflow-live-for="${escapeHtml(sessionId)}">${workflowLiveInnerHtml(sessionId)}</div>`;
-}
-
-// Every agent start and stop already re-renders the sidebar through the agent-activity
-// feed, which is what keeps the card current. The timer is the fallback for a config dir
-// with no pi-kanban hooks installed: there the last agent's result reaches nobody, and the card
-// would sit on a finished run until the next render. Slow on purpose — the hooked case
-// never waits for it. The generation guard drops a chain left mid-fetch by an earlier
-// render, so renders can't stack up chains.
-const WORKFLOW_LIVE_POLL_MS = 30000;
-let workflowLivePoll = null;
-let workflowLivePollFor = null;
-
-function pollWorkflowLive(sessionId) {
-  workflowLiveSection.load(sessionId);
-  // A render must not restart the timer: renders arrive far faster than the interval, and
-  // each restart would push the fallback tick back out of reach, leaving a finished run on
-  // screen forever in a config dir with no hooks.
-  if (workflowLivePoll && workflowLivePollFor === sessionId) return;
-  clearTimeout(workflowLivePoll);
-  workflowLivePollFor = sessionId;
-  const tick = async () => {
-    workflowLivePoll = null;
-    if (workflowLivePollFor !== sessionId) return;
-    if (!document.querySelector(`[data-workflow-live-for="${CSS.escape(sessionId)}"]`)) return;
-    await workflowLiveSection.load(sessionId);
-    if (workflowLivePollFor !== sessionId || !workflowLiveSection.get(sessionId).length) return;
-    workflowLivePoll = setTimeout(tick, WORKFLOW_LIVE_POLL_MS);
-  };
-  workflowLivePoll = setTimeout(tick, WORKFLOW_LIVE_POLL_MS);
-}
 
 const SCRATCH_FILES_COLLAPSED = 3;
 // Unlike the artifacts scan the server caches nothing here, so a TTL is what stops the
@@ -12516,16 +12433,6 @@ async function spLoadPeek() {
   spRenderPeek(session, messages, `last ${messages.length} entries`);
 }
 
-function spMatches(session, query) {
-  return (
-    fuzzyMatch(session.name, query) ||
-    fuzzyMatch(session.id, query) ||
-    fuzzyMatch(session.project, query) ||
-    fuzzyMatch(session.gitBranch, query) ||
-    fuzzyMatch(session.firstPrompt, query)
-  );
-}
-
 // Spelled out rather than interpolated so the class never comes from a variable.
 const SP_STATES = {
   waiting: '<span class="sp-state waiting">',
@@ -12567,7 +12474,7 @@ function renderSessionPicker() {
   spRenderedQuery = renderKey;
   const all = spScope === 'all';
   const board = new Set(spSource.map((s) => s.id));
-  const local = (all ? spRecent.rows : spSource).filter((s) => spMatches(s, query));
+  const local = (all ? spRecent.rows : spSource).filter((s) => matchesAnyField(s, PICKER_SEARCH_FIELDS, query));
   const found = spSearch.rows(query, local);
   const tail = !all && !query ? spRecent.rows.filter((s) => !board.has(s.id)).slice(0, SP_RECENT_TAIL) : [];
   const extra = [...found.rows, ...tail];
@@ -12801,187 +12708,6 @@ function refreshOpenPlan() {
   });
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function showLoopModal(sessionId) {
-  const body = document.getElementById('loop-modal-body');
-  body.innerHTML = '<div class="modal-status">Loading…</div>';
-  document.getElementById('loop-modal').classList.add('visible');
-  getJson(apiPath`/api/sessions/${sessionId}/loop`, { wakeups: [], crons: [] }).then(renderLoopModalBody);
-}
-
-function fmtLoopDelay(s) {
-  if (s == null) return '';
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${(s / 3600).toFixed(1)}h`;
-}
-
-function fmtLoopFireTime(timestamp, delaySeconds) {
-  if (!timestamp || delaySeconds == null) return { abs: '', rel: '', status: '' };
-  const fireMs = new Date(timestamp).getTime() + delaySeconds * 1000;
-  const fireDate = new Date(fireMs);
-  const diff = fireMs - Date.now();
-  const abs = fireDate.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-  const absSec = Math.abs(Math.round(diff / 1000));
-  const rel =
-    absSec < 60 ? `${absSec}s` : absSec < 3600 ? `${Math.round(absSec / 60)}m` : `${(absSec / 3600).toFixed(1)}h`;
-  if (diff > 0) return { abs, rel: `in ${rel}`, status: 'pending' };
-  return { abs, rel: `${rel} ago`, status: 'fired' };
-}
-
-const LOOP_CLOCK_SVG =
-  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
-const LOOP_CRON_SVG =
-  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>';
-
-function loopField(label, value, mono = false) {
-  if (!value) return '';
-  const inner = mono ? `<code>${escapeHtml(value)}</code>` : escapeHtml(value);
-  return `<div class="loop-field"><div class="loop-field-label">${label}</div><div class="loop-field-val">${inner}</div></div>`;
-}
-
-function renderLoopRow(item, kind) {
-  const when = item.timestamp ? formatDate(item.timestamp) : '';
-  let headline = '';
-  let footer = '';
-  let fields = '';
-  if (kind === 'wakeup') {
-    const fire = fmtLoopFireTime(item.timestamp, item.delaySeconds);
-    const delayLbl = item.delaySeconds != null ? `delay ${fmtLoopDelay(item.delaySeconds)}` : '';
-    if (fire.abs) {
-      headline = `<div class="loop-headline loop-fire-${fire.status}">${LOOP_CLOCK_SVG}<span class="loop-headline-rel">${fire.status === 'pending' ? 'Fires' : 'Fired'} ${escapeHtml(fire.rel)}</span><span class="loop-headline-abs">${escapeHtml(fire.abs)}</span></div>`;
-    }
-    fields = loopField('Reason', item.reason) + loopField('Prompt', item.prompt, true);
-    footer = `<div class="loop-foot">scheduled ${escapeHtml(when)}${delayLbl ? ` · ${delayLbl}` : ''}</div>`;
-  } else {
-    if (item.cron) {
-      headline = `<div class="loop-headline">${LOOP_CRON_SVG}<span class="loop-headline-rel"><code>${escapeHtml(item.cron)}</code></span></div>`;
-    }
-    fields = loopField('Description', item.description) + loopField('Prompt', item.prompt, true);
-    footer = `<div class="loop-foot">created ${escapeHtml(when)}</div>`;
-  }
-  return `<div class="loop-row">${headline}${fields}${footer}</div>`;
-}
-
-function renderLoopModalBody(data) {
-  const body = document.getElementById('loop-modal-body');
-  const wakeups = data.wakeups || [];
-  const crons = data.crons || [];
-  if (!wakeups.length && !crons.length) {
-    body.innerHTML = '<div class="modal-empty">No scheduled wakeups or cron jobs.</div>';
-    return;
-  }
-  const section = (title, items, kind) =>
-    items.length
-      ? `<h4 class="loop-section-title">${title} <span class="loop-count">${items.length}</span></h4>${items.map((i) => renderLoopRow(i, kind)).join('')}`
-      : '';
-  body.innerHTML = section('Wakeups', wakeups, 'wakeup') + section('Cron jobs', crons, 'cron');
-}
-
-function renderLoopBadge(session) {
-  const li = session.loopInfo;
-  const total = (li?.wakeupCount || 0) + (li?.cronCount || 0);
-  if (total === 0) return '';
-  let tip = `${li.wakeupCount} wakeup${li.wakeupCount === 1 ? '' : 's'}, ${li.cronCount} cron${li.cronCount === 1 ? '' : 's'}`;
-  if (li.latest?.timestamp && li.latest.delaySeconds != null) {
-    const f = fmtLoopFireTime(li.latest.timestamp, li.latest.delaySeconds);
-    if (f.abs) tip += ` — latest ${f.status === 'pending' ? 'fires' : 'fired'} ${f.rel} (${f.abs})`;
-  }
-  return `<span class="loop-badge" onclick="event.stopPropagation(); showLoopModal('${escAttrJs(session.id)}')" title="${escapeHtml(tip)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>`;
-}
-
-function closeLoopModal() {
-  document.getElementById('loop-modal').classList.remove('visible');
-}
-
-const WORKFLOW_GEAR_SVG =
-  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-
-// Standard "open in editor" glyph — matches the message-detail / plan modals.
-const ICON_OPEN_EDITOR =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
-
-function renderWorkflowBadge(session) {
-  if (!session.hasWorkflow) return '';
-  const n = session.workflowCount || 0;
-  const tip = `${n} workflow${n === 1 ? '' : 's'}`;
-  return `<span class="workflow-badge" onclick="event.stopPropagation(); showWorkflowModal('${escAttrJs(session.id)}')" title="${escapeHtml(tip)}">${WORKFLOW_GEAR_SVG}</span>`;
-}
-
-let _workflowSessionId = null;
-let _workflowHeaderId = null;
-let _workflowList = [];
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function showWorkflowModal(sessionId) {
-  _workflowSessionId = sessionId;
-  setWorkflowHeader('Workflows', null);
-  const body = document.getElementById('workflow-modal-body');
-  body.innerHTML = '<div class="modal-status">Loading…</div>';
-  document.getElementById('workflow-modal').classList.add('visible');
-  getJson(apiPath`/api/sessions/${sessionId}/workflows`, { workflows: [] }).then((data) => {
-    _workflowList = data.workflows || [];
-    if (!_workflowList.length) {
-      setWorkflowHeader('Workflows', null);
-      body.innerHTML = '<div class="modal-empty">No workflow scripts for this session.</div>';
-    } else if (_workflowList.length === 1) {
-      showWorkflowRun(_workflowList[0].id);
-    } else {
-      renderWorkflowPicker(_workflowList);
-    }
-  });
-}
-
-function setWorkflowHeader(name, wfId) {
-  const titleText = document.getElementById('workflow-modal-title-text');
-  const headerBtn = document.getElementById('workflow-modal-open-btn');
-  _workflowHeaderId = wfId || null;
-  if (titleText) {
-    titleText.textContent = name;
-    titleText.title = wfId ? name : '';
-  }
-  if (headerBtn) headerBtn.style.display = wfId ? '' : 'none';
-}
-
-// Multiple workflows: pick one to drill into (we show a single run at a time).
-function renderWorkflowPicker(workflows) {
-  setWorkflowHeader('Workflows', null);
-  const body = document.getElementById('workflow-modal-body');
-  body.innerHTML = workflows
-    .map((w) => {
-      const when = w.modifiedAt ? formatDate(w.modifiedAt) : '';
-      return `<div class="workflow-row" onclick="showWorkflowRun('${escAttrJs(w.id)}')">
-        <div class="workflow-row-head">
-          <span class="workflow-row-name">${escapeHtml(w.name || w.id)}</span>
-          <span class="workflow-row-id"><code>${escapeHtml(w.id)}</code></span>
-          <button class="icon-btn workflow-open-icon" aria-label="Open in editor" title="Open in editor" onclick="event.stopPropagation(); openWorkflowInEditor('${escAttrJs(w.id)}')">${ICON_OPEN_EDITOR}</button>
-        </div>
-        ${w.description ? `<div class="workflow-row-desc">${escapeHtml(w.description)}</div>` : ''}
-        ${when ? `<div class="workflow-row-meta">${escapeHtml(when)}</div>` : ''}
-      </div>`;
-    })
-    .join('');
-}
-
-function showWorkflowRun(wfId) {
-  const name = _workflowList.find((w) => w.id === wfId)?.name || wfId;
-  setWorkflowHeader(name, wfId);
-  const body = document.getElementById('workflow-modal-body');
-  body.innerHTML = '<div class="modal-status">Loading…</div>';
-  getJson(apiPath`/api/sessions/${_workflowSessionId}/workflows/${wfId}/run`).then((run) => {
-    if (!run) {
-      body.innerHTML = '<div class="modal-status">Failed to load run state.</div>';
-      return;
-    }
-    renderWorkflowRun(run);
-  });
-}
-
 function fmtTokens(t) {
   return t >= 1000 ? `${(t / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${t}`;
 }
@@ -12992,107 +12718,6 @@ function shortModelName(model) {
 
 function agentModel(agent) {
   return agent.model || agent.modelAlias || '';
-}
-
-function renderWorkflowRun(run) {
-  const body = document.getElementById('workflow-modal-body');
-  const allDone = run.startedCount > 0 && run.doneCount >= run.startedCount;
-  const wall =
-    run.startedAt && run.stoppedAt ? formatDuration(new Date(run.stoppedAt) - new Date(run.startedAt)) : null;
-
-  const back =
-    _workflowList.length > 1
-      ? `<div class="wf-back" onclick="renderWorkflowPicker(_workflowList)">‹ All workflows</div>`
-      : '';
-
-  const stats = [`${run.doneCount}/${run.startedCount} agents`, wall ? escapeHtml(wall) : null]
-    .filter(Boolean)
-    .join(' · ');
-
-  const desc = run.description ? `<div class="wf-run-desc">${escapeHtml(run.description)}</div>` : '';
-
-  const phases = (run.phases || [])
-    .map(
-      (p) => `<div class="wf-phase">
-        <span class="wf-phase-mark${allDone ? ' done' : ''}">${allDone ? '✓' : ''}</span>
-        <span class="wf-phase-title">${escapeHtml(p.title)}</span>
-        ${p.detail ? `<span class="wf-phase-detail">${escapeHtml(p.detail)}</span>` : ''}
-      </div>`,
-    )
-    .join('');
-  const phasesBlock = phases ? `<div class="wf-section-title">Phases</div><div class="wf-phases">${phases}</div>` : '';
-
-  const agents = (run.agents || [])
-    .map((a) => {
-      const dur = a.durationMs != null ? formatDuration(a.durationMs) : '';
-      const running = a.status !== 'done';
-      return `<div class="wf-agent" onclick="showAgentModal('${escAttrJs(a.agentId)}')" title="${escapeHtml(a.agentId)}">
-        <span class="wf-agent-type">${escapeHtml(a.type || 'agent')}</span>
-        <span class="wf-agent-model">${escapeHtml(shortModelName(a.model))}</span>
-        <span class="wf-agent-tok">${a.outputTokens ? `${fmtTokens(a.outputTokens)} tok` : ''}</span>
-        <span class="wf-agent-dur">${escapeHtml(dur)}</span>
-        <span class="wf-agent-status ${running ? 'running' : 'done'}">${running ? '●' : '✓'}</span>
-      </div>`;
-    })
-    .join('');
-  const agentsBlock = run.agents?.length
-    ? `<div class="wf-section-title">Agents · ${run.agents.length}</div><div class="wf-agents">${agents}</div>`
-    : '<div class="wf-section-title">Agents</div><div class="wf-empty">No agent runs recorded yet.</div>';
-
-  body.innerHTML = `<div class="workflow-run">
-    ${back}
-    ${desc}
-    <div class="wf-run-stats">${stats} · <code>${escapeHtml(run.id)}</code></div>
-    ${phasesBlock}
-    ${agentsBlock}
-    <details class="wf-source">
-      <summary>Source</summary>
-      <div class="workflow-row-code"></div>
-    </details>
-  </div>`;
-
-  const details = body.querySelector('.wf-source');
-  details.addEventListener(
-    'toggle',
-    () => {
-      if (details.open) loadWorkflowCode(run.id, details.querySelector('.workflow-row-code'));
-    },
-    { once: true },
-  );
-}
-
-function loadWorkflowCode(wfId, codeEl) {
-  if (!codeEl) return;
-  codeEl.innerHTML = '<div class="modal-status-tight">Loading…</div>';
-  getJson(apiPath`/api/sessions/${_workflowSessionId}/workflows/${wfId}`).then((data) => {
-    if (!data?.content) {
-      codeEl.innerHTML = '<div class="modal-status-tight">Failed to load script.</div>';
-      return;
-    }
-    let highlighted;
-    if (typeof hljs !== 'undefined' && hljs.getLanguage('javascript')) {
-      highlighted = hljs.highlight(data.content, { language: 'javascript' }).value;
-    } else {
-      highlighted = escapeHtml(data.content);
-    }
-    codeEl.innerHTML = `<pre><code class="hljs language-javascript">${highlighted}</code></pre>`;
-  });
-}
-
-function openWorkflowInEditor(wfId) {
-  postAndToast(apiPath`/api/sessions/${_workflowSessionId}/workflows/${wfId}/open`, {}, 'in editor');
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openWorkflowHeaderScript() {
-  if (_workflowHeaderId) openWorkflowInEditor(_workflowHeaderId);
-}
-
-function closeWorkflowModal() {
-  document.getElementById('workflow-modal').classList.remove('visible');
-  _workflowSessionId = null;
-  _workflowList = [];
-  setWorkflowHeader('Workflows', null);
 }
 
 function openPlanForSession(sid) {
