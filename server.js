@@ -146,7 +146,7 @@ function writeJsonAtomic(file, obj, mode) {
   }
 }
 
-// Claude Code reads task files while the board writes them, so it must never see half a file.
+// The pi extension reads task files while the board writes them, so it must never see half a file.
 // On Windows a rename over a file another handle has open fails with EPERM or EBUSY until it closes.
 let taskWriteSeq = 0;
 async function writeTaskFile(file, task) {
@@ -282,7 +282,7 @@ function persistAgent(dir, agent) {
   fs.appendFile(file, `${JSON.stringify({ ...agent, event: 'server-update' })}\n`, 'utf8').catch(() => {});
 }
 
-// <PK_DIR>/config.json — pi-kanban's own settings, per Claude config dir.
+// <PK_DIR>/config.json — pi-kanban's own settings, per pi agent dir.
 // Normalization lives in lib/approvals (kept in sync with the gate's own parse).
 const PK_CONFIG_FILE = path.join(PK_DIR, 'config.json');
 const LEGACY_APPROVALS_FILE = path.join(PK_DIR, 'approvals.json');
@@ -367,10 +367,9 @@ function isAgentLive(agent) {
   return agent.status === 'active' || agent.status === 'idle';
 }
 
-// Claude Code records gitBranch from the launch-time repo and never updates it
-// when cwd shifts (Bash `cd`, submodule, sibling repo). Resolve on-demand from
-// the live cwd instead. Cached per-cwd with a short TTL so a list refresh
-// across N sessions sharing one cwd reads HEAD at most once per TTL window.
+// A pi session records no git branch. Resolve it on demand from the session cwd. Cached per-cwd
+// with a short TTL so a list refresh across N sessions sharing one cwd reads HEAD at most once per
+// TTL window.
 const gitBranchCache = new Map();
 const GIT_BRANCH_TTL_MS = 30000;
 const GIT_BRANCH_CACHE_MAX = 500;
@@ -453,8 +452,8 @@ function teamConfigPath(teamName) {
   if (typeof teamName !== 'string' || !teamName) return null;
   if (teamPathCache.has(teamName)) return teamPathCache.get(teamName);
   const candidate = path.join(TEAMS_DIR, teamName, 'config.json');
-  // TEAMS_DIR follows --dir / CLAUDE_CONFIG_DIR, so containment is checked against
-  // the module-level constant rather than a hardcoded ~/.claude/teams.
+  // TEAMS_DIR follows the pi agent dir, so containment is checked against
+  // the module-level constant rather than a hardcoded path.
   const configPath = isContained(candidate, TEAMS_DIR) ? candidate : null;
   if (teamPathCache.size >= TEAM_PATH_CACHE_MAX) teamPathCache.clear();
   teamPathCache.set(teamName, configPath);
@@ -532,7 +531,7 @@ function loadLiveSessions() {
 
 // An open-but-idle interactive session keeps touching its JSONL (metadata-line
 // rewrites), so mtime alone reads as activity for as long as the terminal stays
-// open. Claude Code's live-session registry knows the real state — trust its
+// open. The live-session registry the pi extension writes knows the real state — trust its
 // 'idle' over the mtime. No registry entry (or any other status) falls back to
 // the mtime rule.
 function isRegistryIdle(sessionId) {
@@ -1779,7 +1778,7 @@ app.post('/api/open-in-editor', (req, res) => {
 
     const safeName = (title || 'message').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
     const hash = crypto.createHash('md5').update(content).digest('hex').slice(0, 8);
-    const tmpFile = path.join(os.tmpdir(), `claude-kanban-${safeName}-${hash}.md`);
+    const tmpFile = path.join(os.tmpdir(), `pi-kanban-${safeName}-${hash}.md`);
     require('node:fs').writeFileSync(tmpFile, content, 'utf8');
 
     openInEditor([tmpFile]);

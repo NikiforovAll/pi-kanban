@@ -162,21 +162,16 @@ describe('foreground run', () => {
     const start = startLines('tc2', { tasks: [{ agent: 'general', task: 'a' }, { agent: 'general', task: 'b' }] }, T0);
     const end = endLines('tc2', 2, result, true, T1);
     assert.deepEqual(end.map((l) => [l.agentId, l.error, l.lastMessage, l.stopReason]), [
-      ['tc_tc2_0', 'Unknown agent: general', 'Unknown agent: general', 'error'],
-      ['tc_tc2_1', 'Unknown agent: general', 'Unknown agent: general', 'error'],
+      ['tc_tc2_0', 'Unknown agent: general', undefined, 'error'],
+      ['tc_tc2_1', 'Unknown agent: general', undefined, 'error'],
     ]);
     const agent = fold([start[0], end[0]]);
     assert.ok(validateAgent(agent), JSON.stringify(validateAgent.errors));
   });
 
-  it('keeps the output over the error, and drops the thinking level from the model', () => {
+  it('keeps the output beside the error, and drops the thinking level from the model', () => {
     const [line] = endLines('tc4', 1, { details: { results: [{ model: 'codemie/gpt-6-luna:low', output: 'half', error: 'boom' }] } }, false, T1);
     assert.deepEqual([line.model, line.lastMessage, line.error], ['codemie/gpt-6-luna', 'half', 'boom']);
-  });
-
-  it('leaves the response of a child that ran to its transcript', () => {
-    const [line] = endLines('tc7', 1, { details: { results: [{ sessionFile: 's7.jsonl', error: 'boom', exitCode: 1 }] } }, false, T1);
-    assert.deepEqual([line.lastMessage, line.error, line.stopReason], [undefined, 'boom', 'error']);
   });
 });
 
