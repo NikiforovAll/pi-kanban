@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { boardFetch, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
 import { linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
 import { registerDispatch } from "./tools/dispatch.js";
+import { registerInbox } from "./tools/inbox.js";
 import { registerScratchpad } from "./tools/scratchpad.js";
 import { ASK_CLOSE, ASK_OPEN, ASK_TOOL, type AskOpen, registerShowAsk } from "./tools/show-ask.js";
 
@@ -224,6 +225,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	registerScratchpad(pi);
 	registerShowAsk(pi);
 	registerDispatch(pi);
+	registerInbox(pi);
 
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.toolName !== "todo") return;
