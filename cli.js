@@ -101,7 +101,7 @@ const COMMANDS = {
     },
   },
   session: {
-    summary: 'List, search, open, inspect and group Claude Code sessions',
+    summary: 'List, search, open, inspect and group pi sessions',
     verbs: {
       list: {
         summary: 'List the active sessions, as the sidebar\'s Active view shows them (pinned/sticky always included)',

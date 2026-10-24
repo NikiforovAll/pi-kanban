@@ -5,7 +5,7 @@ const { mkdtempSync, readFileSync, realpathSync, rmSync } = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { createTerminalService, shellArgs, piCommand, readTerminalConfig, resolveShell, piArgsFor, withTuiMode, windowsPtyFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
+const { createTerminalService, shellArgs, piCommand, readTerminalConfig, clientConfigFor, resolveShell, piArgsFor, withTuiMode, windowsPtyFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
 
 let WebSocket = null;
 let ptyAvailable = false;
@@ -529,6 +529,11 @@ describe('readTerminalConfig', () => {
     assert.equal(readTerminalConfig({ argv: [], env }).shell, 'gitbash');
     assert.equal(readTerminalConfig({ argv: [], env, getArgValue: () => 'cmd' }).shell, 'cmd');
     assert.equal(readTerminalConfig({ argv: [], env: {} }).shell, null);
+  });
+  it('tells the board only that the terminal is off', () => {
+    const config = readTerminalConfig({ argv: [], env: {} });
+    assert.deepEqual(clientConfigFor(config, false), { available: false });
+    assert.equal(clientConfigFor(config, true).fontSize, 13);
   });
 });
 

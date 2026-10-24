@@ -1,6 +1,6 @@
 import { join as joinPath } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { boardFetch, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
+import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
 import { linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
 import { registerDispatch } from "./tools/dispatch.js";
 import { registerInbox } from "./tools/inbox.js";
@@ -42,7 +42,9 @@ const { SESSION_ID_ENV } = lib("board-dir.js") as { SESSION_ID_ENV: string };
 const LIVE_DIR = joinPath(kanbanDir(), "live");
 const ACTIVITY_DIR = joinPath(kanbanDir(), "agent-activity");
 
-const SUBCOMMANDS = ["open", "session"] as const;
+// A pi in the board terminal already runs inside the board page.
+const CAN_OPEN = !boardTerminalId();
+const SUBCOMMANDS = CAN_OPEN ? ["open", "session"] : ["session"];
 
 const SESSION_SUBCOMMANDS = [
 	"open",
@@ -260,7 +262,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	registerPaneTools(pi);
 
 	pi.registerCommand("kanban", {
-		description: "pi-kanban board: open | session <verb>",
+		description: `pi-kanban board: ${CAN_OPEN ? "open | " : ""}session <verb>`,
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trimStart();
 			const items = COMPLETIONS.filter((c) => c.startsWith(typed)).map((c) => ({ value: c, label: c }));
@@ -268,7 +270,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const tokens = splitArgs(args);
-			const sub = tokens[0] || "open";
+			const sub = tokens[0] || (CAN_OPEN ? "open" : "help");
 			const rest = tokens.slice(1);
 			const notify = (m: string, l: "info" | "error" = "info") => ctx.ui.notify(m, l);
 
@@ -276,8 +278,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 				const lines = [
 					"Usage: /kanban <command>",
 					"",
-					"  open             Open the board in the browser, with the terminal token",
-					"",
+					...(CAN_OPEN ? ["  open             Open the board in the browser, with the terminal token", ""] : []),
 					"Session commands (default to current session):",
 					"  session open [<id>]",
 					"  session pin [<id>]",
@@ -289,7 +290,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 				notify(lines.join("\n"));
 			}
 
-			if (sub === "open") {
+			if (sub === "open" && CAN_OPEN) {
 				try {
 					const { default: open } = await import("open");
 					await open(await boardPageUrl());
@@ -338,7 +339,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					const PIN_STATE = { "sticky-pin": "sticky", "unpin": "none", "pin": "pinned" } as const;
 					const state = PIN_STATE[verb];
 					try {
-						await okJson(postJson("/api/session/pin", { id, state }));
+						await okJson(postJson("/api/session/pin", { ids: [id], state }));
 					} catch (e: any) {
 						notify(`${verb} failed: ${e?.message ?? e}`, "error");
 						return;
