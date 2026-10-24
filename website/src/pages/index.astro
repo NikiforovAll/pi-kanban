@@ -1,0 +1,463 @@
+---
+import SiteLayout from '../kit/SiteLayout.astro';
+import Shot from '../kit/Shot.astro';
+import Keys from '../kit/Keys.astro';
+import ModeToggle from '../kit/ModeToggle.astro';
+import Lightbox from '../kit/Lightbox.astro';
+import FamilyFooter from '../kit/FamilyFooter.astro';
+import { url } from '../kit/family';
+
+const GITHUB = 'https://github.com/NikiforovAll/pi-kanban';
+const NPM = 'https://www.npmjs.com/package/pi-kanban';
+const INSTALL = 'pi install npm:pi-kanban';
+const VIDEO = 'https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-demo.mp4';
+
+const watch = [
+  {
+    title: 'Todos move as pi works',
+    body: 'Pending, in progress, completed. The session log beside the board shows every prompt, reply, and tool call in order. [Shift+L] opens it.',
+    shot: 'board',
+    alt: 'Board with three columns of todos and the session log open on the right',
+  },
+  {
+    title: 'Read what each subagent planned',
+    body: 'The agents log lists every subagent with its model, status, tool count, tokens, and run time. Open one to read its prompt and the full response, rendered as markdown.',
+    shot: 'subagent',
+    alt: 'A planner subagent with its checkout split plan, a component table, and the shared state shape',
+  },
+  {
+    title: 'Follow a review while it runs',
+    body: 'A running subagent streams into the same view. Watch a reviewer flag issues in the code while the parent session moves on.',
+    shot: 'review',
+    alt: 'A running reviewer subagent with its findings on a rate limiter',
+  },
+  {
+    title: 'Find the session behind the work',
+    body: 'Session info shows the id, project, path, working folder, and branch, each with a copy button. [I] opens it for the selected session.',
+    shot: 'session-info',
+    alt: 'Session info modal with session id, project, path, branch, and copy buttons',
+  },
+  {
+    title: 'Keep your hands on the keyboard',
+    body: 'Arrow keys or [J] and [K] move through todos, [Tab] switches between the sidebar and the board, [Shift+S] opens the storage manager, and [T] switches the theme. Press [?] for the full list.',
+    shot: 'shortcuts',
+    alt: 'Keyboard shortcuts help with global, navigation, and action keys',
+  },
+];
+
+const setup = [
+  { title: 'Install the package', cmd: INSTALL, body: 'pi-kanban installs as a pi package and adds the /kanban command.' },
+  { title: 'Start the board', cmd: '/kanban start', body: 'Run it inside pi. The server starts on port 3460 and watches your pi sessions.' },
+  { title: 'Open it', cmd: '/kanban open web', body: 'Then use pi as usual. Sessions, todos, and subagents appear on the board.' },
+];
+
+const companions = [
+  { name: 'pi-subagents', href: 'https://www.npmjs.com/package/pi-subagents', body: 'Starts named subagent sessions. The board shows them under each parent session.' },
+  { name: '@juicesharp/rpiv-todo', href: 'https://www.npmjs.com/package/@juicesharp/rpiv-todo', body: 'Todo tracking that the board shows as columns.' },
+  { name: '@juicesharp/rpiv-ask-user-question', href: 'https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question', body: 'Questions from the agent, shown as cards on the board.' },
+];
+---
+
+<SiteLayout
+  title="pi-kanban: a live board for the pi coding agent"
+  description="Watch every pi coding agent session on your machine: todos, subagents, and the session log, live in the browser."
+  image="og.png"
+>
+  <div class="page">
+    <header class="nav">
+      <a class="mark" href={url()}>pi-kanban</a>
+      <nav aria-label="Site">
+        <a href={url('getting-started/')}>Docs</a>
+        <a href={url('demo/')}>Demo</a>
+        <a href={GITHUB}>GitHub</a>
+        <ModeToggle />
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <h1>Watch every pi session from one board.</h1>
+        <p class="lede">
+          pi writes each session to disk as it works. pi-kanban reads those files and shows the todos, subagents, and
+          messages of every session, live in your browser. Nothing to configure per project.
+        </p>
+        <div class="actions">
+          <div class="cmd">
+            <code><span aria-hidden="true">$ </span>{INSTALL}</code>
+            <button type="button" class="copy" data-copy={INSTALL}>Copy</button>
+          </div>
+          <a class="button" href={url('demo/')}>Try the demo</a>
+          <a class="button alt" href={url('getting-started/')}>Read the docs</a>
+        </div>
+
+        <figure class="hero-shot">
+          <Shot themed="board" alt="The pi-kanban board: session sidebar, todo columns, agents log, and session log" eager />
+          <figcaption>
+            <p>The board in light and dark. Switch the mode at the top of the page and the screenshots follow.</p>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="half" aria-labelledby="tour">
+        <div class="half-head">
+          <h2 id="tour">Tour</h2>
+          <p>Browse sessions, open a subagent, and follow the session log as pi works.</p>
+        </div>
+        <video class="video" controls preload="none" playsinline src={VIDEO} poster={url('shots/themes/pi-board-light.webp')} aria-label="pi-kanban tour"></video>
+      </section>
+
+      <section class="half" aria-labelledby="watch">
+        <div class="half-head">
+          <h2 id="watch">Watch</h2>
+          <p>
+            pi-kanban watches <code>~/.pi/agent/sessions</code> and pushes each change to your browser. It reads session
+            files only and does not change them.
+          </p>
+          <p class="aside">The <a href={url('demo/')}>live demo</a> runs in your browser with sample sessions. No install.</p>
+        </div>
+        <div class="items">
+          {
+            watch.map((it) => (
+              <article class="item">
+                <div class="item-text">
+                  <h3>{it.title}</h3>
+                  <p><Keys text={it.body} /></p>
+                </div>
+                <Shot themed={it.shot} alt={it.alt} />
+              </article>
+            ))
+          }
+        </div>
+      </section>
+
+      <section class="half" aria-labelledby="extend">
+        <div class="half-head">
+          <h2 id="extend">Extend</h2>
+          <p>pi-kanban shows what other pi packages write. Install these next to it to fill the board.</p>
+        </div>
+        <ul class="companions">
+          {
+            companions.map((c) => (
+              <li>
+                <a href={c.href}><code>{c.name}</code></a>
+                <p>{c.body}</p>
+              </li>
+            ))
+          }
+        </ul>
+      </section>
+
+      <section class="setup" aria-labelledby="setup">
+        <h2 id="setup">Set up in three steps</h2>
+        <ol>
+          {
+            setup.map((s) => (
+              <li>
+                <h3>{s.title}</h3>
+                <code class="step-cmd">{s.cmd}</code>
+                <p>{s.body}</p>
+              </li>
+            ))
+          }
+        </ol>
+        <p class="aside">Without pi packages, run <code>npx pi-kanban</code> to start the board on its own.</p>
+      </section>
+    </main>
+
+    <FamilyFooter
+      current="kanban"
+      links={[
+        { label: 'MIT license', href: `${GITHUB}/blob/main/LICENSE` },
+        { label: 'npm', href: NPM },
+        { label: 'GitHub', href: GITHUB },
+      ]}
+    />
+  </div>
+  <Lightbox />
+</SiteLayout>
+
+<script>
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copy!);
+        btn.textContent = 'Copied';
+      } catch {
+        btn.textContent = 'Press Ctrl+C';
+      }
+      setTimeout(() => (btn.textContent = 'Copy'), 1600);
+    });
+  }
+</script>
+
+<style>
+  .page {
+    width: min(100% - 2rem, 78rem);
+    margin-inline: auto;
+  }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-block: 1.25rem;
+  }
+  .mark {
+    font: 600 1.25rem/1 var(--font-display);
+    color: var(--c-ink1);
+    text-decoration: none;
+  }
+  .nav nav {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    font: 500 0.875rem var(--font-mono);
+  }
+  .nav nav a {
+    color: var(--c-ink2);
+    text-decoration: none;
+  }
+  .nav nav a:hover {
+    color: var(--c-ink1);
+  }
+
+  .hero {
+    padding-block: clamp(2.5rem, 7vw, 6rem) 0;
+  }
+  h1 {
+    margin: 0;
+    font: 600 clamp(2.5rem, 6.4vw, 5.75rem) / 0.98 var(--font-display);
+    letter-spacing: -0.025em;
+    max-width: 18ch;
+  }
+  .lede {
+    margin: 1.75rem 0 0;
+    max-width: 38rem;
+    font-size: 1.1875rem;
+    color: var(--c-ink2);
+  }
+  .actions {
+    margin-top: 2rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .cmd {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.375rem 0.375rem 0.375rem 1rem;
+    background: var(--c-elevated);
+    border: 1px solid var(--c-border);
+    border-radius: 0.5rem;
+    max-width: 100%;
+  }
+  .cmd code {
+    font-size: 0.9375rem;
+    white-space: nowrap;
+    overflow-x: auto;
+  }
+  .cmd code span {
+    color: var(--c-muted);
+  }
+  .copy,
+  .button {
+    font: 500 0.875rem/1 var(--font-mono);
+    padding: 0.625rem 0.875rem;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .copy {
+    color: var(--c-ink2);
+    background: transparent;
+    border: 1px solid transparent;
+    min-width: 5.5rem;
+  }
+  .copy:hover {
+    background: var(--c-hover);
+  }
+  .button {
+    display: inline-flex;
+    align-items: center;
+    color: var(--c-field);
+    background: var(--c-ink1);
+    border: 1px solid var(--c-ink1);
+  }
+  .button:hover {
+    background: var(--c-accent-ink);
+    border-color: var(--c-accent-ink);
+  }
+  .button.alt {
+    color: var(--c-ink1);
+    background: transparent;
+    border-color: var(--c-border);
+  }
+  .button.alt:hover {
+    background: var(--c-hover);
+  }
+  .copy:focus-visible,
+  .button:focus-visible,
+  .nav a:focus-visible,
+  .companions a:focus-visible {
+    outline: 2px solid var(--c-accent);
+    outline-offset: 2px;
+  }
+
+  .hero-shot {
+    margin: clamp(2.5rem, 5vw, 4rem) 0 0;
+  }
+  .hero-shot figcaption {
+    margin-top: 1.25rem;
+  }
+  .hero-shot figcaption p {
+    margin: 0;
+    font-size: 0.9375rem;
+    color: var(--c-ink3);
+  }
+
+  .video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border: 1px solid var(--c-border);
+    border-radius: 0.75rem;
+    background: var(--c-elevated);
+  }
+
+  .half {
+    margin-top: clamp(5rem, 10vw, 9rem);
+    display: grid;
+    grid-template-columns: minmax(14rem, 18rem) 1fr;
+    gap: 2rem clamp(2rem, 5vw, 4.5rem);
+    align-items: start;
+  }
+  .half-head {
+    position: sticky;
+    top: 2rem;
+  }
+  .half-head h2 {
+    margin: 0 0 1rem;
+    font: 600 clamp(3.5rem, 8vw, 6rem) / 0.9 var(--font-display);
+    letter-spacing: -0.03em;
+    color: var(--c-accent-ink);
+  }
+  .half-head p {
+    margin: 0 0 1rem;
+    color: var(--c-ink2);
+  }
+  .aside {
+    font-size: 0.9375rem;
+    color: var(--c-ink3);
+  }
+  .half-head code,
+  .aside code {
+    font-size: 0.875em;
+    padding: 0.1em 0.35em;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: 0.3em;
+    overflow-wrap: anywhere;
+  }
+  .items {
+    display: grid;
+    gap: clamp(3.5rem, 6vw, 5.5rem);
+  }
+  .item {
+    display: grid;
+    gap: 1.25rem;
+  }
+  .item-text {
+    max-width: 40rem;
+  }
+  .item h3,
+  .setup h3 {
+    margin: 0 0 0.5rem;
+    font: 600 1.625rem/1.2 var(--font-display);
+    letter-spacing: -0.01em;
+  }
+  .item p {
+    margin: 0;
+    color: var(--c-ink2);
+  }
+  h2 {
+    margin: 0 0 1rem;
+    font: 600 clamp(2rem, 4vw, 2.75rem) / 1.08 var(--font-display);
+    letter-spacing: -0.02em;
+  }
+
+  .companions {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 0.75rem;
+  }
+  .companions li {
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--c-border);
+    border-radius: 0.5rem;
+    background: var(--c-surface);
+  }
+  .companions a {
+    font-weight: 600;
+  }
+  .companions p {
+    margin: 0.375rem 0 0;
+    color: var(--c-ink2);
+  }
+
+  .setup {
+    margin-block: clamp(5rem, 10vw, 9rem) clamp(4rem, 8vw, 6rem);
+  }
+  .setup ol {
+    margin: 2rem 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: step;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: 1.5rem;
+  }
+  .setup li {
+    counter-increment: step;
+    padding-top: 1.25rem;
+    border-top: 2px solid var(--c-ink1);
+  }
+  .setup li::before {
+    content: counter(step);
+    display: block;
+    font: 600 1rem var(--font-mono);
+    color: var(--c-accent-ink);
+    margin-bottom: 0.5rem;
+  }
+  .step-cmd {
+    display: block;
+    margin: 0.75rem 0;
+    padding: 0.625rem 0.875rem;
+    background: var(--c-elevated);
+    border: 1px solid var(--c-border);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .setup li p {
+    margin: 0;
+    color: var(--c-ink2);
+    font-size: 0.9375rem;
+  }
+
+  @media (max-width: 52rem) {
+    .half {
+      grid-template-columns: 1fr;
+    }
+    .half-head {
+      position: static;
+    }
+    .nav nav {
+      gap: 0.875rem;
+    }
+  }
+</style>

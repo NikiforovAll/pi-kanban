@@ -1,6 +1,12 @@
-# pi-kanban user guide
+---
+title: User guide
+description: A walkthrough of the dashboard and the /kanban commands.
+---
 
-A walkthrough of the dashboard and `/kanban` commands. For installation, see the [README](../README.md). For plugging your own planning flow or themes in, see [Extensibility](./extensibility.md).
+import Shot from '../../../kit/Shot.astro';
+import Lightbox from '../../../kit/Lightbox.astro';
+
+A walkthrough of the dashboard and `/kanban` commands. For installation, see [Getting started](../../getting-started/). For plugging your own planning flow or themes in, see [Extensibility](../extensibility/).
 
 ## Slash commands
 
@@ -32,7 +38,7 @@ All session commands default to the current session when `[<id>]` is omitted.
 
 ## Layout
 
-![pi-kanban dashboard](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster.png)
+<Shot themed="board" alt="The board with the session sidebar, todo columns, agents log, and session log" eager />
 
 - **Left sidebar** — session list grouped by project. Each row shows progress, age, pin state.
 - **Center** — kanban board (Pending / In Progress / Completed) for the selected session, populated from `@juicesharp/rpiv-todo`.
@@ -47,13 +53,13 @@ pi-kanban reads `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl` and 
 
 When `pi-subagents` spawns a child session, pi-kanban nests it under its parent and renders the agent's lifecycle (start, tool use, completion) inline.
 
-![Subagent view](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-subagent.png)
+<Shot themed="subagent" alt="A planner subagent with its prompt and response" />
 
 ## Session info
 
 Click the info icon on any session for full metadata: model, token usage, cache hit rate, cost, duration, paths.
 
-![Session info modal](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-info.png)
+<Shot themed="session-info" alt="Session info modal with session id, project, path, and branch" />
 
 ## Storage manager
 
@@ -69,16 +75,20 @@ Pop out the latest assistant message in a floating window — useful for monitor
 
 ## Light mode
 
-The dark/light toggle switches between the two themes configured in settings. See [Theming](./theming.md).
-
-![Light theme](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster-light.png)
+The dark/light toggle switches between the two themes configured in settings. See [Theming](../../reference/theming/). The screenshots on this site follow the mode you pick at the top of the page.
 
 ## Keyboard shortcuts
 
 Press `?` in the dashboard for the full list. Common ones:
 
-- `j` / `k` — next / previous session
-- `g` — jump to top
-- `/` — focus filter
-- `t` — toggle dark/light
-- `Esc` — close modal / clear selection
+- `J` / `K` — next / previous todo in a column
+- `H` / `L` — move to the left / right column
+- `Tab` — switch focus between the sidebar and the board
+- `Shift+L` — toggle the session log
+- `I` — open session info
+- `T` — toggle dark/light
+- `Esc` — close a panel or cancel
+
+<Shot themed="shortcuts" alt="Keyboard shortcuts help with global, navigation, and action keys" />
+
+<Lightbox />

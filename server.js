@@ -540,8 +540,11 @@ app.get('/api/sessions/:id/agents/:agentId/messages/stream', async (req, res) =>
   } catch {}
 });
 
-const watcher = chokidar.watch(path.join(parsers.getSessionsDir(), '**/*.jsonl'), {
+const onlyFilesWithExt = (ext) => (p, stats) => !!stats?.isFile() && !p.endsWith(ext);
+
+const watcher = chokidar.watch(parsers.getSessionsDir(), {
   ignoreInitial: true,
+  ignored: onlyFilesWithExt('.jsonl'),
   awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 },
 });
 parsers.setOnBranchResolved((cwd, branch) => {
@@ -605,6 +608,7 @@ taskWatcher.on('all', (_evt, file) => {
 // decodes folder names which is lossy for dirs that contain hyphens.
 const planWatcher = chokidar.watch([], {
   ignoreInitial: true,
+  ignored: onlyFilesWithExt('.md'),
   awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
 });
 planWatcher.on('change', (f) => sseSend({ type: 'plan-update', path: f }));
@@ -613,8 +617,7 @@ const watchedPlanDirs = new Set();
 function addPlanWatchDir(cwd) {
   if (!cwd || watchedPlanDirs.has(cwd)) return;
   watchedPlanDirs.add(cwd);
-  // chokidar glob patterns require forward slashes on Windows
-  planWatcher.add(path.join(cwd, '_plans', '**', '*.md').replace(/\\/g, '/'));
+  planWatcher.add(path.join(cwd, '_plans'));
 }
 async function updatePlanWatchDirs() {
   const sessions = await parsers.listSessions().catch(() => []);

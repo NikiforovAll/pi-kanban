@@ -32,7 +32,3 @@ Thumbs.db
 dist/
 build/
 coverage/
-
-# VitePress
-docs/.vitepress/dist/
-docs/.vitepress/cache/
