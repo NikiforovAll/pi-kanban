@@ -1,12 +1,14 @@
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { noteReplacedSessions, readLiveSessions, writeLiveSession, removeLiveSession, sweepDeadLiveSessions } = require('../lib/live-sessions');
+const { noteReplacedSessions, readLiveSessions, writeLiveSession, removeLiveSession, removeLiveSessionSync, sweepDeadLiveSessions } = require('../lib/live-sessions');
 
-const tempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pk-live-'));
+const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-live-'));
+after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
+const tempDir = () => fs.mkdtempSync(path.join(ROOT, 'run-'));
 
 function deadPid() {
   return spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout.trim() * 1;
@@ -24,6 +26,14 @@ describe('live session files', () => {
     assert.deepEqual(readLiveSessions(dir).map((s) => [s.sessionId, s.status]), [['next', 'idle']]);
     await removeLiveSession(dir, process.pid);
     await removeLiveSession(dir, process.pid);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  });
+
+  it('removes the file without waiting, for an exit handler', async () => {
+    const dir = tempDir();
+    await writeLiveSession(dir, entry);
+    removeLiveSessionSync(dir, process.pid);
+    removeLiveSessionSync(dir, process.pid);
     assert.deepEqual(fs.readdirSync(dir), []);
   });
 

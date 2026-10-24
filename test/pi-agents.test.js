@@ -1,15 +1,13 @@
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
-const Ajv = require('ajv');
-const addFormats = require('ajv-formats');
+const { schemaValidator } = require('./schema-validator');
 const { foldAgentLines } = require('../lib/agent-log');
-const { agentIdFor, spawnsFromArgs, startLines, endLines, modelLines, asyncCompleteLines } = require('../lib/pi-agents');
+const { agentIdFor, spawnsFromArgs, startLines, endLines, modelLines, asyncCompleteLines, createSubagentTracker } = require('../lib/pi-agents');
 
-const ajv = new Ajv({ allErrors: true, strict: false });
-addFormats(ajv);
-const validateAgent = ajv.compile(JSON.parse(fs.readFileSync(path.join(__dirname, 'schemas', 'agent.schema.json'), 'utf8')));
+const validateAgent = schemaValidator('agent.schema.json');
 
 const fold = (lines) => foldAgentLines(lines.map((l) => JSON.stringify(l)).join('\n'));
 
@@ -57,7 +55,7 @@ describe('spawnsFromArgs', () => {
 describe('async run', () => {
   const start = startLines(TOOL_CALL_ID, ARGS, T0);
   const launched = endLines(TOOL_CALL_ID, start.length, ASYNC_LAUNCH, false, T0);
-  const done = asyncCompleteLines(COMPLETE, STATUS, T1);
+  const done = asyncCompleteLines(TOOL_CALL_ID, RUN_ID, COMPLETE, STATUS, T1);
 
   it('starts an active agent with its type and prompt', () => {
     assert.equal(start.length, 1);
@@ -88,20 +86,53 @@ describe('async run', () => {
 
   it('skips a step that still runs', () => {
     const running = { ...STATUS, steps: [{ ...STATUS.steps[0], status: 'running' }] };
-    assert.deepEqual(asyncCompleteLines(COMPLETE, running, T1), []);
+    assert.deepEqual(asyncCompleteLines(TOOL_CALL_ID, RUN_ID, COMPLETE, running, T1), []);
   });
 
   it('marks a failed step', () => {
     const failed = { ...STATUS, steps: [{ ...STATUS.steps[0], status: 'failed', exitCode: 1 }] };
-    const [line] = asyncCompleteLines({ ...COMPLETE, success: false, summary: 'boom' }, failed, T1);
+    const [line] = asyncCompleteLines(TOOL_CALL_ID, RUN_ID, { ...COMPLETE, success: false, summary: 'boom' }, failed, T1);
     assert.equal(line.stopReason, 'error');
     assert.equal(line.error, 'boom');
-    const [silent] = asyncCompleteLines({ ...COMPLETE, success: false, summary: undefined }, failed, T1);
+    const [silent] = asyncCompleteLines(TOOL_CALL_ID, RUN_ID, { ...COMPLETE, success: false, summary: undefined }, failed, T1);
     assert.equal(silent.stopReason, 'failed');
   });
 
-  it('needs a tool call id', () => {
-    assert.deepEqual(asyncCompleteLines({ id: RUN_ID }, null, T1), []);
+  it('stops the one child from the summary when there is no status file', () => {
+    const [line] = asyncCompleteLines(TOOL_CALL_ID, RUN_ID, COMPLETE, null, T1);
+    assert.deepEqual([line.agentId, line.lastMessage, line.runId, line.stoppedAt], [start[0].agentId, '0', RUN_ID, T1]);
+  });
+});
+
+describe('createSubagentTracker', () => {
+  const asyncDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-async-'));
+  fs.writeFileSync(path.join(asyncDir, 'status.json'), JSON.stringify(STATUS));
+  after(() => fs.rmSync(asyncDir, { recursive: true, force: true }));
+  const launch = { ...ASYNC_LAUNCH, details: { ...ASYNC_LAUNCH.details, asyncDir } };
+
+  it('tracks an async run from start to completion and then forgets it', async () => {
+    const tracker = createSubagentTracker();
+    const start = tracker.start('s1', TOOL_CALL_ID, ARGS, T0);
+    const model = tracker.update(TOOL_CALL_ID, { details: { results: [{ model: 'codemie/gpt-6-luna' }] } }, T0);
+    assert.deepEqual(model.lines.map((l) => l.model), ['codemie/gpt-6-luna']);
+    assert.equal(tracker.update(TOOL_CALL_ID, { details: { results: [{ model: 'codemie/gpt-6-luna' }] } }, T0), null);
+    const end = tracker.end(TOOL_CALL_ID, launch, false, T0);
+    assert.equal(end.sessionId, 's1');
+    assert.equal(tracker.update(TOOL_CALL_ID, {}, T0), null);
+    assert.equal(tracker.end(TOOL_CALL_ID, launch, false, T0), null);
+    const done = await tracker.asyncComplete(COMPLETE, T1);
+    assert.equal(done.sessionId, 's1');
+    const agent = fold([...start, ...model.lines, ...end.lines, ...done.lines]);
+    assert.ok(validateAgent(agent), JSON.stringify(validateAgent.errors));
+    assert.deepEqual([agent.status, agent.sessionFile, agent.lastMessage], ['stopped', SESSION_FILE, '0']);
+    assert.equal(await tracker.asyncComplete(COMPLETE, T1), null);
+  });
+
+  it('ignores a call that spawns nothing and a run it did not launch', async () => {
+    const tracker = createSubagentTracker();
+    assert.deepEqual(tracker.start('s1', 'tc9', { action: 'status' }, T0), []);
+    assert.equal(tracker.end('tc9', {}, false, T0), null);
+    assert.equal(await tracker.asyncComplete({ runId: 'other' }, T1), null);
   });
 });
 
