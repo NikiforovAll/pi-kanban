@@ -1,0 +1,1558 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const { getClaudeDir, displayPath } = require('./lib/claude-dir');
+const { linkUrl } = require('./public/link-url');
+const { sessionProjectKey } = require('./public/project-match');
+// Help is auto-generated from this table — keep flags/usage in sync with `run` behavior.
+const SESSION_FLAG = '--session <id>';
+const SESSION_FLAG_HELP = 'Session, full id or unique prefix (default: $PREVIEW_SESSION, else $CLAUDE_CODE_SESSION_ID)';
+
+const COMMANDS = {
+  doc: {
+    summary: 'Show documents to the user: link them to a session, or open the preview',
+    verbs: {
+      link: {
+        summary: 'Link a file or URL to a session, with no modal',
+        usage: 'claude-code-kanban doc link <file|url> [--session <id>]',
+        flags: {
+          '<file|url>': 'Any file type; one the preview cannot render opens in the editor. An http(s) URL opens in a new tab.',
+          [SESSION_FLAG]: SESSION_FLAG_HELP,
+        },
+        notes: 'The server keeps the link, so it shows when a browser tab opens later. Prefer this over `doc preview` while the user works.',
+        examples: [
+          'claude-code-kanban doc link ./design.md',
+          'claude-code-kanban doc link https://github.com/org/repo/pull/12',
+        ],
+        run: runDocLinkCli,
+      },
+      unlink: {
+        summary: 'Remove a linked file or URL from a session',
+        usage: 'claude-code-kanban doc unlink <file|url> [--session <id>]',
+        flags: {
+          '<file|url>': 'The linked path or URL; the file need not exist',
+          [SESSION_FLAG]: SESSION_FLAG_HELP,
+        },
+        examples: ['claude-code-kanban doc unlink ./design.md'],
+        run: runDocLinkCli,
+      },
+      list: {
+        summary: 'Print the docs linked to a session',
+        usage: 'claude-code-kanban doc list [--session <id>] [--json]',
+        flags: {
+          [SESSION_FLAG]: SESSION_FLAG_HELP,
+          '--json': 'Output JSON',
+        },
+        run: runDocListCli,
+      },
+      preview: {
+        summary: 'Open a markdown or HTML file in the preview modal on connected browser tabs',
+        usage: 'claude-code-kanban doc preview <file.md|file.html|url> [--session <id>]',
+        flags: {
+          [SESSION_FLAG]: 'Switch focused session in the browser (does not link the file; default: $PREVIEW_SESSION). For a URL, the session it links to (default: $PREVIEW_SESSION, else $CLAUDE_CODE_SESSION_ID).',
+        },
+        notes: 'The modal opens on the user\'s screen: the only command that does. HTML renders in a sandboxed iframe; local stylesheets, scripts and images are inlined. Relative paths resolve against the current dir. An http(s) URL is linked to the session instead, and the tab on screen shows an Open button.',
+        examples: [
+          'claude-code-kanban doc preview ./notes.md --session $CLAUDE_SESSION_ID',
+        ],
+        run: runPreviewCli,
+      },
+    },
+  },
+  pane: {
+    summary: 'Add live panes (a URL or a local file) to a session\'s view, without switching to them',
+    verbs: {
+      add: {
+        summary: 'Add a pane to a session; it opens as a tab next to Board, in the background',
+        usage: 'claude-code-kanban pane add <url|file> [--title <text>] [--session <id>] [--json]',
+        flags: {
+          '<url|file>': 'An http(s) URL, or a local HTML, markdown, text or image file (relative paths resolve against the current dir)',
+          '--title <text>': 'Tab title (default: the host or file name)',
+          [SESSION_FLAG]: SESSION_FLAG_HELP,
+          '--json': 'Output JSON (the new pane, with frameable: true, false, or null when unknown)',
+        },
+        notes: 'The board does not switch to the new pane; the user opens it. Prints the pane id. The same target added again prints the pane it already has. A URL on the board\'s or the hub\'s own origin is refused, and a file must be one the board can preview. A site whose headers refuse framing (X-Frame-Options, CSP frame-ancestors) is still added, but its pane shows an "Open in new tab" card, and a note line says so.',
+        examples: [
+          'claude-code-kanban pane add http://localhost:5173',
+          'claude-code-kanban pane add ./report.html --title Report',
+        ],
+        run: runPaneAddCli,
+      },
+      rm: {
+        summary: 'Remove a pane from a session',
+        usage: 'claude-code-kanban pane rm <pane-id> [--session <id>]',
+        flags: {
+          '<pane-id>': 'The id `pane add` or `pane list` printed',
+          [SESSION_FLAG]: SESSION_FLAG_HELP,
+        },
+        examples: ['claude-code-kanban pane rm p3'],
+        run: runPaneRmCli,
+      },
+      list: {
+        summary: 'List the panes of a session, in tab order',
+        usage: 'claude-code-kanban pane list [--session <id>] [--json]',
+        flags: {
+          [SESSION_FLAG]: SESSION_FLAG_HELP,
+          '--json': 'Output JSON ({rev, panes: [{id, kind, target, title, addedAt}], updatedAt})',
+        },
+        run: runPaneListCli,
+      },
+    },
+  },
+  session: {
+    summary: 'List, search, open, inspect and group Claude Code sessions',
+    verbs: {
+      list: {
+        summary: 'List the active sessions, as the sidebar\'s Active view shows them (pinned/sticky always included)',
+        usage: 'claude-code-kanban session list [--all] [--days <n>] [--project <name>] [--limit <n|all>] [--no-pins] [--json]',
+        flags: {
+          '--all': 'Every session, active or not',
+          '--days <n>': 'Only sessions modified within the last N days (fractional ok, e.g. 0.5)',
+          '--project <name>': 'Filter by project: an absolute path selects one project, other text matches a part of the path',
+          '--limit <n|all>': 'Max rows to display (default: every active row; 20 with --all). Pinned sessions are kept past it.',
+          '--no-pins': 'Disable always-include and sticky-first ordering for pinned sessions',
+          '--json': 'Output JSON instead of a table',
+        },
+        notes: 'Active: running in the terminal, or with messages and open tasks, live agents, a wait on the user or recent activity. STATUS is idle, active, busy (a task in progress) or wait. When --limit cuts the list, a last line says how many rows it shows of how many (on stderr with --json).',
+        examples: [
+          'claude-code-kanban session list',
+          'claude-code-kanban session list --all --days 0.5 --limit 20 --project my-repo',
+        ],
+        run: runSessionListCli,
+      },
+      search: {
+        summary: 'Find sessions whose name or id contains the text, from any transcript',
+        usage: 'claude-code-kanban session search <text> [--limit <n>] [--json]',
+        flags: {
+          '<text>': 'At least 3 characters; matched against the session name and id',
+          '--limit <n>': 'Max rows (default and max: 20)',
+          '--json': 'Output JSON instead of a table',
+        },
+        examples: [
+          'claude-code-kanban session search login-redirect',
+        ],
+        run: runSessionSearchCli,
+      },
+      open: {
+        summary: 'Focus a session in the browser (Active tab)',
+        usage: 'claude-code-kanban session open <id>',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+        },
+        examples: ['claude-code-kanban session open $CLAUDE_SESSION_ID'],
+        run: runSessionOpenCli,
+      },
+      cost: {
+        summary: 'Show a session (or one subagent) in the Cost app',
+        usage: 'claude-code-kanban session cost <id> [--agent <agent id>]',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+          '--agent <agent id>': 'A subagent of the session (agent-…), as claude-code-cost session prints it',
+        },
+        notes: 'Under the hub the board switches to the Cost tab. The command also prints the cost link, for a board that runs alone.',
+        examples: ['claude-code-kanban session cost 3fa9c1 --agent agent-a10ff42'],
+        run: runSessionCostCli,
+      },
+      view: {
+        summary: 'Show full session stats (metadata + context window + cost) and the transcript path',
+        usage: 'claude-code-kanban session view <id> [--json]',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+          '--json': 'Output JSON instead of formatted sections',
+        },
+        notes: 'To learn what a session did, read its transcript (a .jsonl file, newest lines last).',
+        examples: ['claude-code-kanban session view $CLAUDE_SESSION_ID'],
+        run: runSessionViewCli,
+      },
+      plan: {
+        summary: 'Print the plan saved for a session (plan mode)',
+        usage: 'claude-code-kanban session plan <id> [--json]',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+          '--json': 'Output JSON ({content, slug}); content is null when there is no plan',
+        },
+        examples: ['claude-code-kanban session plan 3fa9c1'],
+        run: runSessionPlanCli,
+      },
+      agents: {
+        summary: 'List the subagents a session has run, and whether it waits for the user',
+        usage: 'claude-code-kanban session agents <id> [--json]',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+          '--json': 'Output JSON ({agents, waitingForUser})',
+        },
+        notes: 'Needs the cck hooks in this config dir (claude-code-kanban --install); without them the list is empty.',
+        examples: ['claude-code-kanban session agents $CLAUDE_SESSION_ID'],
+        run: runSessionAgentsCli,
+      },
+      pin: {
+        summary: 'Pin (or unpin) a session in the sidebar; every board on this config dir shows it',
+        usage: 'claude-code-kanban session pin <id> [--sticky] [--unpin]',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+          '--sticky': 'Set sticky state (always shown in the list)',
+          '--unpin': 'Clear pin/sticky state',
+        },
+        examples: [
+          'claude-code-kanban session pin $CLAUDE_SESSION_ID --sticky',
+          'claude-code-kanban session pin $CLAUDE_SESSION_ID --unpin',
+        ],
+        run: runSessionPinCli,
+      },
+      group: {
+        summary: 'Move a session into a group in the sidebar',
+        usage: 'claude-code-kanban session group <id> (<group> | --with <session> | --parent <session>) [--no-parent] [--create] [--json]',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+          '<group>': 'Group name (any case), path from the top (parent/child) or id, from `group list`',
+          '--with <session>': 'Join the group this other session shows in (id or unique prefix)',
+          '--parent <session>': 'Show the session under this one, indented, when both are in the same list; alone, it also joins its group',
+          '--no-parent': 'Show the session on its own again',
+          '--create': 'Make the group, and the missing parents of a path, when none matches; with --with, it holds both sessions',
+          '--json': 'Output JSON ({group, name, path, created, left, rev})',
+        },
+        notes: 'The session leaves the group it was in. In a group that holds its project, it shows in that project\'s block.',
+        examples: [
+          'claude-code-kanban session group $CLAUDE_SESSION_ID "Auth refactor"',
+          'claude-code-kanban session group 3fa9c1 auth-refactor/swarm-1 --create',
+          'claude-code-kanban session group 3fa9c1 --with $CLAUDE_SESSION_ID --create',
+          'claude-code-kanban session group 3fa9c1 --parent $CLAUDE_SESSION_ID',
+        ],
+        run: runSessionGroupCli,
+      },
+      ungroup: {
+        summary: 'Take a session out of its group',
+        usage: 'claude-code-kanban session ungroup <id> [--json]',
+        flags: {
+          '<id>': 'Full session id, or a unique prefix',
+          '--json': 'Output JSON ({left, rev})',
+        },
+        notes: 'A session whose project is in a group still shows there; move the project on the board.',
+        examples: ['claude-code-kanban session ungroup $CLAUDE_SESSION_ID'],
+        run: runSessionUngroupCli,
+      },
+    },
+  },
+  group: {
+    summary: 'Read and change the session groups in the sidebar',
+    verbs: {
+      list: {
+        summary: 'List the groups in sidebar order, nested groups under their parent, with the members the sidebar\'s Active view shows (active, pinned or sticky)',
+        usage: 'claude-code-kanban group list [--all] [--json]',
+        flags: {
+          '--all': 'Every member, active or not',
+          '--json': 'Output JSON ({rev, groups: [{id, name, parent, transient?, visible, total, members}]}); a session member has title, branch, status, pinned and age, or missing: true; a project member has sessions (its shown sessions)',
+        },
+        notes: 'A project member shows when it has a session the Active view shows. visible/total counts the members shown. A group marked (transient) goes when the board\'s Active view shows none of its sessions; Keep or a rename on the board, or `group rename`, keeps it. `dispatch start --group` and `group create --transient` make transient groups. Pass a group\'s name, path (parent/child) or id to `session group`.',
+        examples: ['claude-code-kanban group list', 'claude-code-kanban group list --all --json'],
+        run: runGroupListCli,
+      },
+      create: {
+        summary: 'Make a group, and the missing parents of a path',
+        usage: 'claude-code-kanban group create <name|path> [--transient] [--json]',
+        flags: {
+          '<name|path>': 'Name of a new top-level group, or a path from the top (parent/child)',
+          '--transient': 'The groups it makes go when the Active view shows none of their sessions',
+          '--json': 'Output JSON ({group, name, path, rev})',
+        },
+        notes: 'Fails when the group exists.',
+        examples: ['claude-code-kanban group create "Auth refactor"', 'claude-code-kanban group create auth-refactor/swarm-1'],
+        run: runGroupCreateCli,
+      },
+      rename: {
+        summary: 'Rename a group; it keeps its place, parent and members',
+        usage: 'claude-code-kanban group rename <group> <new name> [--json]',
+        flags: {
+          '<group>': 'Group name (any case), path from the top (parent/child) or id, from `group list`',
+          '<new name>': 'The new name',
+          '--json': 'Output JSON ({group, name, path, rev})',
+        },
+        examples: ['claude-code-kanban group rename auth-refactor "Auth v2"'],
+        run: runGroupRenameCli,
+      },
+      rm: {
+        summary: 'Remove a group, as Delete on the board does',
+        usage: 'claude-code-kanban group rm <group> [--json]',
+        flags: {
+          '<group>': 'Group name (any case), path from the top (parent/child) or id, from `group list`',
+          '--json': 'Output JSON ({removed: {id, name, path}, ungrouped, rev})',
+        },
+        notes: 'Its members leave the group and show as with no group: in their project\'s group or the top level. Its child groups move up one level.',
+        examples: ['claude-code-kanban group rm presales-cloud'],
+        run: runGroupRmCli,
+      },
+      prune: {
+        summary: 'Remove every empty group',
+        usage: 'claude-code-kanban group prune [--dry-run] [--json]',
+        flags: {
+          '--dry-run': 'List the groups it would remove, and remove none',
+          '--json': 'Output JSON ({removed: [{id, name, path}], dryRun, rev})',
+        },
+        notes: 'Empty: no session whose transcript still exists, no project, and no child group that is not empty. It checks every member, not only the ones the Active view shows.',
+        examples: ['claude-code-kanban group prune --dry-run', 'claude-code-kanban group prune'],
+        run: runGroupPruneCli,
+      },
+    },
+  },
+  task: {
+    summary: 'Read the tasks on the board',
+    verbs: {
+      list: {
+        summary: 'List the tasks of a session, a project, or every session',
+        usage: 'claude-code-kanban task list (<session> | --project <path> | --all) [--status <s>] [--json]',
+        flags: {
+          '<session>': 'Full session id, or a unique prefix',
+          '--project <path>': 'Every task of the sessions in this project (absolute path, as in `project list`)',
+          '--all': 'Every task on the board',
+          '--status <s>': 'Only tasks in this status: pending, in_progress or completed',
+          '--json': 'Output JSON instead of a table',
+        },
+        examples: [
+          'claude-code-kanban task list $CLAUDE_SESSION_ID',
+          'claude-code-kanban task list --all --status in_progress',
+        ],
+        run: runTaskListCli,
+      },
+    },
+  },
+  project: {
+    summary: 'Read the projects the board knows',
+    verbs: {
+      list: {
+        summary: 'List known project paths, newest activity first',
+        usage: 'claude-code-kanban project list [--json]',
+        flags: {
+          '--json': 'Output JSON instead of a table',
+        },
+        notes: 'These are the folders `dispatch start --cwd` accepts.',
+        run: runProjectListCli,
+      },
+    },
+  },
+  dispatch: {
+    summary: 'Start, list and end Claude Code sessions for tasks in cck\'s terminal',
+    verbs: {
+      start: {
+        summary: 'Start claude in cck\'s terminal with a task; prints the session id',
+        usage: 'claude-code-kanban dispatch start --cwd <dir> (--spec <text> | --spec-file <path>) [--name <n>] [--group <g>] [--model <m>] [--worktree [name]] [--task-list [id]] [--json] [-- <claude args>...]',
+        flags: {
+          '--cwd <dir>': 'Folder to run in (any existing folder, default: current dir)',
+          '--spec <text>': 'The task, self-contained; sent as the first message',
+          '--spec-file <path>': 'Read the task from a file',
+          '--name <n>': 'Session name; also its peer name for SendMessage',
+          '--group <g>': 'Add it to this group: a name, path or id. The groups it makes are transient (see `help group list`)',
+          '--model <m>': 'fable, opus, sonnet or haiku',
+          '--worktree [name]': 'Run in a new git worktree',
+          '--task-list [id]': 'Use this task list instead of its own (default: this session\'s list), so its cards show on one board with yours. Off unless given',
+          '--json': 'Output JSON',
+          '-- <claude args>': 'Passed to claude as they are, e.g. --permission-mode auto. No quotes, % or control characters; cck sets --session-id, --name, --model and --worktree',
+        },
+        notes: 'Needs the terminal token, so it runs on the machine of the cck server. cck sends no report: say in the spec how the session reports back. Run `claude-code-kanban skills get dispatch` for how to write the spec.',
+        examples: [
+          'claude-code-kanban dispatch start --cwd . --spec-file spec.md --name fix-login-redirect --group auth-refactor --model sonnet -- --permission-mode auto',
+          'claude-code-kanban dispatch start --cwd . --spec-file spec.md --name api-worker --task-list',
+        ],
+        run: runDispatchStartCli,
+      },
+      list: {
+        summary: 'List sessions this session started that still run in cck\'s terminal',
+        usage: 'claude-code-kanban dispatch list [--all] [--json]',
+        flags: {
+          '--all': 'Every dispatch on this board',
+          '--json': 'Output JSON',
+        },
+        run: runDispatchListCli,
+      },
+      end: {
+        summary: 'End the terminal of a session this session started',
+        usage: 'claude-code-kanban dispatch end (<session id or prefix> | --name <n>) [--json]',
+        flags: {
+          '<session id or prefix>': 'A session from `dispatch list`',
+          '--name <n>': 'The session\'s --name from dispatch start',
+          '--json': 'Output JSON',
+        },
+        notes: 'Needs the terminal token, like dispatch start. The worktree stays.',
+        examples: ['claude-code-kanban dispatch end --name api-worker'],
+        run: runDispatchEndCli,
+      },
+    },
+  },
+  terminal: {
+    summary: 'Read the terminals running in cck',
+    verbs: {
+      list: {
+        summary: 'List every terminal in cck: dispatched, opened by hand, and Kanbot',
+        usage: 'claude-code-kanban terminal list [--json]',
+        flags: {
+          '--json': 'Output JSON',
+        },
+        notes: 'Read-only. `dispatch end` ends a terminal this session dispatched; the user ends the others from the board.',
+        run: runTerminalListCli,
+      },
+    },
+  },
+  skills: {
+    summary: 'Print a skill guide bundled with this version',
+    verbs: {
+      get: {
+        summary: 'Print the guide for a skill',
+        usage: 'claude-code-kanban skills get <name>',
+        flags: { '<name>': 'Skill name, e.g. dispatch' },
+        examples: ['claude-code-kanban skills get dispatch'],
+        run: runSkillsGetCli,
+      },
+    },
+  },
+};
+
+for (const [noun, cmd] of Object.entries(COMMANDS)) {
+  cmd.name = noun;
+  for (const [verb, v] of Object.entries(cmd.verbs || {})) v.name = `${noun} ${verb}`;
+}
+function runCli(argv) {
+  if (argv.includes('--version') || argv.includes('-v')) {
+    console.log(require('./package.json').version);
+    process.exit(0);
+  }
+  const cli = resolveCliCommand(argv);
+  if (cli.kind === 'server') return false;
+  if (cli.kind === 'help') {
+    const noun = cli.target && Object.hasOwn(COMMANDS, cli.target) ? COMMANDS[cli.target] : null;
+    const verb = noun?.verbs && cli.verb && Object.hasOwn(noun.verbs, cli.verb) ? noun.verbs[cli.verb] : null;
+    if (verb) printLeafHelp(verb);
+    else if (noun) printNounHelp(cli.target);
+    else printTopHelp();
+    process.exit(0);
+  }
+  if (cli.kind === 'unknown-noun') {
+    console.error(`Unknown command: ${cli.noun}\n`);
+    printTopHelp();
+    process.exit(1);
+  }
+  if (cli.kind === 'unknown-verb') {
+    console.error(`Unknown subcommand: ${cli.noun} ${cli.verb}\n`);
+    printNounHelp(cli.noun);
+    process.exit(1);
+  }
+  if (cli.kind === 'noun') {
+    printNounHelp(cli.noun);
+    process.exit(argv.includes('--help') || argv.includes('-h') ? 0 : 1);
+  }
+  if (cli.kind === 'leaf') {
+    if (cli.args.includes('--help') || cli.args.includes('-h')) {
+      printLeafHelp(cli.entry);
+      process.exit(0);
+    }
+    cli.entry.run(cli.args, cli.entry)
+      .then(code => { process.exitCode = code; })
+      .catch(e => { console.error(e.message); process.exitCode = 1; });
+    return true;
+  }
+  return true;
+}
+
+function resolveCliCommand(argv) {
+  const noun = argv[2] && !argv[2].startsWith('-') ? argv[2] : null;
+  const hasHelp = (a) => a.includes('--help') || a.includes('-h');
+  if (!noun) return hasHelp(argv) ? { kind: 'help' } : { kind: 'server' };
+  if (noun === 'help') return { kind: 'help', target: argv[3], verb: argv[4] };
+  if (!Object.hasOwn(COMMANDS, noun)) return { kind: 'unknown-noun', noun };
+  const entry = COMMANDS[noun];
+  if (!entry.verbs) return { kind: 'leaf', name: noun, entry, args: argv.slice(3) };
+  const verb = argv[3] && !argv[3].startsWith('-') ? argv[3] : null;
+  if (!verb) return { kind: 'noun', noun };
+  if (!Object.hasOwn(entry.verbs, verb)) return { kind: 'unknown-verb', noun, verb };
+  return { kind: 'leaf', name: `${noun} ${verb}`, entry: entry.verbs[verb], args: argv.slice(4) };
+}
+
+// The website's reference/cli.md has the same table; change both.
+const SERVER_FLAGS = [
+  ['--port <n>', 'PORT', 'Port (default 3541)'],
+  ['--open', '', 'Open the board in the browser'],
+  ['--dir <path>', 'CLAUDE_CONFIG_DIR', 'Config dir (default ~/.claude); also for --install'],
+  ['--enable-terminal', '', 'Turn on the embedded terminal'],
+  ['--terminal-shell <shell>', 'CCK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
+  ['--host <addr>', 'HOST', 'Listen address (default 127.0.0.1)'],
+  ['--allowed-hosts <list>', 'ALLOWED_HOSTS', 'Extra Host header values, comma-separated'],
+  ['--<app>-url <url>', '<APP>_URL', 'Link to app: marketplace, cost, memory'],
+  ['--install, --uninstall', '', 'Install or remove the plugin'],
+  ['--yes', '', 'With --install: no prompt'],
+];
+
+function topHelp() {
+  const lines = ['Usage: claude-code-kanban <command> [args] [--flags]\n', 'Commands:'];
+  for (const [name, cmd] of Object.entries(COMMANDS)) {
+    const verbs = cmd.verbs ? ` (${Object.keys(cmd.verbs).join(', ')})` : '';
+    lines.push(`  ${name.padEnd(20)}${cmd.summary}${verbs}`);
+  }
+  lines.push(`  ${'help'.padEnd(20)}Show help for a command (claude-code-kanban help <command>)`);
+  lines.push('\nFlags:');
+  lines.push('  --help, -h            Show help (top-level, noun-level, or leaf-level)');
+  lines.push('  --version, -v         Print version and exit');
+  lines.push('\nServer (no command; a flag wins over its env var):');
+  const flagPad = Math.max(...SERVER_FLAGS.map(([flag]) => flag.length)) + 2;
+  const envPad = Math.max(...SERVER_FLAGS.map(([, env]) => env.length)) + 2;
+  for (const [flag, env, desc] of SERVER_FLAGS) lines.push(`  ${flag.padEnd(flagPad)}${env.padEnd(envPad)}${desc}`);
+  lines.push('\nCommand env:');
+  lines.push('  CCK_URL               Server base URL, e.g. http://127.0.0.1:4795 (wins over PORT)');
+  lines.push('  PORT                  Server port (default: the one this config dir\'s server reports, else 3541)');
+  lines.push('  CLAUDE_CONFIG_DIR     Claude config dir whose board to use');
+  lines.push('\nRun `claude-code-kanban help <command>` for its subcommands, and `help <command> <subcommand>` for flags and examples.');
+  return lines.join('\n');
+}
+
+function printTopHelp() {
+  console.log(topHelp());
+}
+
+function printNounHelp(noun) {
+  const entry = COMMANDS[noun];
+  console.log(`${entry.summary}\n`);
+  if (entry.verbs) {
+    console.log(`Usage: claude-code-kanban ${noun} <subcommand> [args] [--flags]\n`);
+    console.log('Subcommands:');
+    for (const [vName, v] of Object.entries(entry.verbs)) {
+      console.log(`  ${vName.padEnd(12)}${v.summary}`);
+    }
+    console.log(`\nRun \`claude-code-kanban help ${noun} <subcommand>\` for flags and examples.`);
+  } else {
+    printLeafHelp(entry);
+  }
+}
+
+function printLeafHelp(entry) {
+  console.log(`${entry.summary}\n`);
+  console.log(`Usage: ${entry.usage}`);
+  const flags = { ...entry.flags, '--help, -h': 'Show this help' };
+  const pad = Math.max(...Object.keys(flags).map(f => f.length));
+  console.log('\nFlags:');
+  for (const [flag, desc] of Object.entries(flags)) {
+    console.log(`  ${flag.padEnd(pad + 2)}${desc}`);
+  }
+  if (entry.notes) console.log(`\n${entry.notes}`);
+  if (entry.examples?.length) {
+    console.log('\nExamples:');
+    for (const ex of entry.examples) console.log(`  ${ex}`);
+  }
+}
+
+// For a bad value: the leaf help would bury the one line that says what is wrong.
+function usageError(entry, message) {
+  console.error(message);
+  console.error(`Run \`claude-code-kanban help ${entry.name}\` for usage.`);
+  return 1;
+}
+
+function getArgValue(args, name) {
+  const idx = args.findIndex(a => a === `--${name}` || a.startsWith(`--${name}=`));
+  if (idx === -1) return null;
+  const arg = args[idx];
+  if (arg.includes('=')) return arg.split('=').slice(1).join('=');
+  return args[idx + 1] && !args[idx + 1].startsWith('--') ? args[idx + 1] : null;
+}
+
+// The hub runs one cck per config dir, each on its own port, so 3541 can be another dir's board.
+// The server's beacon in this config dir names the right one; PORT still wins when set.
+// A beacon left by a dead server means this dir's board is down: 3541 would be someone else's.
+// Returns null in that case.
+function cliPort() {
+  if (process.env.PORT) return process.env.PORT;
+  const beacon = readCckJson('server.json');
+  if (!beacon) return 3541;
+  return beacon.port && beacon.pid && isPidAlive(beacon.pid) ? beacon.port : null;
+}
+
+function cliBaseUrl() {
+  if (process.env.CCK_URL) return process.env.CCK_URL.replace(/\/+$/, '');
+  const port = cliPort();
+  return port === null ? null : `http://127.0.0.1:${port}`;
+}
+
+function cliTargetPort() {
+  if (!process.env.CCK_URL) return cliPort();
+  try { return new URL(process.env.CCK_URL).port; } catch (_) { return ''; }
+}
+
+function readCckJson(name) {
+  try { return JSON.parse(fs.readFileSync(path.join(getClaudeDir(), '.cck', name), 'utf8')); } catch (_) { return null; }
+}
+
+// EPERM means the process exists but belongs to someone else.
+function isPidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+function unreachable() {
+  const dir = displayPath(getClaudeDir());
+  const start = 'Start it first with "claude-code-kanban".';
+  if (process.env.CCK_URL) return `Cannot reach cck server for ${dir} at ${cliBaseUrl()} (CCK_URL). ${start}`;
+  const port = cliPort();
+  if (port === null) return `Cannot reach cck server for ${dir}: its server.json names a server that is no longer running. ${start}`;
+  return `Cannot reach cck server for ${dir} on port ${port}. ${start}`;
+}
+
+class CliUnreachable extends Error { constructor() { super(unreachable()); this.code = 'unreachable'; } }
+
+// Windows sometimes fails a loopback connect with ETIMEDOUT after ~300 ms when many
+// connects run at once. Nothing reached the server, so even a POST is safe to send again.
+const CONNECT_RETRY_MS = [250, 500, 1000, 2000];
+const isConnectTimeout = (e) => e.cause?.code === 'ETIMEDOUT' && e.cause?.syscall === 'connect';
+// A loopback connection can also be reset after it opens. A GET is safe to send again; a write may have landed.
+const isRetryable = (e, init) => isConnectTimeout(e) || (!init?.method && e.cause?.code === 'ECONNRESET');
+
+async function cliFetch(urlPath, init) {
+  const base = cliBaseUrl();
+  if (!base) throw new CliUnreachable();
+  for (let i = 0; ; i++) {
+    try {
+      return await fetch(`${base}${urlPath}`, init);
+    } catch (e) {
+      if (isRetryable(e, init) && i < CONNECT_RETRY_MS.length) {
+        await new Promise((r) => setTimeout(r, CONNECT_RETRY_MS[i]));
+        continue;
+      }
+      if (e.cause?.code === 'ECONNREFUSED' || /fetch failed/i.test(e.message)) throw new CliUnreachable();
+      throw e;
+    }
+  }
+}
+
+const cliPostJson = (urlPath, body, label, headers) => cliSendJson('POST', urlPath, body, label, headers);
+
+// Every write verb sends JSON and reports failure the same way; `label` names the verb
+// in the error line. Returns the parsed response body ({} when empty), or null after
+// printing the failure, so callers just return 1.
+async function cliSendJson(method, urlPath, body, label, headers = {}) {
+  const res = await cliFetch(urlPath, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body)
+  });
+  const text = await res.text();
+  let parsed = {};
+  try { parsed = text ? JSON.parse(text) : {}; } catch (_) { /* not JSON */ }
+  if (res.ok) return parsed;
+  console.error(`${label} failed (${res.status}): ${parsed.error || text}`);
+  return null;
+}
+
+function reportCliError(e) {
+  console.error(e.code === 'unreachable' ? e.message : (e.message || String(e)));
+}
+
+async function runPreviewCli(args) {
+  const [filePathArg] = positionals(args, ['--session']);
+  if (!filePathArg) {
+    printLeafHelp(COMMANDS.doc.verbs.preview);
+    return 1;
+  }
+  const url = linkUrl(filePathArg);
+  if (url) return previewUrlCli(url, args);
+  // No $CLAUDE_CODE_SESSION_ID fallback: a session here switches the board's focus, and the
+  // agent must not move the board unless asked.
+  const sessionArg = getArgValue(args, 'session') || process.env.PREVIEW_SESSION || null;
+  const resolved = sessionArg && await resolveSessionByIdOrPrefix(sessionArg);
+  if (sessionArg && !resolved) return 1;
+  const sessionId = resolved?.id || null;
+  const abs = cliPath(filePathArg);
+  try {
+    if (!await cliPostJson('/api/preview', { path: abs, sessionId }, 'Preview')) return 1;
+    console.log(`Preview opened: ${abs}${sessionId ? ` (session ${sessionId.slice(0, 8)})` : ''}`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+// The modal cannot show a web page, so a URL is linked instead and the tab on screen
+// offers to open it.
+async function previewUrlCli(url, args) {
+  const resolved = await resolveSessionArg(COMMANDS.doc.verbs.preview, args, 'a URL is linked to the session.');
+  return resolved ? postDocLink(url, resolved.id, { open: true }) : 1;
+}
+
+async function postDocLink(target, sessionId, { unlink = false, open = false } = {}) {
+  try {
+    const out = await cliPostJson('/api/document/link', { path: target, sessionId, unlink, open }, 'Link');
+    if (!out) return 1;
+    const what = linkUrl(target) ? 'URL' : 'Document';
+    console.log(`${what} ${unlink ? 'unlinked from' : 'linked to'} session ${sessionId.slice(0, 8)}: ${out.path}`);
+    if (!unlink && out.tabs === 0) console.log('No browser tab is open; the board shows it when one opens.');
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+// Resolved to the full id because the browser keys linked docs by it, so a prefix won't match.
+async function resolveSessionArg(entry, args, why) {
+  const sessionArg = getArgValue(args, 'session') || process.env.PREVIEW_SESSION || process.env.CLAUDE_CODE_SESSION_ID;
+  if (!sessionArg) {
+    usageError(entry, `--session is required: ${why}`);
+    return null;
+  }
+  return resolveSessionByIdOrPrefix(sessionArg);
+}
+
+async function runDocLinkCli(args, entry) {
+  const [filePathArg] = positionals(args, ['--session']);
+  if (!filePathArg) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  const resolved = await resolveSessionArg(entry, args, 'linked docs are stored per session.');
+  if (!resolved) return 1;
+  const unlink = entry === COMMANDS.doc.verbs.unlink;
+  return postDocLink(cliTarget(filePathArg), resolved.id, { unlink });
+}
+
+async function runDocListCli(args, entry) {
+  const resolved = await resolveSessionArg(entry, args, 'linked docs are stored per session.');
+  return resolved ? printLinkedDocs(resolved.id, args.includes('--json')) : 1;
+}
+
+// The server resolves a path against its own cwd, so a relative one is made absolute here.
+const cliTarget = (arg) => linkUrl(arg) || cliPath(arg);
+
+const PANES_WHY = 'panes are stored per session.';
+
+const panesPath = (sessionId, paneId) =>
+  `/api/panes/${encodeURIComponent(sessionId)}${paneId ? `/${encodeURIComponent(paneId)}` : ''}`;
+
+async function runPaneAddCli(args, entry) {
+  const [target] = positionals(args, ['--session', '--title']);
+  if (!target) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  const resolved = await resolveSessionArg(entry, args, PANES_WHY);
+  if (!resolved) return 1;
+  try {
+    const body = { target: cliTarget(target), title: getArgValue(args, 'title') || '' };
+    const out = await cliPostJson(panesPath(resolved.id), body, 'Pane add');
+    if (!out) return 1;
+    const { pane } = out;
+    let frameable;
+    if (pane.kind === 'url') {
+      try {
+        ({ frameable } = await cliGetJson(`${panesPath(resolved.id, pane.id)}/framing`, 'Pane framing'));
+      } catch {}
+    }
+    if (args.includes('--json')) console.log(JSON.stringify({ ...pane, frameable }, null, 2));
+    else console.log(`${pane.id}  ${pane.title}${out.added ? '' : ' (already there)'}`);
+    if (frameable === false && !args.includes('--json')) {
+      console.log(`note: ${new URL(pane.target).host} refuses framing, so the pane shows an "Open in new tab" card. Look for a URL of the same content that allows framing.`);
+    }
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runPaneRmCli(args, entry) {
+  const [paneId] = positionals(args, ['--session']);
+  if (!paneId) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  const resolved = await resolveSessionArg(entry, args, PANES_WHY);
+  if (!resolved) return 1;
+  try {
+    if (!await cliSendJson('DELETE', panesPath(resolved.id, paneId), undefined, 'Pane rm')) return 1;
+    console.log(`Removed pane ${paneId} from session ${resolved.id.slice(0, 8)}`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runPaneListCli(args, entry) {
+  const resolved = await resolveSessionArg(entry, args, PANES_WHY);
+  if (!resolved) return 1;
+  try {
+    const layout = await cliGetJson(panesPath(resolved.id), 'Pane list');
+    if (args.includes('--json')) console.log(JSON.stringify(layout, null, 2));
+    else if (!layout.panes.length) console.log(`No panes for session ${resolved.id.slice(0, 8)}.`);
+    else printTable(['ID', 'KIND', 'TITLE', 'TARGET'], layout.panes.map((p) => [p.id, p.kind, p.title, p.target]));
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function printLinkedDocs(sessionId, asJson) {
+  try {
+    const links = await cliGetJson(`/api/document/links?session=${encodeURIComponent(sessionId)}`, 'Linked docs');
+    const paths = links[sessionId] || [];
+    if (asJson) console.log(JSON.stringify(paths, null, 2));
+    else if (!paths.length) console.log(`No linked docs for session ${sessionId.slice(0, 8)}.`);
+    else for (const p of paths) console.log(p);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+function sessionTitle(s) {
+  return s.customTitle || s.name || s.slug || '';
+}
+
+// The board's badge rule (docs/session-states.md). `active` is a wider rule, for which rows show.
+function sessionStatus(s) {
+  if (!(s.hasRecentLog || s.inProgress > 0 || s.hasActiveAgents || s.hasWaitingForUser)) return 'idle';
+  if (s.hasWaitingForUser) return 'wait';
+  if (s.inProgress > 0) return 'busy';
+  return 'active';
+}
+
+function parseLimit(args, { fallback, allowAll = false }) {
+  const raw = getArgValue(args, 'limit');
+  if (raw === null) return { ok: true, limit: fallback };
+  if (allowAll && raw === 'all') return { ok: true, limit: null };
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n) || n <= 0) return { ok: false, error: `Invalid --limit value: ${raw}` };
+  return { ok: true, limit: n };
+}
+
+// `lite` leaves out the fields that can read a whole transcript (loopInfo).
+function sessionsListPath({ limit, noPins = false, include = [], project = null, activeOnly = false, lite = false }) {
+  const q = limit === null ? 'all' : String(limit);
+  const pinsQ = noPins ? '&pins=off' : '';
+  const includeQ = include.length ? `&include=${include.map(encodeURIComponent).join(',')}` : '';
+  const projectQ = project ? `&project=${encodeURIComponent(project)}` : '';
+  const filterQ = activeOnly ? '&filter=active' : '';
+  const liteQ = lite ? '&lite=1' : '';
+  return `/api/sessions?limit=${q}${pinsQ}${includeQ}${projectQ}${filterQ}${liteQ}`;
+}
+
+const fetchSessionsList = (opts, label = 'Session list') => cliGetJson(sessionsListPath(opts), label);
+
+const uniqueById = (list) => [...new Map(list.map((s) => [s.id, s])).values()];
+
+// The server refuses a request line above about 16 KB (431), about 430 ids, so the ids go in batches.
+const IDS_PER_REQUEST = 100;
+
+async function fetchSessionsByIds(ids, label, { lite = false } = {}) {
+  const batches = [];
+  for (let i = 0; i < ids.length; i += IDS_PER_REQUEST) batches.push(ids.slice(i, i + IDS_PER_REQUEST));
+  const lists = await Promise.all(batches.map((include) => fetchSessionsList({ limit: 1, include, lite }, label)));
+  return uniqueById(lists.flat());
+}
+
+async function resolveSessionByIdOrPrefix(idArg) {
+  let res;
+  try {
+    res = await cliFetch(`/api/session/resolve?id=${encodeURIComponent(idArg)}`);
+  } catch (e) {
+    reportCliError(e);
+    return null;
+  }
+  if (res.status === 404) {
+    console.error(`No session matches: ${idArg}`);
+    return null;
+  }
+  if (res.status === 409) {
+    const { matches = [] } = await res.json().catch(() => ({}));
+    console.error(`Ambiguous prefix "${idArg}" matches ${matches.length} sessions:`);
+    for (const m of matches.slice(0, 10)) console.error(`  ${m.id}  ${m.customTitle || ''}`);
+    return null;
+  }
+  if (!res.ok) {
+    console.error(`Resolve failed (${res.status}): ${await res.text()}`);
+    return null;
+  }
+  return res.json();
+}
+
+async function runSessionListCli(args) {
+  const activeOnly = !args.includes('--all');
+  const noPins = args.includes('--no-pins');
+  const projectFilter = getArgValue(args, 'project');
+  const daysArg = getArgValue(args, 'days');
+  const days = daysArg !== null ? parseFloat(daysArg) : null;
+  if (daysArg !== null && (Number.isNaN(days) || days <= 0)) {
+    return usageError(COMMANDS.session.verbs.list, `Invalid --days value: ${daysArg}`);
+  }
+  // The Active view is short, so it has no cap. The server reads a whole transcript for some
+  // fields of each row it sends, so --all keeps one.
+  const parsed = parseLimit(args, { fallback: activeOnly ? null : 20, allowAll: true });
+  if (!parsed.ok) return usageError(COMMANDS.session.verbs.list, parsed.error);
+  const limit = parsed.limit;
+  const asJson = args.includes('--json');
+  let list;
+  let total;
+  try {
+    const res = await cliGet(sessionsListPath({ limit: days !== null ? null : limit, noPins, project: projectFilter, activeOnly, lite: !asJson }), 'Session list');
+    list = await res.json();
+    total = Number(res.headers.get('x-total-count')) || list.length;
+  } catch (e) {
+    reportCliError(e);
+    return 1;
+  }
+  if (days !== null) {
+    const cutoff = Date.now() - days * 86_400_000;
+    list = list.filter(s => s.pin || (s.modifiedAt && new Date(s.modifiedAt).getTime() >= cutoff));
+    total = list.length;
+  }
+  const pinRank = s => s.pin === 'sticky' ? 0 : s.pin === 'pinned' ? 1 : 2;
+  list.sort((a, b) => {
+    const r = pinRank(a) - pinRank(b);
+    if (r !== 0) return r;
+    return new Date(b.modifiedAt || 0) - new Date(a.modifiedAt || 0);
+  });
+  if (limit !== null && list.length > limit) {
+    const top = list.slice(0, limit);
+    const topIds = new Set(top.map(s => s.id));
+    const extraPinned = list.filter(s => s.pin && !topIds.has(s.id));
+    list = [...top, ...extraPinned];
+  }
+  const cut = list.length < total ? `${list.length} of ${total} shown; --limit all shows every row` : null;
+  if (asJson) {
+    console.log(JSON.stringify(list.map(({ pin, ...s }) => ({ ...s, pinState: pin || null })), null, 2));
+    if (cut) console.error(cut);
+    return 0;
+  }
+  if (!list.length) {
+    console.log('No sessions match.');
+    return 0;
+  }
+  const rows = list.map(s => ({
+    id: s.id.slice(0, 8),
+    pin: s.pin || '',
+    status: sessionStatus(s),
+    age: s.modifiedAt ? formatAge(Date.now() - new Date(s.modifiedAt).getTime()) : '-',
+    tasks: `${s.completed}/${s.taskCount}`,
+    project: path.basename(s.project || ''),
+    title: sessionTitle(s),
+  }));
+  const w = {
+    id: 8,
+    pin: Math.max(3, ...rows.map(r => r.pin.length)),
+    status: Math.max(6, ...rows.map(r => r.status.length)),
+    age: Math.max(3, ...rows.map(r => r.age.length)),
+    tasks: Math.max(5, ...rows.map(r => r.tasks.length)),
+    project: Math.max(7, ...rows.map(r => r.project.length)),
+  };
+  console.log(`${'ID'.padEnd(w.id)}  ${'PIN'.padEnd(w.pin)}  ${'STATUS'.padEnd(w.status)}  ${'AGE'.padEnd(w.age)}  ${'TASKS'.padEnd(w.tasks)}  ${'PROJECT'.padEnd(w.project)}  TITLE`);
+  for (const r of rows) {
+    console.log(`${r.id.padEnd(w.id)}  ${r.pin.padEnd(w.pin)}  ${r.status.padEnd(w.status)}  ${r.age.padEnd(w.age)}  ${r.tasks.padEnd(w.tasks)}  ${r.project.padEnd(w.project)}  ${r.title}`);
+  }
+  if (cut) console.log(cut);
+  return 0;
+}
+
+function formatAge(ms) {
+  if (ms < 0) return '0s';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
+}
+
+async function runSessionOpenCli(args) {
+  const idArg = args.find(a => !a.startsWith('--'));
+  if (!idArg) {
+    printLeafHelp(COMMANDS.session.verbs.open);
+    return 1;
+  }
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  try {
+    if (!await cliPostJson('/api/session/open', { id: resolved.id }, 'Open')) return 1;
+    console.log(`Session opened: ${resolved.id}${resolved.customTitle ? ` (${resolved.customTitle})` : ''}`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+const AGENT_ID_RE = /^agent-[\w-]+$/;
+
+async function runSessionCostCli(args) {
+  const entry = COMMANDS.session.verbs.cost;
+  const [idArg] = positionals(args, ['--agent']);
+  if (!idArg) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  const agent = getArgValue(args, 'agent');
+  const agentGiven = args.some((a) => a === '--agent' || a.startsWith('--agent='));
+  if (agentGiven && !AGENT_ID_RE.test(agent || '')) return usageError(entry, '--agent takes an agent-… id.');
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  try {
+    const out = await cliPostJson('/api/session/cost', { id: resolved.id, ...(agent && { agent }) }, 'Cost');
+    if (!out) return 1;
+    console.log(out.delivered ? 'Sent to the board: it opens the Cost tab.' : 'No hub board page is open to show it.');
+    if (out.url) console.log(`Cost view: ${out.url}`);
+    return out.delivered || out.url ? 0 : 1;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runSessionPinCli(args) {
+  const idArg = args.find(a => !a.startsWith('--'));
+  if (!idArg) {
+    printLeafHelp(COMMANDS.session.verbs.pin);
+    return 1;
+  }
+  const state = args.includes('--unpin') ? 'none' : args.includes('--sticky') ? 'sticky' : 'pinned';
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  try {
+    if (!await cliPostJson('/api/session/pin', { ids: [resolved.id], state }, 'Pin')) return 1;
+    const label = state === 'none' ? 'unpinned' : state;
+    console.log(`Session ${label}: ${resolved.id}${resolved.customTitle ? ` (${resolved.customTitle})` : ''}`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+const postSessionGroup = (id, body, label) => cliPostJson(`/api/sessions/${encodeURIComponent(id)}/group`, body, label);
+
+async function runSessionGroupCli(args, entry) {
+  const [idArg, groupArg] = positionals(args, ['--with', '--parent']);
+  const parentArg = getArgValue(args, 'parent');
+  const withFlag = getArgValue(args, 'with');
+  const noParent = args.includes('--no-parent');
+  if (!idArg || (!groupArg && !withFlag && !parentArg)) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  if (groupArg && withFlag) return usageError(entry, 'Give one of <group> or --with.');
+  if (parentArg && noParent) return usageError(entry, 'Give one of --parent or --no-parent.');
+  const [resolved, withPeer, parent] = await Promise.all([idArg, withFlag, parentArg].map((a) => a && resolveSessionByIdOrPrefix(a)));
+  if (!resolved || (withFlag && !withPeer) || (parentArg && !parent)) return 1;
+  // With no group, --parent also names the group to join.
+  const peer = withPeer || (!groupArg && parent);
+  const create = args.includes('--create');
+  const body = peer ? { with: peer.id, create } : { group: groupArg, create };
+  if (parent) body.parent = parent.id;
+  else if (noParent) body.parent = null;
+  try {
+    const out = await postSessionGroup(resolved.id, body, 'Group');
+    if (!out) return 1;
+    const { group, name, path, created, left, rev } = out;
+    if (args.includes('--json')) console.log(JSON.stringify({ group, name, path, created, left, rev }, null, 2));
+    else console.log(`Session ${resolved.id.slice(0, 8)} moved to ${created ? 'new ' : ''}group "${path}" (${group})`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runSessionUngroupCli(args, entry) {
+  const [idArg] = positionals(args, []);
+  if (!idArg) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  try {
+    const out = await postSessionGroup(resolved.id, { group: null }, 'Ungroup');
+    if (!out) return 1;
+    const { left, rev } = out;
+    const short = resolved.id.slice(0, 8);
+    if (args.includes('--json')) console.log(JSON.stringify({ left, rev }, null, 2));
+    else console.log(left ? `Session ${short} left group "${left}"` : `Session ${short} was in no group`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function groupVerb(args, urlPath, body, label, line) {
+  try {
+    const out = await cliPostJson(urlPath, body, label);
+    if (!out) return 1;
+    console.log(args.includes('--json') ? JSON.stringify(out, null, 2) : line(out));
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runGroupCreateCli(args, entry) {
+  const [pathArg] = positionals(args, []);
+  if (!pathArg) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  const transient = args.includes('--transient');
+  return groupVerb(args, '/api/groups/path', { path: pathArg, transient }, 'Create', (r) => `Created group "${r.path}" (${r.group})${transient ? ', transient' : ''}`);
+}
+
+async function runGroupRenameCli(args, entry) {
+  const [groupArg, nameArg] = positionals(args, []);
+  if (!groupArg || !nameArg) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  return groupVerb(args, '/api/groups/rename', { group: groupArg, name: nameArg }, 'Rename', (r) => `Renamed group to "${r.path}" (${r.group})`);
+}
+
+async function runGroupRmCli(args, entry) {
+  const [groupArg] = positionals(args, []);
+  if (!groupArg) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  return groupVerb(args, '/api/groups/remove', { group: groupArg }, 'Remove', (r) =>
+    `Removed group "${r.removed.path}" (${r.removed.id})${r.ungrouped ? `; ${r.ungrouped} member${r.ungrouped === 1 ? '' : 's'} left it` : ''}`);
+}
+
+async function runGroupPruneCli(args) {
+  const dryRun = args.includes('--dry-run');
+  return groupVerb(args, '/api/groups/prune', { dryRun }, 'Prune', (r) => {
+    if (!r.removed.length) return 'No empty groups.';
+    return r.removed.map((g) => `${dryRun ? 'Would remove' : 'Removed'} "${g.path}" (${g.id})`).join('\n');
+  });
+}
+
+// A session member carries the session's metadata; a project member carries the count of its
+// sessions that are shown. With activeOnly, a member is shown when the sidebar's Active view
+// shows it: an active or pinned session, a project with one. A project counts the sessions the
+// sidebar puts under it: keyed as the board keys them, without those a group holds by id.
+function describeGroupMembers(groups, sessions, activeOnly) {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const shown = (s) => !activeOnly || s.active || !!s.pin;
+  const heldById = new Set(groups.flatMap((g) => g.members.filter((m) => m.type === 'session').map((m) => m.ref)));
+  const shownByProject = new Map();
+  for (const s of sessions) {
+    const key = sessionProjectKey(s);
+    if (!shown(s) || !key || heldById.has(s.id)) continue;
+    shownByProject.set(key, (shownByProject.get(key) || 0) + 1);
+  }
+  const describe = (m) => {
+    if (m.type === 'project') {
+      const count = shownByProject.get(m.ref) || 0;
+      return [!activeOnly || count > 0, { ...m, sessions: count }];
+    }
+    const s = byId.get(m.ref);
+    if (!s) return [!activeOnly, { ...m, missing: true }];
+    return [shown(s), {
+      ...m,
+      title: sessionTitle(s),
+      branch: s.gitBranch || null,
+      status: sessionStatus(s),
+      pinned: s.pin || null,
+      age: ageOf(s.modifiedAt),
+    }];
+  };
+  return groups.map((g) => {
+    const members = g.members.map(describe).filter(([visible]) => visible).map(([, m]) => m);
+    return { ...g, visible: members.length, total: g.members.length, members };
+  });
+}
+
+async function runGroupListCli(args) {
+  const activeOnly = !args.includes('--all');
+  let rev;
+  let groups;
+  try {
+    ({ rev, groups } = await cliGetJson('/api/groups', 'Group list'));
+    const sessionRefs = [...new Set(groups.flatMap((g) => g.members.filter((m) => m.type === 'session').map((m) => m.ref)))];
+    // An inactive session held by id is still listed, so only the active list needs the id lookups.
+    const lists = await Promise.all([
+      fetchSessionsList({ limit: null, activeOnly, lite: true }, 'Group list'),
+      activeOnly ? fetchSessionsByIds(sessionRefs, 'Group list', { lite: true }) : [],
+    ]);
+    const sessions = uniqueById(lists.flat());
+    groups = describeGroupMembers(groups, sessions, activeOnly);
+  } catch (e) { reportCliError(e); return 1; }
+  if (args.includes('--json')) {
+    console.log(JSON.stringify({ rev, groups }, null, 2));
+    return 0;
+  }
+  if (!groups.length) {
+    console.log('No groups.');
+    return 0;
+  }
+  const rows = [];
+  const add = (parent, depth) => {
+    const pad = '  '.repeat(depth);
+    for (const g of groups.filter((x) => x.parent === parent)) {
+      rows.push([g.id, '', '', '', `${pad}${g.name}${g.transient ? ' (transient)' : ''} (${g.visible}/${g.total})`]);
+      for (const m of g.members) {
+        if (m.type === 'project') rows.push(['project', '', '', '', `${pad}  ${m.ref} (${m.sessions} sessions)`]);
+        else if (m.missing) rows.push([m.ref.slice(0, 8), 'gone', '-', '', `${pad}  (no such session)`]);
+        else rows.push([m.ref.slice(0, 8), m.status, m.age, m.pinned || '', `${pad}  ${m.title}`]);
+      }
+      add(g.id, depth + 1);
+    }
+  };
+  add(null, 0);
+  printTable(['ID', 'STATUS', 'AGE', 'PIN', 'NAME'], rows);
+  return 0;
+}
+
+async function runSessionViewCli(args) {
+  const idArg = args.find(a => !a.startsWith('--'));
+  if (!idArg) {
+    printLeafHelp(COMMANDS.session.verbs.view);
+    return 1;
+  }
+  const asJson = args.includes('--json');
+  const rateLimits = asJson ? null : cliGetJson('/api/rate-limits', 'Rate limits').catch(() => ({}));
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  let list;
+  try {
+    list = await fetchSessionsByIds([resolved.id], 'Session view');
+  } catch (e) { reportCliError(e); return 1; }
+  const s = list.find(x => x.id === resolved.id);
+  if (!s) {
+    console.error(`Session ${resolved.id} not found in /api/sessions response.`);
+    return 1;
+  }
+  if (asJson) {
+    console.log(JSON.stringify(s, null, 2));
+    return 0;
+  }
+  const status = sessionStatus(s);
+  const title = sessionTitle(s);
+  const age = s.modifiedAt ? formatAge(Date.now() - new Date(s.modifiedAt).getTime()) : '-';
+  const fmtTok = (n) => typeof n === 'number' ? (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)) : '-';
+  const fmtCost = (n) => typeof n === 'number' ? `$${n.toFixed(2)}` : '-';
+  const lines = [];
+  lines.push(`${s.id.slice(0, 8)} — ${title} [${status}]`);
+  if (s.project) lines.push(`  ${path.basename(s.project)}${s.gitBranch ? ` · ${s.gitBranch}` : ''} · modified ${age} ago`);
+  lines.push(`  Tasks: ${s.completed}/${s.taskCount}${s.inProgress ? ` (${s.inProgress} in progress)` : ''}${s.pending ? ` · ${s.pending} pending` : ''}`);
+  const ctx = s.contextStatus;
+  if (ctx) {
+    const cw = ctx.context_window || {};
+    const cost = ctx.cost || {};
+    const modelName = ctx.model?.display_name || ctx.model?.id || '-';
+    const modelExtras = [
+      ctx.effort?.level,
+      ctx.thinking?.enabled ? 'thinking' : null,
+      ctx.fast_mode ? 'fast' : null,
+    ].filter(Boolean).join(' · ');
+    lines.push(`  Model: ${modelName}${modelExtras ? ` (${modelExtras})` : ''}`);
+    if (cw.used_percentage != null) {
+      lines.push(`  Context: ${cw.used_percentage}% used · ${fmtTok(cw.total_input_tokens)} in${cw.total_output_tokens != null ? ` / ${fmtTok(cw.total_output_tokens)} out` : ''} · cache ${fmtTok(cw.current_usage?.cache_read_input_tokens)} read`);
+    }
+    const timing = cost.total_duration_ms != null
+      ? ` · ${cost.total_api_duration_ms != null ? formatAge(cost.total_api_duration_ms) : '-'} api / ${formatAge(cost.total_duration_ms)} total · +${cost.total_lines_added || 0}/-${cost.total_lines_removed || 0}`
+      : '';
+    lines.push(`  Cost: ${fmtCost(cost.total_cost_usd)}${timing}`);
+  }
+  // Account-wide, so not read from this session's file, which can be days old.
+  const rl = await rateLimits;
+  if (rl.five_hour || rl.seven_day) {
+    lines.push(`  Limits: 5h ${rl.five_hour?.used_percentage ?? '-'}% · 7d ${rl.seven_day?.used_percentage ?? '-'}%`);
+  }
+  if (s.jsonlPath) lines.push(`  Transcript: ${s.jsonlPath}`);
+  console.log(lines.join('\n'));
+  return 0;
+}
+
+function printTable(header, rows) {
+  const last = header.length - 1;
+  const width = header.map((h, i) => Math.max(h.length, ...rows.map(r => String(r[i]).length)));
+  const line = cells => cells.map((c, i) => (i === last ? String(c) : String(c).padEnd(width[i]))).join('  ');
+  console.log(line(header));
+  for (const r of rows) console.log(line(r));
+}
+
+const ageOf = (iso) => (iso ? formatAge(Date.now() - new Date(iso).getTime()) : '-');
+
+async function cliGet(urlPath, label) {
+  const res = await cliFetch(urlPath);
+  if (!res.ok) throw new Error(`${label} failed (${res.status}): ${await res.text()}`);
+  return res;
+}
+
+const cliGetJson = async (urlPath, label) => (await cliGet(urlPath, label)).json();
+
+async function runSessionSearchCli(args) {
+  const entry = COMMANDS.session.verbs.search;
+  const text = positionals(args, ['--limit']).join(' ').trim();
+  if (!text) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  if (text.length < 3) return usageError(entry, 'Search text needs at least 3 characters.');
+  const parsed = parseLimit(args, { fallback: 20 });
+  if (!parsed.ok) return usageError(entry, parsed.error);
+  try {
+    const ids = (await cliGetJson(`/api/sessions/search?q=${encodeURIComponent(text)}`, 'Search')).slice(0, parsed.limit);
+    const list = ids.length ? await fetchSessionsByIds(ids, 'Search') : [];
+    const byId = new Map(list.map(s => [s.id, s]));
+    const rows = ids.map(id => byId.get(id) || { id });
+    if (args.includes('--json')) {
+      console.log(JSON.stringify(rows, null, 2));
+      return 0;
+    }
+    if (!rows.length) {
+      console.log(`No sessions match "${text}".`);
+      return 0;
+    }
+    printTable(['ID', 'STATUS', 'AGE', 'PROJECT', 'TITLE'], rows.map(s => [
+      s.id.slice(0, 8),
+      byId.has(s.id) ? sessionStatus(s) : '-',
+      ageOf(s.modifiedAt),
+      path.basename(s.project || ''),
+      sessionTitle(s),
+    ]));
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runSessionPlanCli(args) {
+  const [idArg] = positionals(args, []);
+  if (!idArg) {
+    printLeafHelp(COMMANDS.session.verbs.plan);
+    return 1;
+  }
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  try {
+    const plan = await cliGetJson(`/api/sessions/${resolved.id}/plan`, 'Plan');
+    if (args.includes('--json')) console.log(JSON.stringify(plan, null, 2));
+    else if (!plan.content) console.log(`No plan saved for session ${resolved.id.slice(0, 8)}.`);
+    else process.stdout.write(plan.content.endsWith('\n') ? plan.content : `${plan.content}\n`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runSessionAgentsCli(args) {
+  const [idArg] = positionals(args, []);
+  if (!idArg) {
+    printLeafHelp(COMMANDS.session.verbs.agents);
+    return 1;
+  }
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  try {
+    const out = await cliGetJson(`/api/sessions/${resolved.id}/agents`, 'Agents');
+    if (args.includes('--json')) {
+      console.log(JSON.stringify(out, null, 2));
+      return 0;
+    }
+    const agents = out.agents || [];
+    if (!agents.length) console.log(`No agents for session ${resolved.id.slice(0, 8)}.`);
+    else {
+      printTable(['AGENT', 'STATUS', 'AGE', 'TYPE', 'DESCRIPTION'], agents.map(a => [
+        String(a.agentId || '').slice(0, 8),
+        a.status || '-',
+        ageOf(a.updatedAt || a.startedAt),
+        a.type || a.agentType || '',
+        (a.description || a.name || '').replace(/\s+/g, ' ').trim(),
+      ]));
+    }
+    if (out.waitingForUser) console.log('Waiting for the user.');
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runTaskListCli(args) {
+  const entry = COMMANDS.task.verbs.list;
+  const [sessionArg] = positionals(args, ['--project', '--status']);
+  const project = getArgValue(args, 'project');
+  const all = args.includes('--all');
+  const status = getArgValue(args, 'status');
+  const sources = [sessionArg, project, all || null].filter(Boolean).length;
+  if (sources === 0) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  if (sources > 1) return usageError(entry, 'Give one of <session>, --project or --all.');
+  if (args.includes('--status') && !status) return usageError(entry, '--status needs a value, e.g. in_progress');
+  let tasks;
+  let resolved = null;
+  try {
+    if (sessionArg) {
+      resolved = await resolveSessionByIdOrPrefix(sessionArg);
+      if (!resolved) return 1;
+      tasks = await cliGetJson(`/api/sessions/${resolved.id}`, 'Task list');
+    } else if (project) {
+      const encoded = Buffer.from(canonicalDir(project), 'utf8').toString('base64');
+      tasks = await cliGetJson(`/api/projects/${encodeURIComponent(encoded)}/tasks`, 'Task list');
+    } else {
+      tasks = await cliGetJson('/api/tasks/all', 'Task list');
+    }
+  } catch (e) { reportCliError(e); return 1; }
+  if (status) tasks = tasks.filter(t => t.status === status);
+  if (args.includes('--json')) {
+    console.log(JSON.stringify(tasks, null, 2));
+    return 0;
+  }
+  if (!tasks.length) {
+    console.log('No tasks match.');
+    return 0;
+  }
+  const showSource = !resolved;
+  const header = ['ID', 'STATUS', ...(showSource ? ['SESSION'] : []), 'SUBJECT'];
+  printTable(header, tasks.map(t => [
+    t.id,
+    t.status || '-',
+    ...(showSource ? [String(t.sessionId || t._taskDir || '').slice(0, 8)] : []),
+    `${t.subject || ''}${t.blockedBy?.length ? `  (blocked by ${t.blockedBy.join(', ')})` : ''}`,
+  ]));
+  return 0;
+}
+
+async function runProjectListCli(args) {
+  let projects;
+  try {
+    projects = await cliGetJson('/api/projects', 'Project list');
+  } catch (e) { reportCliError(e); return 1; }
+  projects.sort((a, b) => new Date(b.modifiedAt || 0) - new Date(a.modifiedAt || 0));
+  if (args.includes('--json')) {
+    console.log(JSON.stringify(projects, null, 2));
+    return 0;
+  }
+  if (!projects.length) {
+    console.log('No projects.');
+    return 0;
+  }
+  printTable(['AGE', 'PATH'], projects.map(p => [ageOf(p.modifiedAt), `${p.path}${p.temp ? '  (temp)' : ''}`]));
+  return 0;
+}
+
+function positionals(args, valueFlags) {
+  return args.filter((a, i) => !a.startsWith('--') && !valueFlags.includes(args[i - 1]));
+}
+
+// The server matches the folder against known project paths by string, so an 8.3 short name
+// or a differently cased drive letter from the shell must become the long, canonical form.
+function canonicalDir(dir) {
+  try { return fs.realpathSync.native(cliPath(dir)); } catch (_) { return cliPath(dir); }
+}
+
+// Every path argument goes through here. Git Bash hands a native node `/c/x` for `C:\x`.
+function cliPath(arg) {
+  return path.resolve(process.platform === 'win32' ? arg.replace(/^\/([a-zA-Z])(?=\/|$)/, '$1:/') : arg);
+}
+
+function textArg(args, name) {
+  const file = getArgValue(args, `${name}-file`);
+  return file ? fs.readFileSync(cliPath(file), 'utf8') : getArgValue(args, name);
+}
+
+function readTerminalToken() {
+  const port = cliTargetPort();
+  if (port === null) {
+    console.error(unreachable());
+    return null;
+  }
+  const token = port && readCckJson(`terminal-tokens/${port}.json`)?.token;
+  if (!token) {
+    console.error(`No terminal token for ${displayPath(getClaudeDir())} at ${cliBaseUrl()}. The cck server must be running with the terminal enabled.`);
+    return null;
+  }
+  return token;
+}
+
+async function runDispatchStartCli(argv) {
+  const sep = argv.indexOf('--');
+  const args = sep === -1 ? argv : argv.slice(0, sep);
+  const claudeArgs = sep === -1 ? [] : argv.slice(sep + 1);
+  const token = readTerminalToken();
+  if (!token) return 1;
+  let spec;
+  try { spec = textArg(args, 'spec'); } catch (e) { console.error(e.message); return 1; }
+  if (!spec) {
+    printLeafHelp(COMMANDS.dispatch.verbs.start);
+    return 1;
+  }
+  const hasGroup = args.some(a => a === '--group' || a.startsWith('--group='));
+  const group = hasGroup ? getArgValue(args, 'group') || '' : null;
+  if (hasGroup && !group.trim()) return usageError(COMMANDS.dispatch.verbs.start, '--group needs a group name, path or id');
+  const worktree = args.includes('--worktree') ? getArgValue(args, 'worktree') || true : false;
+  const hasTaskList = args.some(a => a === '--task-list' || a.startsWith('--task-list='));
+  const ownList = process.env.CLAUDE_CODE_TASK_LIST_ID || process.env.CLAUDE_CODE_SESSION_ID;
+  const taskList = hasTaskList ? getArgValue(args, 'task-list') || ownList || null : null;
+  if (hasTaskList && !taskList) {
+    return usageError(COMMANDS.dispatch.verbs.start, 'No task list id: pass --task-list <id> outside a Claude Code session');
+  }
+  const body = {
+    cwd: canonicalDir(getArgValue(args, 'cwd') || '.'),
+    spec,
+    name: getArgValue(args, 'name'),
+    model: getArgValue(args, 'model'),
+    worktree,
+    taskList,
+    group,
+    claudeArgs,
+    parent: process.env.CLAUDE_CODE_SESSION_ID || null,
+  };
+  try {
+    const out = await cliPostJson('/api/dispatch', body, 'Dispatch', { 'x-terminal-token': token });
+    if (!out) return 1;
+    if (args.includes('--json')) console.log(JSON.stringify(out, null, 2));
+    else console.log(`Started session ${out.session} in ${out.cwd}${out.group ? ` [${out.group}${out.transient ? ', transient' : ''}]` : ''}`);
+    if (out.groupError) console.error(`Not grouped: ${out.groupError}`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function fetchDispatches(all) {
+  const q = new URLSearchParams();
+  if (!all && process.env.CLAUDE_CODE_SESSION_ID) q.set('parent', process.env.CLAUDE_CODE_SESSION_ID);
+  return (await cliGetJson(`/api/dispatch?${q}`, 'Dispatch list')).running.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+const dispatchLine = (r) => `${r.session}${r.name ? `  ${r.name}` : ''}${r.group ? `  [${r.group}]` : ''}`;
+
+async function runDispatchListCli(args) {
+  try {
+    const rows = await fetchDispatches(args.includes('--all'));
+    if (args.includes('--json')) console.log(JSON.stringify(rows, null, 2));
+    else if (!rows.length) console.log('No dispatches.');
+    else for (const r of rows) console.log(dispatchLine(r));
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runDispatchEndCli(args) {
+  const entry = COMMANDS.dispatch.verbs.end;
+  const name = getArgValue(args, 'name');
+  const id = positionals(args, ['--name'])[0];
+  if (!id && !name) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  if (id && name) return usageError(entry, 'Give one of <session id or prefix> or --name.');
+  const token = readTerminalToken();
+  if (!token) return 1;
+  try {
+    const matches = (await fetchDispatches(false)).filter(r => name ? r.name === name : r.session.startsWith(id));
+    if (!matches.length) {
+      console.error(`No running dispatch matches "${name || id}". Run "claude-code-kanban dispatch list".`);
+      return 1;
+    }
+    if (matches.length > 1) {
+      console.error(`"${name || id}" matches ${matches.length} dispatches:`);
+      for (const r of matches) console.error(`  ${dispatchLine(r)}`);
+      return 1;
+    }
+    const { session } = matches[0];
+    if (!await cliSendJson('DELETE', `/api/terminals/${session}`, undefined, 'Dispatch end', { 'x-terminal-token': token })) return 1;
+    if (args.includes('--json')) console.log(JSON.stringify({ session }, null, 2));
+    else console.log(`Ended session ${session}`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+function terminalKind(t, self) {
+  if (t.kanbot) return 'kanbot';
+  if (t.dispatched) return self && t.dispatched.parent === self ? 'dispatch (yours)' : 'dispatch';
+  return t.mode === 'shell' ? 'shell' : 'claude';
+}
+
+async function runTerminalListCli(args) {
+  let rows;
+  try {
+    rows = (await cliGetJson('/api/terminals', 'Terminal list')).sessions.sort((a, b) => b.startedAt - a.startedAt);
+  } catch (e) { reportCliError(e); return 1; }
+  if (args.includes('--json')) {
+    console.log(JSON.stringify(rows, null, 2));
+    return 0;
+  }
+  if (!rows.length) {
+    console.log('No terminals.');
+    return 0;
+  }
+  const self = process.env.CLAUDE_CODE_SESSION_ID;
+  printTable(['SESSION', 'AGE', 'KIND', 'NAME', 'CWD'], rows.map(t => [t.id, ageOf(t.startedAt), terminalKind(t, self), t.name || '-', t.cwd || '-']));
+  if (rows.some(t => self && t.dispatched?.parent === self)) {
+    console.log('\nEnd one of yours with `claude-code-kanban dispatch end <session>`. The user ends the others from the board.');
+  }
+  return 0;
+}
+
+async function runSkillsGetCli(args) {
+  const name = args.find(a => !a.startsWith('--'));
+  const file = name && /^[a-z][a-z-]*$/.test(name) ? path.join(__dirname, 'skill-guides', `${name}.md`) : null;
+  if (!file || !fs.existsSync(file)) {
+    const known = fs.readdirSync(path.join(__dirname, 'skill-guides')).map(f => f.replace(/\.md$/, ''));
+    return usageError(COMMANDS.skills.verbs.get, `Unknown skill guide: ${name || '(none)'}. Known: ${known.join(', ')}`);
+  }
+  process.stdout.write(fs.readFileSync(file, 'utf8'));
+  return 0;
+}
+
+module.exports = { runCli, topHelp, COMMANDS, SERVER_FLAGS, AGENT_ID_RE };

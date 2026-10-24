@@ -1,30 +1,154 @@
 //#region STATE
+// Set by the server in index.html: null for the default Claude dir, a per-dir prefix otherwise.
+const STORAGE_NS = window.__STORAGE_NS__ ? `${window.__STORAGE_NS__}:` : '';
+// Theme is hub-wide (echoed to every app via hub:theme), so it stays shared across config dirs.
+const THEME_KEY = 'theme';
+const COLOR_THEME_KEY = 'color-theme';
+// Shared too, so after a config-dir switch the cursor goes where it was on the board just left.
+const FOCUS_ZONE_KEY = 'focus-zone';
+const GLOBAL_KEYS = new Set([THEME_KEY, COLOR_THEME_KEY, FOCUS_ZONE_KEY]);
+// localStorage names are kept as they are: renaming one drops what users saved under it.
+const MESSAGE_PANEL_OPEN_KEY = 'message-panel-open';
+const MESSAGE_PANEL_FULL_KEY = 'message-panel-full';
+const ACTIVITY_FILTER_KEY = 'activityFilter';
+const COLLAPSED_GROUPS_KEY = 'collapsedGroups';
+const PINNED_SESSIONS_KEY = 'pinned-sessions';
+const STICKY_SESSIONS_KEY = 'sticky-sessions';
+const GROUP_PINNED_KEY = 'groupPinnedSessions';
+const SIDEBAR_COLLAPSED_KEY = 'sidebar-collapsed';
+const SIDEBAR_WIDTH_KEY = 'sidebar-width';
+const PINNED_MESSAGES_PREFIX = 'pinned-messages-';
+const pinsKey = (sessionId) => PINNED_MESSAGES_PREFIX + sessionId;
+const modalFullscreenKey = (modalId) => `modal-fullscreen-${modalId}`;
+const sectionCollapsedKey = (containerId) => `${containerId}Collapsed`;
+const panelWidthKey = (panelId) => `${panelId}-width`;
+const nsKey = (k) => (GLOBAL_KEYS.has(k) ? k : STORAGE_NS + k);
+const { normalizeProjectPath, isExactProjectPath, isExactProjectFilter, projectMatcher, sessionProjectKey } =
+  projectMatch;
+// Storage throws when the browser blocks site data or the quota is full. Saved UI state is
+// optional, so a failed read gives null and a failed write returns false.
+function namespacedStorage(area) {
+  const attempt = (fn, fallback) => {
+    try {
+      return fn(window[area]);
+    } catch {
+      return fallback;
+    }
+  };
+  return {
+    keys: () =>
+      attempt((s) => {
+        const out = [];
+        for (let i = 0; i < s.length; i++) {
+          const k = s.key(i);
+          if (k.startsWith(STORAGE_NS)) out.push(k.slice(STORAGE_NS.length));
+        }
+        return out;
+      }, []),
+    getItem: (k) => attempt((s) => s.getItem(nsKey(k)), null),
+    setItem: (k, v) =>
+      attempt((s) => {
+        s.setItem(nsKey(k), v);
+        return true;
+      }, false),
+    removeItem: (k) => attempt((s) => s.removeItem(nsKey(k))),
+    readJson(k, fallback = null) {
+      try {
+        return JSON.parse(this.getItem(k)) ?? fallback;
+      } catch {
+        return fallback;
+      }
+    },
+    writeJson(k, v) {
+      return this.setItem(k, JSON.stringify(v));
+    },
+  };
+}
+const store = namespacedStorage('localStorage');
+// Every config dir's board is served on the hub's one kanban origin, so sessionStorage is shared.
+const tabStore = namespacedStorage('sessionStorage');
+
+// The baseline "nothing is filtered" state: what resetState() returns to, what updateUrl() omits
+// from the query string, and what decides whether a control tints ember in the header summary.
+const FILTER_DEFAULTS = { project: '__recent__', session: 'active' };
+const RECENT_PROJECT_HOURS = 24;
+
 let sessions = [];
 let currentSessionId = null;
+// Kept in the store because a config-dir switch in the hub reloads this page.
+const SWAP_KEY = 'swap-sessions';
+const SWAP_HISTORY_MAX = 20;
+let swapHistory = readStoredList(SWAP_KEY).filter(Boolean);
 let currentTasks = [];
 let viewMode = 'session';
-let sessionFilter = 'active';
-let showPins = false; // include pinned sessions when Active filter is active
-let sessionLimit = '20';
-let filterProject = '__recent__'; // null = all, '__recent__' = last 24h, or project path
+let sessionFilter = FILTER_DEFAULTS.session;
+// Only meaningful while sessionFilter === 'active' (filterBySessions clears it otherwise)
+const activityFilter = new Set(); // kinds: 'waiting' | 'active'
+// The sidebar asks for one page and grows by a page when it is scrolled to the end. A live
+// refresh asks for the same count, so the loaded rows stay loaded.
+const SESSION_PAGE = 20;
+let sessionLimit = SESSION_PAGE;
+let sessionsHasMore = false;
+// Narrows the sidebar to the open session only. Kept out of FILTER_DEFAULTS/updateUrl because it
+// is not a filter — it has no select, no summary token, and never reaches the session picker.
+// Persisted in localStorage rather than the URL: the hub recreates each iframe at the app's base
+// URL, so a query string would not survive a hub reload.
+const ZEN_KEY = 'zenMode';
+let zenMode = store.getItem(ZEN_KEY) === 'true';
+// Group zen: the sidebar shows one group's subtree. A view of the moment, so it is not persisted.
+let zenGroup = null;
+let filterProject = FILTER_DEFAULTS.project; // null = all, '__recent__' = last 24h, or project path
 let recentProjects = new Set();
 let projectsCacheDirty = true;
 const collapsedProjectGroups = new Set();
-let stableGroupOrder = []; // cached project path order to prevent jumping
+const SECTION_GROUPS = '__section_groups__';
+const SECTION_PROJECTS = '__section_projects__';
+const SECTION_SESSIONS = '__section_sessions__';
+const SECTION_OUTSIDE = '__section_outside__';
+// Project paths and session ids in Active-view sidebar order, kept across reloads so live
+// activity does not reshuffle the list. Each holds only what the loaded list still has.
+const PROJECT_ORDER_KEY = 'project-order';
+const SESSION_ORDER_KEY = 'session-order';
+let stableGroupOrder = readStoredList(PROJECT_ORDER_KEY);
+let sessionOrder = readStoredList(SESSION_ORDER_KEY);
+let sessionGroups = []; // user-named groups: [{id, name, color, members:[{type,ref}]}]
+let sgDrag = null; // in-flight sidebar drag: {kind:'session'|'project'|'group', ref}
 let searchQuery = ''; // Search query for fuzzy search
 let allTasksCache = []; // Cache all tasks for search
-let bulkDeleteSessionId = null; // Track session for bulk delete
+let ownerFilter = '';
 let currentAgents = [];
 let currentWaiting = null;
+let lastWaitingHash = '';
 let lastAgentsHash = '';
 let messagePanelOpen = false;
+let logAutoOpened = false;
+const logDismissed = new Set();
 let lastMessagesHash = '';
 let currentMessages = [];
 let agentDurationInterval = null;
 let agentPollInterval = null;
+// Inside the hub an inactive app is a display:none iframe whose document.hidden stays false,
+// so the hub tells us via hub:active. Standalone, or if that message is lost, cck stays active.
+let hubActive = true;
+// setupEventSource runs before HUB_INTEGRATION connects, so it hands its handler over here.
+let onHubActive = () => {};
+let missedWhileHidden = false;
+const isOnScreen = () => hubActive && !document.hidden;
+function skipOffScreen() {
+  if (isOnScreen()) return false;
+  missedWhileHidden = true;
+  return true;
+}
+const METADATA_MAX_WAIT_MS = 5000;
 let selectedTaskId = null;
 let selectedSessionId = null;
+// Task stays selected (keyboard nav) but its white highlight is dimmed once the detail panel closes.
+let taskHighlightDimmed = false;
 let focusZone = 'board'; // 'board' | 'sidebar'
+let appConfig = { marketplaceUrl: null, costUrl: null, memoryUrl: null, scratchAvailable: false };
+let runningTerminals = new Set();
+// Embedded sessions stuck on Claude Code's folder-trust dialog. No hook runs before it, so the server reads it off the screen.
+let trustWaiting = new Set();
 let selectedSessionIdx = -1;
 let selectedSessionKbId = null;
 let sessionJustSelected = false;
@@ -36,14 +160,48 @@ let msgUserScrolledUp = false;
 const MSG_MAX_LOADED = 200;
 let currentProjectPath = null;
 let currentProjectSessionIds = [];
-const dismissedSessionIds = new Set();
-const dismissedAgentIds = new Set();
+// Session id -> dismissed-at. Kept for a day: past that the session has usually gone stale,
+// and a reload (the hub reloads this page on a config-dir switch) must not bring it back.
+const DISMISSED_KEY = 'dismissed-sessions';
+const DISMISS_TTL_MS = 24 * 60 * 60 * 1000;
+const isDismissFresh = (at) => typeof at === 'number' && at > Date.now() - DISMISS_TTL_MS;
+const dismissedSessionIds = loadDismissedSessions();
+let dismissSaveWarned = false;
+
+function loadDismissedSessions() {
+  const saved = store.readJson(DISMISSED_KEY, {});
+  return new Map(Object.entries(saved).filter(([, at]) => isDismissFresh(at)));
+}
+
+function persistDismissedSessions() {
+  for (const [id, at] of dismissedSessionIds) if (!isDismissFresh(at)) dismissedSessionIds.delete(id);
+  // The map still works in memory, so only the next reload is affected. Say so once.
+  if (!store.writeJson(DISMISSED_KEY, Object.fromEntries(dismissedSessionIds)) && !dismissSaveWarned) {
+    dismissSaveWarned = true;
+    showToast(
+      'Could not save to browser storage: dismissed sessions come back on reload. If storage is full, Storage → Clean Orphaned frees space.',
+      'error',
+    );
+  }
+}
+
+function setSessionDismissed(id, dismissed) {
+  if (dismissed === dismissedSessionIds.has(id)) return false;
+  if (dismissed) dismissedSessionIds.set(id, Date.now());
+  else dismissedSessionIds.delete(id);
+  persistDismissedSessions();
+  updateDismissBtnState();
+  if (dismissed) sgSweepTransient();
+  renderSessions();
+  renderActivityChip();
+  return true;
+}
 
 function resetMessageScrollState() {
   msgUserScrolledUp = false;
   msgHasMore = false;
   msgLoadingMore = false;
-  currentMessages = [];
+  setCurrentMessages([]);
   lastMessagesHash = '';
   const btn = document.getElementById('msg-jump-latest');
   if (btn) btn.style.display = 'none';
@@ -53,81 +211,70 @@ function getUrlState() {
   const params = new URLSearchParams(window.location.search);
   return {
     session: params.get('session'),
-    view: params.get('view'),
     filter: params.get('filter'),
-    limit: params.get('limit'),
     project: params.get('project'),
     owner: params.get('owner'),
     search: params.get('search'),
     messages: params.has('messages')
       ? params.get('messages') === '1'
-      : localStorage.getItem('message-panel-open') === 'true',
+      : store.getItem(MESSAGE_PANEL_OPEN_KEY) === 'true',
     projectView: params.get('projectView'),
-    pins: params.has('pins')
-      ? params.get('pins') === '1'
-      : localStorage.getItem('show-pins') === '1',
   };
 }
 
 function updateUrl() {
   const params = new URLSearchParams();
-  if (viewMode === 'all') params.set('view', 'all');
   if (viewMode === 'project' && currentProjectPath) params.set('projectView', btoa(currentProjectPath));
   if (currentSessionId) params.set('session', currentSessionId);
-  if (sessionFilter !== 'active') params.set('filter', sessionFilter);
-  if (showPins) params.set('pins', '1');
-  if (sessionLimit !== '20') params.set('limit', sessionLimit);
-  if (filterProject && filterProject !== '__recent__') params.set('project', filterProject);
+  if (sessionFilter !== FILTER_DEFAULTS.session) params.set('filter', sessionFilter);
+  if (filterProject && filterProject !== FILTER_DEFAULTS.project) params.set('project', filterProject);
+  if (ownerFilter) params.set('owner', ownerFilter);
   if (searchQuery) params.set('search', searchQuery);
-  if (messagePanelOpen) params.set('messages', '1');
+  if (messagePanelOpen && !logAutoOpened) params.set('messages', '1');
   const qs = params.toString();
   const url = qs ? `?${qs}` : window.location.pathname;
   history.replaceState(null, '', url);
   persistLastView();
+  syncTerminal();
+  schedulePublishSession();
 }
 
 const LAST_VIEW_KEY = 'lastView';
 function persistLastView() {
-  try {
-    const data = {
-      view: viewMode,
-      session: currentSessionId,
-      projectPath: viewMode === 'project' ? currentProjectPath : null,
-    };
-    localStorage.setItem(LAST_VIEW_KEY, JSON.stringify(data));
-  } catch (_) {}
+  store.writeJson(LAST_VIEW_KEY, {
+    view: viewMode,
+    session: currentSessionId,
+    projectPath: viewMode === 'project' ? currentProjectPath : null,
+    // The project filter also lives in the URL, but the hub recreates each iframe at the app's
+    // base URL on reload, so the query string alone doesn't survive a hub refresh.
+    project: filterProject,
+  });
 }
 function loadLastView() {
-  try {
-    return JSON.parse(localStorage.getItem(LAST_VIEW_KEY)) || null;
-  } catch (_) {
-    return null;
-  }
+  return store.readJson(LAST_VIEW_KEY);
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function resetState() {
   history.replaceState(null, '', window.location.pathname);
-  try {
-    localStorage.removeItem(LAST_VIEW_KEY);
-  } catch (_) {}
-  sessionFilter = 'active';
-  showPins = false;
-  localStorage.removeItem('show-pins');
-  sessionLimit = '20';
-  filterProject = '__recent__';
+  store.removeItem(LAST_VIEW_KEY);
+  sessionFilter = FILTER_DEFAULTS.session;
+  sessionLimit = SESSION_PAGE;
+  filterProject = FILTER_DEFAULTS.project;
+  zenMode = false;
+  zenGroup = null;
+  store.removeItem(ZEN_KEY);
+  renderZenState();
   searchQuery = '';
-  viewMode = 'all';
-  if (agentLogMode) exitAgentLogMode();
-  currentSessionId = null;
   currentProjectPath = null;
   currentProjectSessionIds = [];
   resetMessageScrollState();
   const searchInput = document.getElementById('search-input');
   if (searchInput) searchInput.value = '';
   document.getElementById('search-clear-btn')?.classList.remove('visible');
-  loadPreferences();
-  fetchSessions().then(() => showAllTasks());
+  renderFilterState();
+  showNoSession();
+  fetchSessions();
 }
 
 //#endregion
@@ -148,60 +295,208 @@ const inProgressCount = document.getElementById('in-progress-count');
 const completedCount = document.getElementById('completed-count');
 const detailPanel = document.getElementById('detail-panel');
 const detailContent = document.getElementById('detail-content');
-const connectionStatus = document.getElementById('connection-status');
 const CONTENT_TRUNCATE_MAX = 1500;
 const COLUMNS = [{ el: pendingTasks }, { el: inProgressTasks }, { el: completedTasks }];
 
-let lastSessionsEtag = '';
-let lastTasksEtag = '';
+let lastSessionsHash = '';
+let lastTasksHash = '';
 
 //#endregion
 
 //#region DATA_FETCHING
-async function fetchSessions(includeTasks) {
+function apiPath(strings, ...values) {
+  return strings.reduce((out, s, i) => out + encodeURIComponent(values[i - 1]) + s);
+}
+
+function api(path, { method, body, query, headers, cache } = {}) {
+  const qs = query ? new URLSearchParams(Object.entries(query).filter(([, v]) => v != null)).toString() : '';
+  // A Blob goes as-is, and fetch takes its Content-Type from the Blob's type.
+  const json = body != null && !(body instanceof Blob);
+  return fetch(qs ? `${path}?${qs}` : path, {
+    method,
+    cache,
+    headers: json ? { 'Content-Type': 'application/json', ...headers } : headers,
+    body: json ? JSON.stringify(body) : (body ?? undefined),
+  });
+}
+
+async function getJson(path, fallback = null, opts) {
   try {
-    const allPinnedIds = new Set([...pinnedSessionIds, ...stickySessionIds]);
-    if (revealedPlanSessionId) allPinnedIds.add(revealedPlanSessionId);
-    if (revealedStorageSessionId) allPinnedIds.add(revealedStorageSessionId);
-    const pinnedParam = allPinnedIds.size > 0 ? `&pinned=${[...allPinnedIds].join(',')}` : '';
-    const projectParam =
-      filterProject && filterProject !== '__recent__' ? `&project=${encodeURIComponent(filterProject)}` : '';
-    const sessionsPromise = fetch(`/api/sessions?limit=${sessionLimit}${pinnedParam}${projectParam}`);
+    const res = await api(path, opts);
+    return res.ok ? await res.json() : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
-    // Only fetch /api/tasks/all when consumers actually need it (all-tasks view or active search).
-    // Sidebar task counts come from per-session summary fields (taskCount/pending/inProgress/completed).
-    if (includeTasks === undefined) {
-      includeTasks = viewMode === 'all' || !!searchQuery;
+async function fetchSessions(includeTasks = true, focusId = currentSessionId) {
+  try {
+    // The focused session must come back whatever the filters say: renderSession and the
+    // info modal both look it up in `sessions` and bail when it is absent, so a session
+    // opened from outside the current filter would leave the view on the previous one.
+    // The server adds the pinned sessions itself; the ones `session open` showed are this page's.
+    // Group zen ignores the filters, and its session members come back through `include`.
+    const zenIds = zenGroup ? sgSubtreeIds(zenGroup) : new Set();
+    const zenMembers = sessionGroups
+      .filter((g) => zenIds.has(g.id))
+      .flatMap((g) => g.members.filter((m) => m.type === 'session').map((m) => m.ref));
+    const include = [
+      focusId,
+      revealedPlanSessionId,
+      revealedStorageSessionId,
+      ...openedStickyIds,
+      ...zenMembers,
+    ].filter(Boolean);
+    const recent = !zenGroup && filterProject === '__recent__';
+    const res = await api('/api/sessions', {
+      query: {
+        limit: sessionLimit,
+        include: include.length ? include.join(',') : null,
+        recentHours: recent ? RECENT_PROJECT_HOURS : null,
+        project: !zenGroup && !recent && filterProject ? filterProject : null,
+        filter: !zenGroup && sessionFilter === 'active' ? 'active' : null,
+      },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    sessionsHasMore = res.headers.get('X-Has-More') === 'true';
+    const newSessions = await res.json();
+    const sessionsHash = JSON.stringify(newSessions);
+    if (sessionsHash !== lastSessionsHash) {
+      lastSessionsHash = sessionsHash;
+      sessions = mergePlaceholders(newSessions);
+      markOpenSessionRead();
+      sgSweepTransient();
+      renderSessions();
+      renderActivityChip();
+      schedulePublishSession();
     }
+    // A list too short to scroll gives no scroll event, so fill it until it can scroll.
+    if (sessionsHasMore) setTimeout(() => loadMoreIfNearEnd());
 
-    const [sessionsRes, tasksRes] = await Promise.all([
-      sessionsPromise,
-      includeTasks ? fetch('/api/tasks/all') : Promise.resolve(null),
-    ]);
-
-    const sessionsEtag = sessionsRes.headers.get('etag') || '';
-    const tasksEtag = tasksRes ? (tasksRes.headers.get('etag') || '') : lastTasksEtag;
-    const sessionsUnchanged = sessionsEtag && sessionsEtag === lastSessionsEtag;
-    const tasksUnchanged = !tasksRes || (tasksEtag && tasksEtag === lastTasksEtag);
-    if (sessionsUnchanged && tasksUnchanged) return;
-
-    const newSessions = await sessionsRes.json();
-    if (tasksRes && !tasksUnchanged) {
-      allTasksCache = await tasksRes.json();
-      lastTasksEtag = tasksEtag;
-    }
-    lastSessionsEtag = sessionsEtag;
-
-    sessions = newSessions.map(applyStoredPlan);
-    renderSessions();
+    if (includeTasks && searchQuery) await loadSearchTasks();
   } catch (error) {
     console.error('Failed to fetch sessions:', error);
   }
 }
 
+// The Stop hook leaves _stop.json when a session ends its turn; deleting it marks the session read.
+function markSessionRead(sessionId) {
+  const session = sessions.find((s) => s.id === sessionId);
+  if (!session?.unread) return;
+  session.unread = false;
+  document.querySelector(`.session-item[data-session-id="${CSS.escape(sessionId)}"]`)?.classList.remove('unread');
+  api(apiPath`/api/sessions/${sessionId}/read`, { method: 'POST' }).catch((e) => console.error('[markSessionRead]', e));
+}
+
+function markOpenSessionRead() {
+  if (currentSessionId && viewMode === 'session' && isOnScreen()) markSessionRead(currentSessionId);
+}
+
+async function loadSearchTasks() {
+  const newTasks = await getJson('/api/tasks/all');
+  if (!newTasks) return;
+  const tasksHash = JSON.stringify(newTasks);
+  if (tasksHash === lastTasksHash) return;
+  lastTasksHash = tasksHash;
+  allTasksCache = newTasks;
+  if (searchQuery) renderSessions();
+}
+
+let sessionsLoadingMore = false;
+async function loadMoreSessions() {
+  if (!sessionsHasMore || sessionsLoadingMore) return;
+  sessionsLoadingMore = true;
+  sessionLimit += SESSION_PAGE;
+  try {
+    await fetchSessions(false);
+  } finally {
+    sessionsLoadingMore = false;
+  }
+}
+
+function resetSessionPage() {
+  sessionLimit = SESSION_PAGE;
+  sessionsList.scrollTop = 0;
+}
+
+const LOAD_MORE_MARGIN_PX = 240;
+function loadMoreIfNearEnd(el = sessionsList, load = loadMoreSessions) {
+  const { scrollTop, clientHeight, scrollHeight } = el;
+  if (clientHeight > 0 && scrollTop + clientHeight >= scrollHeight - LOAD_MORE_MARGIN_PX) load();
+}
+sessionsList.addEventListener('scroll', () => loadMoreIfNearEnd(), { passive: true });
+
+// Sessions by id, in the order given, ignoring every sidebar filter — that is what `include` means.
+async function fetchSessionsByIds(ids) {
+  const rows = await getJson('/api/sessions', [], { query: { limit: 1, include: ids.join(',') } });
+  const byId = new Map(rows.map((s) => [s.id, s]));
+  return ids.map((id) => byId.get(id)).filter(Boolean);
+}
+
+async function fetchSessionById(id) {
+  return (await fetchSessionsByIds([id]))[0] || null;
+}
+
+// The id may be outside the list the filters asked for. renderSession bails on a session
+// missing from `sessions`, so pull that one row in before opening it; later polls
+// keep it, because fetchSessions pins currentSessionId.
+async function ensureSessionLoaded(id) {
+  const loaded = sessions.find((s) => s.id === id);
+  if (loaded) return loaded;
+  const session = await fetchSessionById(id);
+  if (!session) return null;
+  const raced = sessions.find((s) => s.id === id);
+  if (raced) return raced;
+  sessions.push(session);
+  return session;
+}
+
+// Matches SESSION_SEARCH_MIN in server.js, which answers [] below it.
+const SESSION_SEARCH_MIN = 3;
+const SESSION_SEARCH_DEBOUNCE_MS = 100;
+
+// Searches session ids and names in every transcript on the server, so a session outside the
+// sidebar filter is found too. `rows` answers the server rows not in `localRows`, and whether
+// the search for that query is still out; `onFound()` runs when the current query's rows arrive.
+// Only the current query is kept, and a short query drops it, so a later identical query fetches again.
+function sessionSearch(onFound) {
+  let current = null;
+  let found = null;
+  let timer = null;
+  const run = async (key) => {
+    const ids = await getJson('/api/sessions/search', [], { query: { q: key } });
+    if (key !== current) return;
+    const rows = ids.length ? await fetchSessionsByIds(ids) : [];
+    if (key !== current) return;
+    found = rows;
+    onFound();
+  };
+  return {
+    rows(query, localRows) {
+      const key = query.length < SESSION_SEARCH_MIN ? null : query.toLowerCase();
+      // Set once per query: the sidebar re-renders on every live update, and resetting the
+      // timer each time would starve the search.
+      if (key !== current) {
+        clearTimeout(timer);
+        current = key;
+        found = null;
+        if (key) timer = setTimeout(() => run(key), SESSION_SEARCH_DEBOUNCE_MS);
+      }
+      if (!key) return { rows: [], pending: false };
+      if (!found) return { rows: [], pending: true };
+      const seen = new Set(localRows.map((s) => s.id));
+      return { rows: found.filter((s) => !seen.has(s.id)), pending: false };
+    },
+  };
+}
+
+const sidebarSearch = sessionSearch(renderSessions);
+
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function handleSearch(query) {
+  const wasSearching = !!searchQuery;
   searchQuery = query.toLowerCase().trim();
+  if (searchQuery && !wasSearching) loadSearchTasks().catch(() => {});
 
   // Show/hide clear button
   const clearBtn = document.getElementById('search-clear-btn');
@@ -225,172 +520,9 @@ function clearSearch() {
   renderSessions();
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function deleteAllSessionTasks(sessionId) {
-  const session = sessions.find((s) => s.id === sessionId);
-  if (!session) return;
-
-  // When viewing a single session, currentTasks already contains only that session's tasks
-  // When viewing "All Tasks", tasks have sessionId property, so we filter
-  const sessionTasks =
-    currentSessionId === sessionId ? currentTasks : currentTasks.filter((t) => t.sessionId === sessionId);
-
-  if (sessionTasks.length === 0) {
-    alert('No tasks to delete in this session');
-    return;
-  }
-
-  bulkDeleteSessionId = sessionId;
-
-  const displayName = session.name || sessionId;
-  const message = `Delete all ${sessionTasks.length} task(s) from session "${displayName}"?`;
-
-  document.getElementById('delete-session-tasks-message').textContent = message;
-
-  const modal = document.getElementById('delete-session-tasks-modal');
-  modal.classList.add('visible');
-
-  // Handle ESC key
-  const keyHandler = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeDeleteSessionTasksModal();
-      document.removeEventListener('keydown', keyHandler);
-    }
-  };
-  document.addEventListener('keydown', keyHandler);
-}
-
-function closeDeleteSessionTasksModal() {
-  const modal = document.getElementById('delete-session-tasks-modal');
-  modal.classList.remove('visible');
-  bulkDeleteSessionId = null;
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-async function confirmDeleteSessionTasks() {
-  if (!bulkDeleteSessionId) return;
-
-  const sessionId = bulkDeleteSessionId;
-  closeDeleteSessionTasksModal();
-
-  // Get tasks to delete
-  const sessionTasks =
-    currentSessionId === sessionId ? currentTasks : currentTasks.filter((t) => t.sessionId === sessionId);
-
-  // Sort tasks by dependency order (blocked tasks first, then blockers)
-  const sortedTasks = topologicalSort(sessionTasks);
-
-  let successCount = 0;
-  let failedCount = 0;
-  const failedTasks = [];
-
-  for (const task of sortedTasks) {
-    try {
-      const res = await fetch(`/api/tasks/${sessionId}/${task.id}`, {
-        method: 'DELETE',
-      });
-
-      if (res.ok) {
-        successCount++;
-      } else {
-        failedCount++;
-        const error = await res.json();
-        failedTasks.push({ id: task.id, subject: task.subject, error: error.error });
-        console.error(`Failed to delete task ${task.id}:`, error);
-      }
-    } catch (error) {
-      failedCount++;
-      failedTasks.push({ id: task.id, subject: task.subject, error: 'Network error' });
-      console.error(`Error deleting task ${task.id}:`, error);
-    }
-  }
-
-  // Show result modal
-  showDeleteResultModal(successCount, failedCount, failedTasks);
-
-  // Close detail panel if open
-  closeDetailPanel();
-
-  // Refresh the view
-  await refreshCurrentView();
-}
-
 //#endregion
 
-//#region BULK_DELETE
-// Topological sort for task deletion order
-function topologicalSort(tasks) {
-  const result = [];
-  const visited = new Set();
-  const visiting = new Set();
-  const taskMap = new Map(tasks.map((t) => [t.id, t]));
-
-  function visit(taskId) {
-    if (visited.has(taskId)) return;
-    if (visiting.has(taskId)) return; // Cycle - skip
-
-    visiting.add(taskId);
-    const task = taskMap.get(taskId);
-
-    if (task?.blocks && task.blocks.length > 0) {
-      // Visit all tasks that this task blocks (dependencies first)
-      for (const blockedId of task.blocks) {
-        if (taskMap.has(blockedId)) {
-          visit(blockedId);
-        }
-      }
-    }
-
-    visiting.delete(taskId);
-    visited.add(taskId);
-    if (task) result.push(task);
-  }
-
-  // Visit all tasks
-  for (const task of tasks) {
-    visit(task.id);
-  }
-
-  return result;
-}
-
-function showDeleteResultModal(successCount, failedCount, failedTasks) {
-  const modal = document.getElementById('delete-result-modal');
-  const messageEl = document.getElementById('delete-result-message');
-  const detailsEl = document.getElementById('delete-result-details');
-
-  if (failedCount === 0) {
-    messageEl.textContent = `Successfully deleted all ${successCount} task(s).`;
-    detailsEl.style.display = 'none';
-  } else {
-    messageEl.textContent = `Deleted ${successCount} task(s). Failed to delete ${failedCount} task(s).`;
-
-    const failedList = failedTasks
-      .map((t) => `<li><strong>${escapeHtml(t.subject)}</strong> (#${escapeHtml(t.id)}): ${escapeHtml(t.error)}</li>`)
-      .join('');
-    detailsEl.innerHTML = `<ul style="margin: 8px 0 0 0; padding-left: 20px;">${failedList}</ul>`;
-    detailsEl.style.display = 'block';
-  }
-
-  modal.classList.add('visible');
-
-  // Handle ESC key
-  const keyHandler = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeDeleteResultModal();
-      document.removeEventListener('keydown', keyHandler);
-    }
-  };
-  document.addEventListener('keydown', keyHandler);
-}
-
-function closeDeleteResultModal() {
-  const modal = document.getElementById('delete-result-modal');
-  modal.classList.remove('visible');
-}
-
+//#region SEARCH
 function fuzzyMatch(text, query) {
   if (!query) return true;
   if (!text) return false;
@@ -419,122 +551,312 @@ function fuzzyMatch(text, query) {
 
 //#endregion
 
-//#region SIDEBAR_SECTIONS
+//#region SESSION_ACTIVITY
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function toggleSection(containerId, chevronId) {
   const container = document.getElementById(containerId);
   const chevron = document.getElementById(chevronId);
   const collapsed = container.classList.toggle('collapsed');
   chevron.classList.toggle('rotated', collapsed);
-  localStorage.setItem(`${containerId}Collapsed`, collapsed);
+  store.setItem(sectionCollapsedKey(containerId), collapsed);
+}
+
+function isWaitingSession(s) {
+  return !!s.hasWaitingForUser || trustWaiting.has(s.id);
+}
+function sessionBarClass(s) {
+  if (isWaitingSession(s)) return 'permission-pending';
+  return s.unread ? 'unread' : '';
+}
+function isActiveSession(s) {
+  return !isWaitingSession(s) && (s.inProgress > 0 || s.hasRecentLog || s.hasRunningAgents);
+}
+function sessionState(s) {
+  return isWaitingSession(s) ? 'waiting' : isActiveSession(s) ? 'working' : 'idle';
+}
+// hasRecentLog carries the server's registry-idle correction: an open-but-idle
+// terminal keeps touching its JSONL, so mtime alone is not proof of activity.
+function isSessionLive(s) {
+  return !!s.hasRecentLog && Date.now() - Date.parse(s.modifiedAt) <= LIVE_INDICATOR_MS;
+}
+function isJustFinished(s) {
+  return (
+    !isWaitingSession(s) &&
+    !isActiveSession(s) &&
+    !!s.hasRecentActivity &&
+    Date.now() - Date.parse(s.modifiedAt) < JUST_NOW_MS
+  );
+}
+
+// The JUST_NOW_MS mark is a client-side boundary; no server update arrives when a session crosses it.
+let justFinishedTimer = null;
+function scheduleJustFinishedExpiry() {
+  clearTimeout(justFinishedTimer);
+  let next = Infinity;
+  for (const s of sessions) {
+    if (isJustFinished(s)) next = Math.min(next, Date.parse(s.modifiedAt) + JUST_NOW_MS - Date.now());
+  }
+  if (next === Infinity) return;
+  justFinishedTimer = setTimeout(() => {
+    if (!skipOffScreen()) renderSessionViews();
+  }, next + 50);
+}
+
+function renderSessionViews() {
+  renderSessions();
+  if (isSessionPickerOpen()) renderSessionPicker();
+}
+
+const ACTIVITY_PREDICATES = {
+  waiting: isWaitingSession,
+  active: isActiveSession,
+  terminal: (s) => runningTerminals.has(s.id),
+};
+
+let lastChipHtml = '';
+
+function renderActivityChip() {
+  const container = document.getElementById('activity-chips');
+  if (!container) return;
+
+  const counts = { waiting: 0, active: 0, terminal: 0 };
+  for (const s of sessions) {
+    if (dismissedSessionIds.has(s.id)) continue;
+    for (const kind in counts) if (ACTIVITY_PREDICATES[kind](s)) counts[kind]++;
+  }
+  const { waiting, active, terminal: terminals } = counts;
+  const showTerminals = terminalAvailable();
+  const maxTerminals = appConfig.terminal?.maxSessions;
+  const nearCap = showTerminals && runningTerminals.size >= maxTerminals * 0.8;
+
+  const chips = [
+    {
+      kind: 'waiting',
+      count: waiting,
+      label: `${waiting} waiting`,
+      title: `${waiting} session${waiting === 1 ? '' : 's'} waiting for input`,
+    },
+    {
+      kind: 'active',
+      count: active,
+      label: `${active} active`,
+      title: `${active} session${active === 1 ? '' : 's'} with running work or recent activity`,
+    },
+  ];
+  if (showTerminals) {
+    chips.push({
+      kind: 'terminal',
+      count: terminals,
+      label: nearCap ? `${runningTerminals.size}/${maxTerminals}` : `${terminals}`,
+      title: nearCap
+        ? `${runningTerminals.size} of ${maxTerminals} terminals open; end some to start more`
+        : `${terminals} session${terminals === 1 ? '' : 's'} running in a terminal here`,
+      icon: ICON_TERMINAL,
+      warn: nearCap,
+    });
+  }
+
+  const html = chips
+    .map((c) => {
+      const isOn = activityFilter.has(c.kind);
+      const classes = [
+        'activity-chip',
+        `activity-${c.kind}`,
+        c.count === 0 && !c.warn ? 'activity-zero' : '',
+        c.warn ? 'activity-warn' : '',
+        isOn ? 'activity-filter-on' : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+      const hint = isOn ? ' — click to clear filter' : ` — click to filter to ${c.kind}`;
+      return `
+        <button type="button"
+          class="${classes}"
+          onclick="setActivityFilter('${escAttrJs(c.kind)}')"
+          aria-pressed="${isOn ? 'true' : 'false'}"
+          title="${escapeHtml(c.title + hint)}">
+          ${c.icon ? `<span class="activity-icon">${c.icon}</span>` : '<span class="activity-dot"></span>'}
+          <span class="activity-label">${escapeHtml(c.label)}</span>
+        </button>
+      `;
+    })
+    .join('');
+  if (html === lastChipHtml) return;
+  lastChipHtml = html;
+  container.innerHTML = html;
+}
+
+function toggleActivityKind(kind) {
+  if (activityFilter.has(kind)) activityFilter.delete(kind);
+  else activityFilter.add(kind);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function setActivityFilter(kind) {
+  if (kind === 'active') {
+    // waiting is a sub-state of active — couple them so one click covers all running sessions
+    toggleActivityKind('active');
+    toggleActivityKind('waiting');
+    // Expand sections that have active sessions so they're visible on click
+    if (activityFilter.has('active')) expandActiveGroups();
+  } else {
+    toggleActivityKind(kind);
+  }
+  store.writeJson(ACTIVITY_FILTER_KEY, [...activityFilter]);
+  // active/waiting only make sense with the active session filter on
+  const targetFilter = activityFilter.size > 0 ? 'active' : sessionFilter;
+  if (targetFilter !== sessionFilter) {
+    sessionFilter = targetFilter;
+    const dropdown = document.getElementById('session-filter');
+    if (dropdown) dropdown.value = targetFilter;
+    updateUrl();
+  }
+  renderSessions();
+  renderActivityChip();
 }
 
 let lastCurrentTasksHash = '';
+let taskFetchSeq = 0;
+let switchSeq = 0;
+const taskRetry = { timer: null, delay: 0 };
+
+// The board refetches only on an SSE update that names the open session, so a failed refresh
+// must retry by itself: when the session's tasks stop changing, no later event repairs it.
+function retryTaskFetch(sessionId) {
+  clearTimeout(taskRetry.timer);
+  taskRetry.delay = Math.min((taskRetry.delay || 1000) * 2, 30000);
+  taskRetry.timer = setTimeout(() => {
+    if (sessionId === currentSessionId && viewMode === 'session') return fetchTasks(sessionId);
+  }, taskRetry.delay);
+}
 
 async function fetchTasks(sessionId) {
+  const refresh = viewMode === 'session' && sessionId === currentSessionId;
+  const seq = ++taskFetchSeq;
+  const logSeq = refresh ? switchSeq : ++switchSeq;
+  let msgPage = null;
+  if (!refresh) {
+    if (!agentLogMode) msgPage = fetchSessionMessagesPage(sessionId).catch(() => null);
+    if (messagePanelOpen) scheduleLogLoading(logSeq);
+  } else if (logLoading) {
+    endLogLoading();
+    if (messagePanelOpen && !agentLogMode) renderMessages(currentMessages);
+  }
+  // The PTY already runs, so the attach need not wait for the session fetch and the render after it.
+  if (!refresh && termState.sessionId !== sessionId && runningTerminals.has(sessionId) && wantsTerminalFor(sessionId))
+    openTerminal(sessionId, terminalOpenMode(sessionId));
+  viewMode = 'session';
+  document.getElementById('message-toggle')?.style.removeProperty('display');
+  let newTasks;
   try {
-    viewMode = 'session';
-    document.getElementById('message-toggle')?.style.removeProperty('display');
-    const res = await fetch(`/api/sessions/${sessionId}`);
-
-    let newTasks;
-    if (res.ok) {
-      newTasks = await res.json();
-    } else if (res.status === 404) {
-      newTasks = [];
-    } else {
-      throw new Error(`Failed to fetch tasks: ${res.status}`);
-    }
-
-    const hash = JSON.stringify(newTasks);
-    if (sessionId === currentSessionId && hash === lastCurrentTasksHash) {
-      return;
-    }
-    lastCurrentTasksHash = hash;
-
-    currentTasks = newTasks;
-    if (agentLogMode && sessionId !== currentSessionId) exitAgentLogMode();
-    if (sessionId !== currentSessionId && document.getElementById('scratchpad-modal').classList.contains('visible'))
-      closeScratchpad();
-    if (revealedPlanSessionId && sessionId !== revealedPlanSessionId) {
-      revealedPlanSessionId = null;
-    }
-    if (revealedStorageSessionId && sessionId !== revealedStorageSessionId) {
-      revealedStorageSessionId = null;
-    }
-    if (currentSessionId && currentSessionId !== sessionId) deferredPinPlacement.delete(currentSessionId);
-    currentSessionId = sessionId;
-    currentPins = loadPins(sessionId);
-      resetMessageScrollState();
-    for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
-    for (const k of Object.keys(teamColorMap)) delete teamColorMap[k];
-    sessionJustSelected = true;
-    resetAgentState();
-    updateUrl();
-    renderSession();
-    renderSessions();
-    fetchAgents(sessionId);
-    if (!agentLogMode) fetchMessages(sessionId);
+    const res = await api(apiPath`/api/sessions/${sessionId}`);
+    if (!res.ok) throw new Error(`Failed to fetch tasks: ${res.status}`);
+    newTasks = await res.json();
   } catch (error) {
     console.error('Failed to fetch tasks:', error);
+    if (seq !== taskFetchSeq) return;
+    if (sessionId === currentSessionId) return retryTaskFetch(sessionId);
     currentTasks = [];
     currentSessionId = sessionId;
     lastCurrentTasksHash = '';
     updateUrl();
     renderSession();
-  }
-}
-
-async function deleteTaskById(sessionId, taskId) {
-  if (!sessionId || !taskId) return;
-  if (!confirm(`Delete task #${taskId}?`)) return;
-  try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      if (err.blockedTasks) {
-        alert(`Cannot delete: blocks task(s) #${err.blockedTasks.join(', #')}`);
-      } else {
-        alert(`Delete failed: ${err.error || res.status}`);
-      }
+    if (!agentLogMode) {
+      resetMessageScrollState();
+      fetchMessages(sessionId, msgPage);
     }
-  } catch (e) { alert(`Delete error: ${e}`); }
+    return;
+  }
+  if (seq !== taskFetchSeq) return;
+  clearTimeout(taskRetry.timer);
+  taskRetry.delay = 0;
+
+  const hash = JSON.stringify(newTasks);
+  if (sessionId === currentSessionId && hash === lastCurrentTasksHash) return;
+  lastCurrentTasksHash = hash;
+
+  currentTasks = newTasks;
+  if (agentLogMode && sessionId !== currentSessionId) exitAgentLogMode();
+  if (sessionId !== currentSessionId && document.getElementById('scratchpad-modal').classList.contains('visible'))
+    closeScratchpad();
+  if (sessionId !== currentSessionId && detailPanel.classList.contains('visible')) closeDetailPanel();
+  if (revealedPlanSessionId && sessionId !== revealedPlanSessionId) {
+    revealedPlanSessionId = null;
+  }
+  if (revealedStorageSessionId && sessionId !== revealedStorageSessionId) {
+    revealedStorageSessionId = null;
+  }
+  if (currentSessionId && currentSessionId !== sessionId) deferredPinPlacement.delete(currentSessionId);
+  pushSwapHistory(sessionId);
+  const switched = sessionId !== currentSessionId;
+  currentSessionId = sessionId;
+  markOpenSessionRead();
+  if (switched) autoRevealLog(sessionId);
+  // A task change in the open session must not reset the messages, the agents or the owner
+  // filter: that reset rebuilds the panels and reads as a reload after each card move.
+  if (!refresh) {
+    currentPins = loadPins(sessionId);
+    ownerFilter = '';
+    resetMessageScrollState();
+    for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
+    for (const k of Object.keys(teamColorMap)) delete teamColorMap[k];
+    sessionJustSelected = true;
+    resetAgentState();
+    if (messagePanelOpen && !agentLogMode) {
+      if (logLoading?.seq !== logSeq) scheduleLogLoading(logSeq);
+      showLogLoading(logSeq);
+    }
+  }
+  updateUrl();
+  renderSession();
+  renderSessions();
+  fetchAgents(sessionId);
+  if (!agentLogMode) fetchMessages(sessionId, msgPage);
 }
+//#endregion
 
-window.deleteTaskById = deleteTaskById;
-
-const _AGENT_COOLDOWN_MS = 3 * 60 * 1000;
-const _AGENT_STALE_MS = 5 * 60 * 1000; // kept for reference; no longer used for force-stopping
+//#region TIMINGS
 const WAITING_TTL_MS = 30 * 60 * 1000;
 const AGENT_LOG_MAX = 8;
+const ZEN_AGENTS_MAX = 5;
+const LIVE_INDICATOR_MS = 10 * 1000;
+const JUST_NOW_MS = 60 * 1000;
+//#endregion
 
+//#region AGENT_FETCHING
 function resetAgentState() {
   currentAgents = [];
   currentWaiting = null;
   lastAgentsHash = '';
+  lastWaitingHash = '';
   renderAgentFooter();
 }
 
 async function fetchAgents(sessionId) {
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/agents`);
+    const res = await api(apiPath`/api/sessions/${sessionId}/agents`);
     if (!res.ok) {
       resetAgentState();
       return;
     }
     const data = await res.json();
-    const rawAgents = Array.isArray(data) ? data : data.agents || [];
-    const agents = rawAgents.filter((a) => !dismissedAgentIds.has(a.agentId));
+    const agents = Array.isArray(data) ? data : data.agents || [];
     currentWaiting = data.waitingForUser || null;
-    const hash = JSON.stringify({ agents, waitingForUser: currentWaiting });
+    const hash = JSON.stringify(data);
     if (hash === lastAgentsHash) return;
     lastAgentsHash = hash;
     currentAgents = agents;
-    updateTeamColors(agents);
+    updateTeamColors(agents, data.teamColors);
     for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
     renderAgentFooter();
     if (currentSessionId === sessionId) renderKanban();
+    const waitHash = JSON.stringify(currentWaiting);
+    if (waitHash !== lastWaitingHash) {
+      lastWaitingHash = waitHash;
+      if (messagePanelOpen && currentMessages.length) renderMessages(currentMessages);
+      maybeFollowLatest();
+      maybeAutoOpenWaiting();
+    }
   } catch (e) {
     console.error('[fetchAgents]', e);
   }
@@ -544,7 +866,9 @@ async function fetchProjectView(projectPath) {
   viewMode = 'project';
   currentProjectPath = projectPath;
   currentSessionId = null;
-  currentMessages = [];
+  switchSeq++;
+  endLogLoading();
+  setCurrentMessages([]);
   lastMessagesHash = '';
   if (messagePanelOpen) toggleMessagePanel();
   document.getElementById('message-toggle')?.style.setProperty('display', 'none');
@@ -558,23 +882,13 @@ async function fetchProjectView(projectPath) {
 
   const encoded = btoa(projectPath);
   const [tasksResult, agentResults] = await Promise.all([
-    fetch(`/api/projects/${encodeURIComponent(encoded)}/tasks`)
-      .then((r) => r.json())
-      .catch((e) => {
-        console.error('[fetchProjectView] tasks:', e);
-        return [];
-      }),
-    Promise.all(
-      activeSessionIds.map((id) =>
-        fetch(`/api/sessions/${id}/agents`)
-          .then((r) => r.json())
-          .catch(() => ({ agents: [] })),
-      ),
-    ),
+    getJson(apiPath`/api/projects/${encoded}/tasks`, []),
+    Promise.all(activeSessionIds.map((id) => getJson(apiPath`/api/sessions/${id}/agents`, { agents: [] }))),
   ]);
   currentTasks = tasksResult;
   const seen = new Set();
   currentAgents = [];
+  const mergedColors = {};
   let mergedWaiting = null;
   for (let i = 0; i < agentResults.length; i++) {
     const r = agentResults[i];
@@ -587,10 +901,11 @@ async function fetchProjectView(projectPath) {
         currentAgents.push(a);
       }
     }
+    if (r.teamColors) Object.assign(mergedColors, r.teamColors);
     if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
   }
   currentWaiting = mergedWaiting;
-  updateTeamColors(currentAgents);
+  Object.assign(teamColorMap, mergedColors);
 
   renderProjectView();
   renderAgentFooter();
@@ -603,11 +918,7 @@ async function refreshProjectAgents() {
   const projectSessions = sessions.filter((s) => s.project === currentProjectPath);
   const activeSessionIds = projectSessions.filter((s) => isSessionActive(s) || isAnyPinned(s.id)).map((s) => s.id);
   const agentResults = await Promise.all(
-    activeSessionIds.map((id) =>
-      fetch(`/api/sessions/${id}/agents`)
-        .then((r) => r.json())
-        .catch(() => ({ agents: [] })),
-    ),
+    activeSessionIds.map((id) => getJson(apiPath`/api/sessions/${id}/agents`, { agents: [] })),
   );
   const seen = new Set();
   currentAgents = [];
@@ -623,30 +934,81 @@ async function refreshProjectAgents() {
         currentAgents.push(a);
       }
     }
+    if (r.teamColors) Object.assign(teamColorMap, r.teamColors);
     if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
   }
   currentWaiting = mergedWaiting;
-  updateTeamColors(currentAgents);
   const hash = JSON.stringify({ agents: currentAgents, waiting: currentWaiting });
   if (hash === lastAgentsHash) return;
   lastAgentsHash = hash;
   renderAgentFooter();
 }
-
 //#endregion
 
 //#region MESSAGE_PANEL
+function setMessagePanelVisible(open) {
+  messagePanelOpen = open;
+  document.getElementById('message-panel').classList.toggle('visible', open);
+  document.getElementById('message-toggle')?.classList.toggle('active', open);
+}
+
+// An empty board has nothing to show, so the log opens in its place. It is not the user's choice,
+// so it is not stored, it closes again on a session with tasks or panes, and a manual close sticks for that session.
+// The pane layout loads after the switch, and applyPaneLayout asks again once it is in.
+function autoRevealLog(sessionId) {
+  if (!paneLayouts.has(sessionId)) return;
+  const empty = !currentTasks.length && !paneLayout(sessionId).panes.length;
+  if (empty && !messagePanelOpen && !logDismissed.has(sessionId) && !wantsTerminal()) {
+    setMessagePanelVisible(true);
+    logAutoOpened = true;
+  } else if (!empty && logAutoOpened) {
+    setMessagePanelVisible(false);
+    logAutoOpened = false;
+  }
+}
+
 function toggleMessagePanel() {
+  if (logAutoOpened && messagePanelOpen && currentSessionId) logDismissed.add(currentSessionId);
+  logAutoOpened = false;
   const panel = document.getElementById('message-panel');
   messagePanelOpen = !messagePanelOpen;
-  localStorage.setItem('message-panel-open', messagePanelOpen);
+  termState.panelHidden = false;
+  store.setItem(MESSAGE_PANEL_OPEN_KEY, messagePanelOpen);
   panel.classList.toggle('visible', messagePanelOpen);
   document.getElementById('message-toggle')?.classList.toggle('active', messagePanelOpen);
   if (messagePanelOpen && currentSessionId) {
-    if (currentMessages.length) renderMessages(currentMessages);
+    if (currentMessages.length || lastMessagesHash) renderMessages(currentMessages);
     fetchMessages(currentSessionId);
   }
   updateUrl();
+}
+
+function applyMessagePanelFull(on) {
+  document.getElementById('message-panel').classList.toggle('full-width', on);
+  const btn = document.getElementById('message-panel-full-btn');
+  btn.classList.toggle('active', on);
+  btn.setAttribute('aria-pressed', String(on));
+  const label = on ? 'Restore width' : 'Expand to full width';
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+function toggleMessagePanelFull() {
+  const on = !document.getElementById('message-panel').classList.contains('full-width');
+  store.setItem(MESSAGE_PANEL_FULL_KEY, on);
+  applyMessagePanelFull(on);
+}
+
+function initMessagePanelFull() {
+  const panel = document.getElementById('message-panel');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebar) {
+    const sync = () => panel.style.setProperty('--sidebar-edge', `${sidebar.getBoundingClientRect().right}px`);
+    new ResizeObserver(sync).observe(sidebar);
+    sync();
+  }
+  applyMessagePanelFull(store.getItem(MESSAGE_PANEL_FULL_KEY) === 'true');
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
@@ -654,7 +1016,7 @@ async function openSessionWithBookmarks(sessionId) {
   if (!messagePanelOpen) {
     const panel = document.getElementById('message-panel');
     messagePanelOpen = true;
-    localStorage.setItem('message-panel-open', 'true');
+    store.setItem(MESSAGE_PANEL_OPEN_KEY, 'true');
     panel.classList.add('visible');
     document.getElementById('message-toggle')?.classList.add('active');
   }
@@ -684,19 +1046,24 @@ async function viewAgentLog(agentId) {
   if (!messagePanelOpen) toggleMessagePanel();
   const header = document.querySelector('.message-panel-header h3');
   if (header) {
-    header.innerHTML = `<span class="agent-log-title"><button class="agent-log-back" onclick="exitAgentLogMode()" title="Back to session log">&larr;</button> ${escapeHtml(agent.type || 'unknown')} <code class="agent-log-id">(${escapeHtml(shortId)})</code></span>`;
+    const fullModel = agentModel(agent);
+    const model = shortModelName(fullModel);
+    const modelHtml = model
+      ? `<span class="agent-log-model" title="${escapeHtml(fullModel)}">${escapeHtml(model)}</span> <span class="agent-ident-sep">·</span> `
+      : '';
+    header.innerHTML = `<span class="agent-log-title"><button class="agent-log-back" onclick="exitAgentLogMode()" title="Back to session log">&larr;</button> ${modelHtml}${escapeHtml(agent.type || 'unknown')} <code class="agent-log-id">(${escapeHtml(shortId)})</code></span>`;
   }
   fetchAgentMessages();
   if (agentLogSSE) {
     agentLogSSE.close();
     agentLogSSE = null;
   }
-  agentLogSSE = new EventSource(`/api/sessions/${encodeURIComponent(agentLogMode.sessionId)}/agents/${encodeURIComponent(resolvedId)}/messages/stream`);
+  agentLogSSE = new EventSource(apiPath`/api/sessions/${agentLogMode.sessionId}/agents/${resolvedId}/messages/stream`);
   agentLogSSE.addEventListener('agent-log-update', (e) => {
     if (!agentLogMode || agentLogMode.agentId !== resolvedId) return;
     try {
       const data = JSON.parse(e.data);
-      currentMessages = data.messages;
+      setCurrentMessages(data.messages);
       if (messagePanelOpen) renderMessages(data.messages);
       maybeFollowLatest();
     } catch (_) {}
@@ -725,11 +1092,11 @@ async function fetchAgentMessages() {
   if (!agentLogMode) return;
   const { sessionId, agentId } = agentLogMode;
   try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}/messages?limit=100`);
-    if (!res.ok || !agentLogMode || agentLogMode.agentId !== agentId) return;
-    const data = await res.json();
-    if (!agentLogMode || agentLogMode.agentId !== agentId) return;
-    currentMessages = data.messages;
+    const data = await getJson(apiPath`/api/sessions/${sessionId}/agents/${agentId}/messages`, null, {
+      query: { limit: 100 },
+    });
+    if (!data || !agentLogMode || agentLogMode.agentId !== agentId) return;
+    setCurrentMessages(data.messages);
     if (messagePanelOpen) renderMessages(data.messages);
     maybeFollowLatest();
   } catch (e) {
@@ -745,11 +1112,53 @@ function openLiveLatestMessage() {
   }
 }
 
-async function fetchMessages(sessionId) {
+const MSG_PAGE_LIMIT = 15;
+
+async function fetchSessionMessagesPage(sessionId, { before, limit = MSG_PAGE_LIMIT } = {}) {
+  const res = await api(apiPath`/api/sessions/${sessionId}/messages`, { query: { limit, before: before || null } });
+  return res.ok ? res.json() : null;
+}
+
+const LOG_LOADING_DELAY_MS = 150;
+let logLoading = null;
+
+function scheduleLogLoading(seq) {
+  clearTimeout(logLoading?.timer);
+  logLoading = { seq, startedAt: performance.now(), shown: false };
+  logLoading.timer = setTimeout(() => showLogLoading(seq), LOG_LOADING_DELAY_MS);
+}
+
+// Called again when the new session's header lands, so the old log never sits under it;
+// the delay keeps a fast switch from flashing the skeleton.
+function showLogLoading(seq) {
+  if (!logLoading || logLoading.seq !== seq || logLoading.shown) return;
+  logLoading.shown = true;
+  const delay = Math.max(0, Math.round(LOG_LOADING_DELAY_MS - (performance.now() - logLoading.startedAt)));
+  const rows = '<div class="msg-log-loading-row"><span></span><span></span></div>'.repeat(4);
+  document.getElementById('message-panel-pinned').innerHTML = '';
+  document.getElementById('message-panel-content').innerHTML =
+    `<div class="msg-log-loading" style="--log-loading-delay:${delay}ms" role="status" aria-live="polite">${rows}<div class="msg-log-loading-label">Loading session log…</div></div>`;
+}
+
+function endLogLoading() {
+  if (!logLoading) return;
+  clearTimeout(logLoading.timer);
+  logLoading = null;
+}
+
+async function fetchMessages(sessionId, page) {
+  const seq = switchSeq;
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/messages?limit=15`);
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = await (page || fetchSessionMessagesPage(sessionId));
+    if (seq !== switchSeq || sessionId !== currentSessionId) return;
+    if (!data) {
+      if (logLoading?.seq === seq && messagePanelOpen && !agentLogMode) {
+        endLogLoading();
+        document.getElementById('message-panel-content').innerHTML =
+          '<div class="msg-empty">Could not load the session log</div>';
+      }
+      return;
+    }
     let agentEnriched = false;
     for (const m of data.messages) {
       if (m.agentId && m.agentPrompt) {
@@ -768,18 +1177,16 @@ async function fetchMessages(sessionId) {
       if (hash === lastMessagesHash) return;
       lastMessagesHash = hash;
       msgHasMore = data.hasMore !== false;
-      currentMessages = data.messages;
+      setCurrentMessages(data.messages);
       if (messagePanelOpen) renderMessages(data.messages);
     } else {
       if (data.messages.length && currentMessages.length) {
         const lastKnown = currentMessages[currentMessages.length - 1].timestamp;
         const newMsgs = data.messages.filter((m) => m.timestamp > lastKnown);
         if (newMsgs.length) {
-          currentMessages = [...currentMessages, ...newMsgs];
-          if (currentMessages.length > MSG_MAX_LOADED) {
-            currentMessages = currentMessages.slice(-MSG_MAX_LOADED);
-            msgHasMore = true;
-          }
+          const merged = [...currentMessages, ...newMsgs];
+          if (merged.length > MSG_MAX_LOADED) msgHasMore = true;
+          setCurrentMessages(merged.slice(-MSG_MAX_LOADED));
           if (messagePanelOpen) renderMessages(currentMessages);
         }
       }
@@ -800,18 +1207,13 @@ async function loadOlderMessages() {
   loader.textContent = 'Loading...';
   container.prepend(loader);
   try {
-    const before = currentMessages[0].timestamp;
-    const res = await fetch(`/api/sessions/${currentSessionId}/messages?limit=15&before=${encodeURIComponent(before)}`);
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = await fetchSessionMessagesPage(currentSessionId, { before: currentMessages[0].timestamp });
+    if (!data) return;
     msgHasMore = data.hasMore && data.messages.length > 0;
     if (data.messages.length) {
       loader.remove();
       const prevHeight = container.scrollHeight;
-      currentMessages = [...data.messages, ...currentMessages];
-      if (currentMessages.length > MSG_MAX_LOADED) {
-        currentMessages = currentMessages.slice(0, MSG_MAX_LOADED);
-      }
+      setCurrentMessages([...data.messages, ...currentMessages].slice(0, MSG_MAX_LOADED));
       renderMessages(currentMessages);
       container.scrollTop = container.scrollHeight - prevHeight;
     }
@@ -837,6 +1239,11 @@ function parseCommandMessage(text) {
   return null;
 }
 
+function parseCommandArgs(text) {
+  const m = (text || '').match(/<command-args>([^<]*)<\/command-args>/);
+  return m?.[1].trim() || '';
+}
+
 function cleanMessageText(text) {
   const cmd = parseCommandMessage(text);
   if (cmd) return cmd;
@@ -849,7 +1256,136 @@ function cleanMessageText(text) {
     .trim();
 }
 
+// A GFM table delimiter row (|---|:--:|): only pipes/dashes/colons/spaces, with
+// at least one dash. Pairs with a preceding line that has cells to mark a table.
+function isTableDelimiter(line) {
+  const l = (line || '').trim();
+  return l.includes('-') && /^\|?[ :|-]+\|?$/.test(l);
+}
+
+// Cut a string to at most `max` chars at a word boundary (no mid-word chops).
+function truncateAtWord(s, max) {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const sp = cut.lastIndexOf(' ');
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd();
+}
+
+// Build a markdown preview for an assistant message: render real markdown but
+// truncate on clean structural boundaries so the feed stays compact and the
+// output is always valid markdown (never cut mid code-fence or mid table-row).
+// Prose is bounded by a line count AND a char budget (long single paragraphs are
+// cut at a word boundary). Returns { md, remainder } where remainder is a short
+// label describing what was cut (e.g. "+12 lines"), or '' when nothing was cut.
+function buildAssistantPreview(text) {
+  const lines = stripAnsi(text || '')
+    .replace(/\r/g, '')
+    .split('\n');
+  const MAX_LINES = 5; // non-blank content lines kept before truncating
+  const MAX_CHARS = 280; // total prose/code/table chars kept
+  const MAX_ROWS = 3; // table body rows
+  const MAX_CODE_LINES = 8; // lines kept inside a fenced code block
+  const countRest = (idx) => {
+    let c = 0;
+    for (let j = idx; j < lines.length; j++) if (lines[j].trim()) c++;
+    return c;
+  };
+  const pluralize = (n, word) => `+${n} ${word}${n > 1 ? 's' : ''}`;
+  const out = [];
+  let remainder = '';
+  let content = 0;
+  let chars = 0;
+  let i = 0;
+
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (content >= MAX_LINES || chars >= MAX_CHARS) {
+      const rest = countRest(i);
+      if (rest) remainder = pluralize(rest, 'line');
+      break;
+    }
+
+    // Fenced code block — copy verbatim (capped), never break the fence open.
+    const fence = trimmed.match(/^(```|~~~)/);
+    if (fence) {
+      const marker = fence[1];
+      out.push(line);
+      let codeLines = 0;
+      let dropped = 0;
+      // Advance to the real closing fence, keeping at most MAX_CODE_LINES lines,
+      // so leftover code isn't re-parsed as top-level markdown after the cap.
+      for (i++; i < lines.length && !lines[i].trim().startsWith(marker); i++) {
+        if (codeLines < MAX_CODE_LINES) {
+          out.push(lines[i]);
+          codeLines++;
+          chars += lines[i].length;
+        } else {
+          dropped++;
+        }
+      }
+      out.push(marker); // close the fence (covers capped / unterminated blocks)
+      content++;
+      if (dropped) {
+        // Stop at the truncated code block rather than resuming after the gap.
+        remainder = pluralize(dropped, 'code line');
+        break;
+      }
+      continue;
+    }
+
+    // Table — keep header + separator + up to MAX_ROWS body rows.
+    if (line.includes('|') && isTableDelimiter(lines[i + 1])) {
+      out.push(line, lines[i + 1]);
+      content++;
+      chars += line.length;
+      i++;
+      let rows = 0;
+      let droppedRows = 0;
+      while (lines[i + 1]?.includes('|')) {
+        if (rows >= MAX_ROWS) {
+          // Skip remaining rows so they aren't re-rendered as prose lines.
+          droppedRows++;
+          i++;
+          continue;
+        }
+        out.push(lines[++i]);
+        rows++;
+      }
+      if (droppedRows) {
+        // Stop at the truncated table — don't resume with later content across
+        // the gap; the "+N rows" chip signals the table continues.
+        remainder = pluralize(droppedRows, 'row');
+        break;
+      }
+      continue;
+    }
+
+    // Prose / list / heading — bound by the remaining char budget, cutting a
+    // long line at a word boundary rather than rendering a giant paragraph.
+    const remaining = MAX_CHARS - chars;
+    if (trimmed && line.length > remaining) {
+      out.push(truncateAtWord(line, remaining));
+      // Mid-line word cut — line counts would be misleading; count only the
+      // additional full lines that follow, else just signal "more".
+      const rest = countRest(i + 1);
+      remainder = rest ? pluralize(rest, 'line') : 'more';
+      break;
+    }
+    out.push(line);
+    chars += line.length;
+    if (trimmed) content++;
+  }
+
+  return { md: out.join('\n').trim(), remainder };
+}
+
+// Set for the duration of a read-only renderMessageList call: the pin, agent-link and
+// agent-log controls act on the live panel's state, so a display-only list omits them.
+let msgRenderReadOnly = false;
+
 function renderMsgPinBtn(m, i) {
+  if (msgRenderReadOnly) return '';
   const pinned = isPinned(m);
   return `<button class="msg-pin-btn${pinned ? ' pinned' : ''}" onclick="event.stopPropagation();togglePin(${i})" title="${pinned ? 'Unpin' : 'Pin'} message">${PIN_SVG}</button>`;
 }
@@ -876,7 +1412,7 @@ function renderPinnedSection() {
       } else if (p.type === 'tool_use') {
         const toolDetail = getToolDetail(p.tool, p.params, p.detail);
         const pinnedAgentLogBtn = resolveAgentLogBtn(p);
-        return `<div class="msg-item msg-tool${getTodoStatusClass(p)}" ${click}>
+        return `<div class="msg-item msg-tool" ${click}>
             ${getToolIcon(p.tool)}
             <div class="msg-body"><div class="msg-text">${escapeHtml(p.tool || '')}${toolDetail}</div><div class="msg-time">${formatDate(p.timestamp)}</div></div>${pinnedAgentLogBtn}${unpin}
           </div>`;
@@ -884,7 +1420,7 @@ function renderPinnedSection() {
         const agentLogBtn = agentLogButton(p.agentId);
         const msgTrunc = p.lastMessage
           ? escapeHtml(
-              stripAnsi(p.lastMessage.trim())
+              stripAnsi(stripTeammateWrapper(p.lastMessage.trim()))
                 .replace(/[\r\n]+/g, ' ')
                 .slice(0, 60),
             )
@@ -909,6 +1445,7 @@ function renderPinnedSection() {
 }
 
 function resolveAgentLogBtn(m) {
+  if (msgRenderReadOnly) return '';
   if (m.tool === 'Agent' && m.agentId) return agentLogButton(m.agentId);
   if (m.tool === 'SendMessage' && m.params?.to) {
     const recipient = currentAgents.find((a) => (a.type || a.name) === m.params.to);
@@ -923,12 +1460,20 @@ function toolGroupKey(m) {
 
 function renderToolItem(m, i, compact) {
   const toolDetail = getToolDetail(m.tool, m.params, m.detail);
+  // m.agentId is resolved server-side even while the agent is still running (correlated
+  // from the live agent-activity files), so the ⇗ link, agent-log button, and modal
+  // click all light up DURING the run, identical to post-completion.
   const agentLink =
-    m.tool === 'Agent' && m.agentId
-      ? `<span class="msg-agent-link" title="View agent" onclick="event.stopPropagation();showAgentModal('${escapeHtml(m.agentId)}')">⇗</span>`
+    m.tool === 'Agent' && m.agentId && !msgRenderReadOnly
+      ? ` <span class="msg-agent-link" title="View agent" onclick="event.stopPropagation();showAgentModal('${escAttrJs(m.agentId)}')">⇗</span>`
       : '';
+  // Usage chip (tokens · tools · duration) on completed Agent rows — same stats a
+  // background agent shows, sourced here from the foreground toolUseResult.
+  const agentUsage =
+    m.tool === 'Agent' && m.agentUsage ? `<span class="msg-agent-usage">${escapeHtml(m.agentUsage)}</span>` : '';
   const agentLogBtn = resolveAgentLogBtn(m);
-  const borderStyle = '';
+  const recipientColor = m.tool === 'SendMessage' && m.params?.to ? resolveNamedColor(teamColorMap[m.params.to]) : null;
+  const borderStyle = recipientColor ? `border-left:3px solid ${recipientColor.color};` : '';
   const compactClass = compact ? ' msg-tool-grouped' : '';
   const combinedStyle = `style="${borderStyle}cursor:pointer"`;
   const itemClickAttr =
@@ -936,13 +1481,22 @@ function renderToolItem(m, i, compact) {
       ? `onclick="showAgentModal('${escapeHtml(m.agentId)}')" ${combinedStyle}`
       : `onclick="msgDetailFollowLatest=false;showMsgDetail(${i})" ${combinedStyle}`;
   const pinBtn = renderMsgPinBtn(m, i);
-  return `<div class="msg-item msg-tool${compactClass}${getTodoStatusClass(m)}" ${itemClickAttr}>
+  return `<div class="msg-item msg-tool${compactClass}" data-msg-idx="${i}" ${itemClickAttr}>
       ${getToolIcon(m.tool)}
-      <div class="msg-body"><div class="msg-text">${agentLink}<span style="color:var(--text-primary);font-weight:500">${escapeHtml(m.tool)}</span>${toolDetail}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
+      <div class="msg-body"><div class="msg-text">${escapeHtml(m.tool)}${toolDetail}${agentLink}${agentUsage}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${agentLogBtn}${pinBtn}
     </div>`;
 }
 
-function renderMessageList(messages) {
+function renderMessageList(messages, { readOnly = false } = {}) {
+  msgRenderReadOnly = readOnly;
+  try {
+    return renderMessageListBody(messages);
+  } finally {
+    msgRenderReadOnly = false;
+  }
+}
+
+function renderMessageListBody(messages) {
   const parts = [];
   let i = 0;
   while (i < messages.length) {
@@ -963,9 +1517,9 @@ function renderMessageList(messages) {
         const grpAgentLogBtn = resolveAgentLogBtn(first);
         const grpPinBtn = renderMsgPinBtn(first, i);
         parts.push(`<div class="msg-tool-group">
-            <div class="msg-item msg-tool msg-tool-group-header${getTodoStatusClass(first)}" onclick="toggleToolGroup('${gid}')" style="cursor:pointer">
+            <div class="msg-item msg-tool msg-tool-group-header" onclick="toggleToolGroup('${gid}')" style="cursor:pointer">
               ${getToolIcon(first.tool)}
-              <div class="msg-body"><div class="msg-text"><span style="color:var(--text-primary);font-weight:500">${escapeHtml(first.tool)}</span>${toolDetail}<span class="tool-count-badge">×${count}</span></div><div class="msg-time">${timeRange}</div></div>${grpAgentLogBtn}${grpPinBtn}
+              <div class="msg-body"><div class="msg-text">${escapeHtml(first.tool)}${toolDetail}<span class="tool-count-badge">×${count}</span></div><div class="msg-time">${timeRange}</div></div>${grpAgentLogBtn}${grpPinBtn}
             </div>
             <div class="msg-tool-group-items" id="${gid}">${Array.from({ length: count }, (_, j) => renderToolItem(messages[i + j], i + j, true)).join('')}</div>
           </div>`);
@@ -978,36 +1532,136 @@ function renderMessageList(messages) {
       continue;
     }
 
-    const clickable = `onclick="msgDetailFollowLatest=false;showMsgDetail(${i})" style="cursor:pointer"`;
+    // Background task-notifications: the harness writes each one twice (an enqueue
+    // record + the delivered type:'user' record, same taskId). Collapse a run of
+    // same-taskId notifications into one ×N group (like tool groups), prefixed with
+    // the agent type joined from the loaded agents list.
+    if (m.taskNotification) {
+      let runEnd = i + 1;
+      while (runEnd < messages.length && messages[runEnd].taskNotification && messages[runEnd].taskId === m.taskId)
+        runEnd++;
+      const count = runEnd - i;
+      const agentType = m.taskId ? currentAgents.find((a) => a.agentId === m.taskId)?.type : null;
+      const typePrefix = agentType ? `${escapeHtml(agentType)} · ` : '';
+      const labelHtml = `${typePrefix}<code>${escapeHtml(m.systemLabel || 'Background task')}</code>`;
+      // Shared header row for both the single notification and the ×N group header.
+      const headerRow = (extraClass, onclick, badge, queuedTag) =>
+        `<div class="msg-item msg-system${extraClass}" ${onclick} style="cursor:pointer">
+            ${ICON_AGENT}
+            <div class="msg-body"><div class="msg-text">${labelHtml}${badge}</div><div class="msg-time">${formatDate(m.timestamp)}${queuedTag}</div></div>${renderMsgPinBtn(m, i)}
+          </div>`;
+
+      if (count >= 2) {
+        const gid = `task-group-${i}`;
+        const items = Array.from({ length: count }, (_, j) => {
+          const r = messages[i + j];
+          const idx = i + j;
+          return `<div class="msg-item msg-system msg-tool-grouped" data-msg-idx="${idx}" onclick="msgDetailFollowLatest=false;showMsgDetail(${idx})" style="cursor:pointer">
+              ${ICON_AGENT}
+              <div class="msg-body"><div class="msg-text">${r.queued ? 'queued' : 'delivered'}</div><div class="msg-time">${formatDate(r.timestamp)}</div></div>
+            </div>`;
+        }).join('');
+        parts.push(`<div class="msg-tool-group">
+            ${headerRow(' msg-tool-group-header', `onclick="toggleToolGroup('${gid}')"`, `<span class="tool-count-badge">×${count}</span>`, '')}
+            <div class="msg-tool-group-items" id="${gid}">${items}</div>
+          </div>`);
+        i = runEnd;
+        continue;
+      }
+
+      // Not collapsed (the enqueue/delivered pair wasn't consecutive): tag the queued
+      // record with the same golden marker used for other queued messages.
+      const queuedTag = m.queued ? '<span class="msg-queued-tag">queued</span>' : '';
+      parts.push(
+        headerRow('', `data-msg-idx="${i}" onclick="msgDetailFollowLatest=false;showMsgDetail(${i})"`, '', queuedTag),
+      );
+      i++;
+      continue;
+    }
+
+    const clickable = `data-msg-idx="${i}" onclick="msgDetailFollowLatest=false;showMsgDetail(${i})" style="cursor:pointer"`;
     const pinBtn = renderMsgPinBtn(m, i);
+
     if (m.type === 'user') {
       if (m.systemLabel) {
+        // A message another agent sent into this session (subagent hand-back, peer
+        // session) is agent output: the agent icon, a sender label, and a markdown
+        // preview of the report — never the person icon.
+        const preview = m.agentMessage ? buildAssistantPreview(m.fullText || m.text) : null;
+        const bodyHtml = preview?.md
+          ? `<div class="msg-text msg-text-md">
+              <div class="msg-md-content rendered-md${preview.remainder ? ' is-truncated' : ''}">${renderMarkdown(preview.md)}</div>${preview.remainder ? `<div class="msg-md-more">${escapeHtml(preview.remainder)}</div>` : ''}
+            </div>`
+          : '';
+        const queuedTag = m.queued ? '<span class="msg-queued-tag">queued</span>' : '';
         parts.push(`<div class="msg-item msg-system" ${clickable}>
-            ${MSG_ICON_SYSTEM}
-            <div class="msg-body"><div class="msg-text"><code>${escapeHtml(m.systemLabel)}</code></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${pinBtn}
+            ${m.agentMessage ? ICON_AGENT : MSG_ICON_SYSTEM}
+            <div class="msg-body"><div class="msg-text"><code>${escapeHtml(m.systemLabel)}</code></div>${bodyHtml}<div class="msg-time">${formatDate(m.timestamp)}${queuedTag}</div></div>${pinBtn}
           </div>`);
       } else {
         const cmd = parseCommandMessage(m.text);
-        const imgCount = m.images?.length || 0;
+        const cmdArgs = cmd ? parseCommandArgs(m.fullText || m.text) : '';
         const displayText = cmd ? cmd : escapeHtml(cleanMessageText(m.text));
         const isCmd = !!cmd;
+        const cmdArgsHtml =
+          cmd && cmdArgs ? ` <span style="color:var(--text-secondary)">${escapeHtml(cmdArgs)}</span>` : '';
         const chips = [];
+        const imgCount = m.images?.length || 0;
+        const trCount = m.toolResultRefs?.length || 0;
         if (imgCount) chips.push(`<span class="user-attach-chip">${imgCount} image${imgCount > 1 ? 's' : ''}</span>`);
+        if (trCount)
+          chips.push(`<span class="user-attach-chip">${trCount} tool result${trCount > 1 ? 's' : ''}</span>`);
         const chipsHtml = chips.length ? `<div class="user-attach-chips">${chips.join('')}</div>` : '';
         let textHtml;
         if (displayText) textHtml = isCmd ? `<code>${escapeHtml(displayText)}</code>` : displayText;
         else if (chips.length) textHtml = '<em class="msg-text-muted">(attachment)</em>';
         else textHtml = '';
-        parts.push(`<div class="msg-item msg-user${isCmd ? ' msg-cmd' : ''}" ${clickable}>
+        const queuedTag = m.queued ? '<span class="msg-queued-tag">queued</span>' : '';
+        parts.push(`<div class="msg-item msg-user${isCmd ? ' msg-cmd' : ''}${m.queued ? ' msg-queued' : ''}" ${clickable}>
             ${MSG_ICON_USER}
-            <div class="msg-body"><div class="msg-text">${textHtml}</div>${chipsHtml}<div class="msg-time">${formatDate(m.timestamp)}</div></div>${pinBtn}
+            <div class="msg-body"><div class="msg-text">${textHtml}${cmdArgsHtml}</div>${chipsHtml}<div class="msg-time">${formatDate(m.timestamp)}${queuedTag}</div></div>${pinBtn}
           </div>`);
       }
     } else if (m.type === 'assistant') {
+      const preview = buildAssistantPreview(m.fullText || m.text);
+      const moreChip = preview.remainder ? `<div class="msg-md-more">${escapeHtml(preview.remainder)}</div>` : '';
+      const bodyHtml = preview.md
+        ? `<div class="msg-text msg-text-md">
+            <div class="msg-md-content rendered-md${preview.remainder ? ' is-truncated' : ''}">${renderMarkdown(preview.md)}</div>${moreChip}
+          </div>`
+        : `<div class="msg-text">${escapeHtml(cleanMessageText(m.text))}</div>`;
       parts.push(`<div class="msg-item msg-assistant" ${clickable}>
           ${MSG_ICON_ASSISTANT}
-          <div class="msg-body"><div class="msg-text">${escapeHtml(cleanMessageText(m.text))}</div><div class="msg-time">${m.model ? `${escapeHtml(m.model)} · ` : ''}${formatDate(m.timestamp)}</div></div>${pinBtn}
+          <div class="msg-body">${bodyHtml}<div class="msg-time">${m.model ? `${escapeHtml(m.model)} · ` : ''}${formatDate(m.timestamp)}</div></div>${pinBtn}
         </div>`);
+    } else if (m.type === 'teammate') {
+      if (m.teammateId && m.color && !teamColorMap[m.teammateId]) teamColorMap[m.teammateId] = m.color;
+      const tmColor = m.color ? resolveNamedColor(m.color)?.color || m.color : '';
+      const nameSpan = `<span class="teammate-name" style="${tmColor ? `color:${escapeHtml(tmColor)}` : ''}">${escapeHtml(m.teammateId || 'teammate')}</span>`;
+      let tmLookupName = m.teammateId;
+      if (m.teammateId === 'system' && m.protocolType === 'teammate_terminated' && m.protocolData?.message) {
+        const shutMatch = m.protocolData.message.match(/^(.+?) has shut down/);
+        if (shutMatch) tmLookupName = shutMatch[1];
+      }
+      const tmAgent = tmLookupName ? currentAgents.find((a) => (a.type || a.name) === tmLookupName) : null;
+      const tmLogBtn = tmAgent ? agentLogButton(tmAgent.agentId) : '';
+      if (m.isIdle) {
+        parts.push(`<div class="msg-item msg-teammate msg-idle" ${clickable}>
+            ${MSG_ICON_IDLE}
+            <div class="msg-body"><div class="msg-text">${nameSpan} <span class="idle-label">${escapeHtml(m.protocolLabel || 'idle')}</span></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}
+          </div>`);
+      } else if (m.isProtocol) {
+        parts.push(`<div class="msg-item msg-teammate msg-protocol" ${clickable}>
+            ${MSG_ICON_TEAMMATE}
+            <div class="msg-body"><div class="msg-text">${nameSpan} <span class="protocol-label">${escapeHtml(m.protocolLabel || m.protocolType)}</span></div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}
+          </div>`);
+      } else {
+        const summaryText = m.summary ? escapeHtml(m.summary) : escapeHtml((m.text || '').slice(0, 80));
+        parts.push(`<div class="msg-item msg-teammate" ${clickable}>
+            ${MSG_ICON_TEAMMATE}
+            <div class="msg-body"><div class="msg-text">${nameSpan} ${summaryText}</div><div class="msg-time">${formatDate(m.timestamp)}</div></div>${tmLogBtn}${pinBtn}
+          </div>`);
+      }
     }
     i++;
   }
@@ -1020,7 +1674,200 @@ function toggleToolGroup(id) {
   if (el) el.classList.toggle('show');
 }
 
+// Legacy markers (written before the gate minted kind:"plan") carry no kind
+// for plans — the tool name is the durable signal there.
+function isPlanAsk(kind, tool) {
+  return kind === 'plan' || tool === 'ExitPlanMode';
+}
+
+function getWaitingPill(kind, tool) {
+  if (isPlanAsk(kind, tool)) return 'Plan awaiting approval';
+  if (kind === 'question') return 'Question pending';
+  return 'Awaiting permission';
+}
+
+function getWaitingLabel(kind, tool) {
+  const pill = getWaitingPill(kind, tool);
+  return pill === 'Awaiting permission' ? `${pill}: ${tool}` : pill;
+}
+
+function deriveWaitingDetail(tool, params) {
+  if (!params) return '';
+  const trunc = (s) => (s.length > 80 ? `${s.slice(0, 80)}...` : s);
+  if (params.file_path) return params.file_path.replace(/^.*[/\\]/, '');
+  if (params.command) return trunc(params.command);
+  if (params.pattern) return trunc(params.pattern);
+  if (params.query) return trunc(params.query);
+  if (params.url) return trunc(params.url);
+  if (params.skill) {
+    const s = params.skill + (typeof params.args === 'string' ? ` ${params.args}` : '');
+    return trunc(s);
+  }
+  if (tool === 'AskUserQuestion' && params.questions?.[0]?.question) return trunc(params.questions[0].question);
+  if (tool === 'ExitPlanMode' && typeof params.plan === 'string') {
+    const t = params.plan.match(/^#\s+(.+)/m);
+    return trunc(t ? t[1] : params.plan);
+  }
+  if (params.description) return trunc(String(params.description));
+  return '';
+}
+
+function renderWaitingBody(tool, params) {
+  if (!params) return '';
+  if (tool === 'AskUserQuestion' && Array.isArray(params.questions)) {
+    const items = params.questions
+      .map((q) => {
+        const head = `<div style="font-weight:600">${escapeHtml(q.question || '')}</div>`;
+        const opts = Array.isArray(q.options)
+          ? `<ul style="margin:2px 0 0 16px;padding:0">${q.options
+              .map(
+                (o) =>
+                  `<li><span style="font-weight:600">${escapeHtml(o.label || '')}</span>${o.description ? ` — <span style="color:var(--text-muted)">${escapeHtml(o.description)}</span>` : ''}</li>`,
+              )
+              .join('')}</ul>`
+          : '';
+        return `<div style="margin-top:6px">${head}${opts}</div>`;
+      })
+      .join('');
+    return items;
+  }
+  return renderToolParamsHtml(params);
+}
+
+const PLAN_REJECT_MSG = 'Plan rejected from the kanban board.';
+
+// Answerable only when the marker carries a request id (written by
+// the plugin's mod, which is polling for a decision) and the gate hasn't
+// lapsed past its wait window — older or lapsed markers are only answerable
+// in the terminal.
+function isWaitingAnswerable() {
+  return !!(currentWaiting?.id && !currentWaiting.lapsed);
+}
+
+function parseWaitingInput() {
+  try {
+    return JSON.parse(currentWaiting?.toolInput || '');
+  } catch (_) {
+    return null; /* toolInput may be truncated/non-JSON */
+  }
+}
+
+// One source for the decision-button pair on every surface — Approve/Reject
+// for plans, Allow/Deny for permissions; only the css class prefix differs.
+// Questions return '' (answered via the form in the detail modal).
+function waitingDecisionButtons(cls) {
+  if (!isWaitingAnswerable() || currentWaiting.kind === 'question') return '';
+  const plan = currentWaiting.kind === 'plan';
+  // Code-authored call argument, not data — hence the constant-style name the
+  // escaping check reads as safe.
+  const DENY_ARG = plan ? "rejectWaitingPlan('inline-plan-feedback')" : "respondWaiting({behavior:'deny'})";
+  const feedback = plan
+    ? `<input id="inline-plan-feedback" class="msg-waiting-feedback" type="text" placeholder="feedback for reject (optional)…" value="${escapeHtml(inlinePlanFeedback)}" oninput="inlinePlanFeedback=this.value" onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">`
+    : '';
+  return `${feedback}<button class="${escapeHtml(cls)}-allow" onclick="event.stopPropagation();respondWaiting({behavior:'allow'})">${plan ? 'Approve' : 'Allow'}</button><button class="${escapeHtml(cls)}-deny" onclick="event.stopPropagation();${DENY_ARG}">${plan ? 'Reject' : 'Deny'}</button>`;
+}
+
+let inlinePlanFeedback = '';
+
+function renderWaitingEntry() {
+  if (!isWaitingFresh()) return '';
+  const tool = currentWaiting.toolName || 'unknown';
+  const params = parseWaitingInput();
+  const plan = isPlanAsk(currentWaiting.kind, tool);
+  const detail = deriveWaitingDetail(tool, params);
+  const detailHtml = detail ? ` <span style="color:var(--text-secondary)">${escapeHtml(detail)}</span>` : '';
+  const bodyHtml = renderWaitingBody(tool, params);
+  const bodyWrap = bodyHtml ? `<div class="msg-waiting-body">${bodyHtml}</div>` : '';
+  const discardBtn = `<button class="msg-waiting-discard" title="Discard permission prompt" onclick="event.stopPropagation();discardWaiting()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
+  // Questions are answered in the detail modal; plans render there too.
+  const buttons = waitingDecisionButtons('msg-waiting');
+  const actions = buttons ? `<span class="msg-waiting-actions">${buttons}</span>` : '';
+  // Lapsed = gate stopped polling — the ask is only answerable in the terminal
+  const lapsed = !!currentWaiting.lapsed;
+  const keyHint = lapsed ? 'answer in the terminal' : buttons ? `${sendKbd()} ${plan ? 'approve' : 'allow'}` : '';
+  const hintHtml = keyHint ? `<div class="msg-time waiting-key-hint-line">${keyHint}</div>` : '';
+  const footer = hintHtml || actions ? `<div class="msg-waiting-footer">${hintHtml}${actions}</div>` : '';
+  return `<div class="msg-item msg-waiting${plan ? ' msg-waiting-plan' : ''}" onclick="msgDetailFollowLatest=false;showWaitingDetail()">${getToolIcon(tool)}<div class="msg-body"><div class="msg-text"><span style="font-weight:600">${escapeHtml(tool)}</span>${detailHtml}</div>${bodyWrap}${footer}</div>${discardBtn}</div>`;
+}
+
+// Shared approval controls for a fresh plan ask — the waiting-detail footer and
+// the saved-plan modal offer the same decision, so they render the same row.
+// Distinct input ids keep the two surfaces from shadowing each other's feedback.
+function planApprovalControlsHtml(inputId) {
+  return `<input id="${escapeHtml(inputId)}" class="waiting-option-input" type="text" placeholder="feedback for reject (optional)…"><button class="waiting-btn-allow" onclick="respondWaiting({behavior:'allow'})">Approve</button><button class="waiting-btn-deny" onclick="rejectWaitingPlan('${escAttrJs(inputId)}')">Reject</button>`;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+function rejectWaitingPlan(inputId) {
+  const feedback = document.getElementById(inputId)?.value?.trim();
+  respondWaiting({ behavior: 'deny', message: feedback || PLAN_REJECT_MSG });
+}
+
+// UI-driven approvals: POST the decision the plugin's mod is polling for.
+// First writer wins (D5) — a 409/410 means the ask was answered in the
+// terminal or superseded, so just drop the card.
+async function respondWaiting(payload) {
+  if (!currentSessionId || !currentWaiting?.id) return;
+  try {
+    const res = await api(apiPath`/api/sessions/${currentSessionId}/waiting/respond`, {
+      method: 'POST',
+      body: { id: currentWaiting.id, ...payload },
+    });
+    if (res.ok || res.status === 409 || res.status === 410) {
+      clearWaitingUi();
+    } else {
+      // Surface a respond failure — a silent console error reads as a dead button
+      const text = await res.text();
+      console.error('[respondWaiting]', res.status, text);
+      let msg = text;
+      try {
+        msg = JSON.parse(text).error || text;
+      } catch (_) {
+        /* plain text */
+      }
+      showToast(msg, 'error');
+    }
+  } catch (e) {
+    console.error('[respondWaiting]', e);
+    showToast(String(e), 'error');
+  }
+}
+
+// Drop the answered/discarded ask from every surface it renders on
+function clearWaitingUi() {
+  currentWaiting = null;
+  inlinePlanFeedback = '';
+  waitingAnswerDraft = {};
+  waitingCustomDraft = {};
+  if (currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX) {
+    // In follow mode stay in the modal and swap to the latest message —
+    // closing it would silently drop the user out of following. An ask that
+    // opened its own window is the exception: there was no following to drop.
+    if (msgDetailFollowLatest && !waitingDetailAutoOpened && currentMessages.length) {
+      showMsgDetail(currentMessages.length - 1);
+    } else {
+      closeMsgDetailModal();
+    }
+  }
+  // The saved-plan modal stays open after a decision — only its approval row goes
+  document.getElementById('plan-approval-footer')?.remove();
+  renderMessages(currentMessages);
+  renderAgentFooter();
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+async function discardWaiting() {
+  if (!currentSessionId) return;
+  try {
+    const res = await api(apiPath`/api/sessions/${currentSessionId}/waiting/discard`, { method: 'POST' });
+    if (res.ok) clearWaitingUi();
+  } catch (e) {
+    console.error('[discardWaiting]', e);
+  }
+}
+
 function renderMessages(messages) {
+  endLogLoading();
   const container = document.getElementById('message-panel-content');
   const pinnedContainer = document.getElementById('message-panel-pinned');
   pinnedContainer.innerHTML = agentLogMode ? '' : renderPinnedSection();
@@ -1033,7 +1880,8 @@ function renderMessages(messages) {
     currentMessages.length >= MSG_MAX_LOADED
       ? `<div class="msg-limit-banner">Showing last ${MSG_MAX_LOADED} messages</div>`
       : '';
-  container.innerHTML = limitBanner + msgsHtml;
+  container.innerHTML = limitBanner + msgsHtml + renderWaitingEntry();
+  highlightSelectedMsg();
   if (!msgUserScrolledUp) container.scrollTop = container.scrollHeight;
   // Auto-load more if content doesn't overflow yet
   if (
@@ -1048,11 +1896,16 @@ function renderMessages(messages) {
 
 let currentMsgDetailIdx = null;
 let msgDetailFollowLatest = false;
+// Message stays tracked but its highlight is dimmed once the detail modal closes.
+let msgHighlightDimmed = false;
+const MSG_DETAIL_WAITING_IDX = -2;
 let currentPins = [];
 let pinnedCollapsed = false;
 
 const PIN_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+const DETAIL_EDIT_SVG =
+  '<svg class="detail-edit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
 const MSG_ICON_USER =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
 const MSG_ICON_ASSISTANT =
@@ -1061,14 +1914,35 @@ const MSG_ICON_TOOL =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
 const MSG_ICON_SYSTEM =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
-const MSG_ICON_AGENT =
+const MSG_ICON_TEAMMATE =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
 const MSG_ICON_IDLE =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6"/></svg>';
+const ICON_AGENT =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M20 9h2M20 14h2M2 9h2M2 14h2"/></svg>';
 const ICON_TASK =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
 const ICON_WEB =
   '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>';
+const ICON_OPEN_EXTERNAL =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3h7v7"/><path d="M10 14L21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>';
+const ICON_COPY =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const ICON_CHECKMARK =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M20 6L9 17l-5-5"/></svg>';
+const ICON_PLAN =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
+const ICON_AGENT_WAITING =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+const ICON_AGENT_ACTIVE =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>';
+const ICON_TERMINAL =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
+const TERMINAL_TITLE = 'Running in a terminal here';
+const ICON_DISPATCHED =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>';
+const ICON_CHAT =
+  '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 const TOOL_ICONS = {
   Bash: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><polyline points="7 10 10 13 7 16"/><line x1="13" y1="16" x2="17" y2="16"/></svg>',
   Read: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
@@ -1077,19 +1951,17 @@ const TOOL_ICONS = {
   Edit: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
   Glob: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><circle cx="14" cy="14" r="3"/><line x1="16.5" y1="16.5" x2="19" y2="19"/></svg>',
   Grep: '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
-  Agent: MSG_ICON_AGENT,
+  Agent: ICON_AGENT,
   SendMessage:
     '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
   TaskCreate: ICON_TASK,
   TaskUpdate: ICON_TASK,
   TaskGet: ICON_TASK,
   TaskList: ICON_TASK,
-  TodoWrite:
-    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="8 14 10.5 16.5 15 12"/></svg>',
   ToolSearch:
     '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
-  AskUserQuestion:
-    '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  AskUserQuestion: ICON_CHAT,
+  ExitPlanMode: ICON_CHAT,
   Skill:
     '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
   WebFetch: ICON_WEB,
@@ -1101,11 +1973,10 @@ const TOOL_ICONS = {
 function getToolIcon(toolName) {
   return TOOL_ICONS[toolName] || MSG_ICON_TOOL;
 }
-
 const AGENT_LOG_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
-function agentLogButton(agentId) {
-  return `<button class="msg-agent-log-btn" onclick="event.stopPropagation();viewAgentLog('${escapeHtml(agentId)}')" title="View agent log">${AGENT_LOG_ICON}</button>`;
+function agentLogButton(agentId, cls = 'msg-agent-log-btn') {
+  return `<button class="${escapeHtml(cls)}" onclick="event.stopPropagation();viewAgentLog('${escAttrJs(agentId)}')" title="View agent log">${AGENT_LOG_ICON}</button>`;
 }
 
 function getPinId(m) {
@@ -1114,15 +1985,12 @@ function getPinId(m) {
 }
 
 function loadPins(sessionId) {
-  try {
-    return JSON.parse(localStorage.getItem(`pinned-messages-${sessionId}`)) || [];
-  } catch {
-    return [];
-  }
+  return readStoredList(pinsKey(sessionId));
 }
 
 function savePins(sessionId, pins) {
-  localStorage.setItem(`pinned-messages-${sessionId}`, JSON.stringify(pins));
+  if (pins.length) store.writeJson(pinsKey(sessionId), pins);
+  else store.removeItem(pinsKey(sessionId));
 }
 
 function isPinned(m) {
@@ -1154,6 +2022,7 @@ function toggleAgentPin(agentId) {
   }
   savePins(currentSessionId, currentPins);
   renderMessages(currentMessages);
+  renderSessions();
   renderAgentFooter();
 }
 
@@ -1166,6 +2035,20 @@ function togglePin(msgIndex) {
     currentPins.splice(idx, 1);
   } else {
     pinnedCollapsed = false;
+    // Strip large server-truncated `*Full` payloads (Write contentFull,
+    // MCP passthrough <k>Full) before stashing in localStorage — a few
+    // pinned big writes can blow past the per-origin quota. On pin
+    // expand, the modal falls back to the truncated string + the lazy
+    // /api/sessions/:id/tool-result/:toolUseId endpoint.
+    let paramsForPin = null;
+    if (m.params) {
+      paramsForPin = {};
+      for (const [k, v] of Object.entries(m.params)) {
+        if (k === 'contentFull') continue;
+        if (k.endsWith('Full') && typeof v === 'string' && typeof m.params[k.slice(0, -4)] === 'string') continue;
+        paramsForPin[k] = v;
+      }
+    }
     currentPins.push({
       id,
       type: m.type,
@@ -1175,6 +2058,9 @@ function togglePin(msgIndex) {
       toolUseId: m.toolUseId || null,
       toolResult: m.toolResult || null,
       toolResultTruncated: m.toolResultTruncated || false,
+      toolResultFull: null,
+      answerPayload: m.answerPayload || null,
+      params: paramsForPin,
       detail: m.detail || null,
       fullDetail: m.fullDetail || null,
       description: m.description || null,
@@ -1188,6 +2074,7 @@ function togglePin(msgIndex) {
   }
   savePins(currentSessionId, currentPins);
   renderMessages(currentMessages);
+  renderSessions();
   updateMsgDetailPinState();
 }
 
@@ -1197,6 +2084,7 @@ function unpinById(pinIdx) {
   currentPins.splice(pinIdx, 1);
   savePins(currentSessionId, currentPins);
   renderMessages(currentMessages);
+  renderSessions();
   if (wasAgent) renderAgentFooter();
   updateMsgDetailPinState();
 }
@@ -1233,7 +2121,9 @@ function showPinnedMsgDetail(pinIdx) {
   autoSizeModal(pinModal, body);
   const pinBtn = document.getElementById('msg-detail-pin-btn');
   if (pinBtn) pinBtn.classList.add('active');
+  syncMsgDetailPaneBtn();
   document.getElementById('msg-detail-modal').classList.add('visible');
+  mountReplyReview(pin, body, pinModal);
 }
 
 function updateMsgDetailPinState() {
@@ -1266,55 +2156,121 @@ let stickySessionIds = new Set();
 // Pinning the currently-selected session keeps it in place until deselected (less UI movement).
 const deferredPinPlacement = new Set();
 
-function loadPinnedSessions() {
+// Sessions that `session open` keeps on screen for this page only; the server never has them.
+const openedStickyIds = new Set();
+
+// The server keeps the pins (`/api/session/pins`, lib/session-pins.js); the two sets are only the
+// page's copy. The localStorage lists are from before that. Each origin has its own (the hub's
+// proxied port, the standalone board), so each one merges its lists into the server's once, then
+// deletes them.
+async function syncSessionPins() {
   try {
-    return new Set(JSON.parse(localStorage.getItem('pinned-sessions')) || []);
-  } catch {
-    return new Set();
+    const body = { pinned: readStoredList(PINNED_SESSIONS_KEY), sticky: readStoredList(STICKY_SESSIONS_KEY) };
+    const local = body.pinned.length || body.sticky.length;
+    const res = await (local ? api('/api/session/pins/import', { method: 'POST', body }) : api('/api/session/pins'));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    store.removeItem(PINNED_SESSIONS_KEY);
+    store.removeItem(STICKY_SESSIONS_KEY);
+    applyServerPins(data.pins);
+  } catch (e) {
+    console.warn('[pins] server sync failed:', e.message);
   }
 }
 
-function loadStickySessions() {
+// The first apply needs no fetch: `/api/sessions` adds the pinned sessions itself.
+let pinsApplied = false;
+
+function applyServerPins(pins) {
+  const before = new Map([...pinnedSessionIds].map((id) => [id, getSessionPinState(id)]));
+  pinnedSessionIds = new Set();
+  stickySessionIds = new Set(openedStickyIds);
+  for (const [id, state] of Object.entries(pins || {})) {
+    pinnedSessionIds.add(id);
+    if (state === 'sticky') {
+      stickySessionIds.add(id);
+      openedStickyIds.delete(id);
+    }
+  }
+  for (const id of deferredPinPlacement) if (!isAnyPinned(id)) deferredPinPlacement.delete(id);
+  const first = !pinsApplied;
+  pinsApplied = true;
+  const unchanged =
+    before.size === pinnedSessionIds.size && [...before].every(([id, s]) => getSessionPinState(id) === s);
+  if (unchanged && !first) return;
+  const added = first ? [] : [...pinnedSessionIds].filter((id) => !before.has(id));
+  showPinnedSessions(added);
+}
+
+// A pinned session outside the current filter is only in the list once it is fetched with the pins.
+function showPinnedSessions(added) {
+  const known = new Set(sessions.map((s) => s.id));
+  if (added.some((id) => !known.has(id))) fetchSessions(false);
+  else renderSessions();
+}
+
+function sendPinChange(sessionId) {
+  return postPins({ ids: [sessionId], state: getSessionPinState(sessionId, { saved: true }) });
+}
+
+// A write names only its sessions, so the last write for a session wins. A failed save re-reads the
+// server so the page shows what is saved.
+async function postPins(body) {
+  let error;
   try {
-    return new Set(JSON.parse(localStorage.getItem('sticky-sessions')) || []);
-  } catch {
-    return new Set();
+    const res = await api('/api/session/pin', { method: 'POST', body });
+    if (res.ok) return;
+    error = (await res.json().catch(() => null))?.error || `HTTP ${res.status}`;
+  } catch (e) {
+    error = e.message;
   }
+  showToast(`Pin not saved (${error}); showing the saved pins`, 'error');
+  await syncSessionPins();
 }
 
-function savePinnedSessions() {
-  localStorage.setItem('pinned-sessions', JSON.stringify([...pinnedSessionIds]));
-  localStorage.setItem('sticky-sessions', JSON.stringify([...stickySessionIds]));
+function clearSessionPin(sessionId) {
+  pinnedSessionIds.delete(sessionId);
+  stickySessionIds.delete(sessionId);
+  openedStickyIds.delete(sessionId);
+  deferredPinPlacement.delete(sessionId);
 }
 
-// Mirror pin state to server so it can be queried by the CLI. UI remains source of truth for itself.
-function offloadSessionPin(sessionId) {
-  const state = getSessionPinState(sessionId);
-  fetch('/api/session/pin', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: sessionId, state }),
-  }).catch(() => {});
-}
-
-function setSessionPinState(sessionId, sticky) {
-  const isOn = sticky ? stickySessionIds.has(sessionId) : pinnedSessionIds.has(sessionId);
-  if (isOn) {
-    pinnedSessionIds.delete(sessionId);
-    stickySessionIds.delete(sessionId);
-    deferredPinPlacement.delete(sessionId);
-  } else {
-    pinnedSessionIds.add(sessionId);
-    if (sticky) stickySessionIds.add(sessionId);
-    if (sessionId === currentSessionId) deferredPinPlacement.add(sessionId);
-  }
-  savePinnedSessions();
-  offloadSessionPin(sessionId);
+function unpinSession(sessionId) {
+  clearSessionPin(sessionId);
+  sendPinChange(sessionId);
   renderSessions();
 }
 
-function toggleSessionPin(sessionId) { setSessionPinState(sessionId, false); }
-function toggleSessionSticky(sessionId) { setSessionPinState(sessionId, true); }
+function toggleSessionPin(sessionId) {
+  if (pinnedSessionIds.has(sessionId)) return unpinSession(sessionId);
+  pinnedSessionIds.add(sessionId);
+  sendPinChange(sessionId);
+  renderSessions();
+}
+
+function toggleSessionSticky(sessionId) {
+  if (stickySessionIds.has(sessionId)) {
+    clearSessionPin(sessionId);
+  } else {
+    pinnedSessionIds.add(sessionId);
+    stickySessionIds.add(sessionId);
+    if (sessionId === currentSessionId) deferredPinPlacement.add(sessionId);
+  }
+  sendPinChange(sessionId);
+  renderSessions();
+}
+
+// The echo of this page's own change is a no-op, so the selected session keeps its deferred place.
+function handleSessionPinEvent({ id, state }) {
+  if (!id || getSessionPinState(id, { saved: true }) === state) return;
+  clearSessionPin(id);
+  if (state === 'pinned') pinnedSessionIds.add(id);
+  if (state === 'sticky') {
+    pinnedSessionIds.add(id);
+    stickySessionIds.add(id);
+  }
+  showPinnedSessions(isAnyPinned(id) ? [id] : []);
+}
 
 function isPlacedPinned(id) {
   return pinnedSessionIds.has(id) && !deferredPinPlacement.has(id);
@@ -1323,22 +2279,9 @@ function isPlacedSticky(id) {
   return stickySessionIds.has(id) && !deferredPinPlacement.has(id);
 }
 
-function handleSessionPinEvent({ id, state }) {
-  if (!id) return;
-  pinnedSessionIds.delete(id);
-  stickySessionIds.delete(id);
-  deferredPinPlacement.delete(id);
-  if (state === 'pinned') pinnedSessionIds.add(id);
-  if (state === 'sticky') {
-    pinnedSessionIds.add(id);
-    stickySessionIds.add(id);
-  }
-  savePinnedSessions();
-  renderSessions();
-}
-
-function getSessionPinState(sessionId) {
-  if (stickySessionIds.has(sessionId)) return 'sticky';
+// `saved` gives the pin the user set: a sticky that `session open` added is only this page's.
+function getSessionPinState(sessionId, { saved = false } = {}) {
+  if (stickySessionIds.has(sessionId) && !(saved && openedStickyIds.has(sessionId))) return 'sticky';
   if (pinnedSessionIds.has(sessionId)) return 'pinned';
   return 'none';
 }
@@ -1348,23 +2291,31 @@ function isAnyPinned(sessionId) {
 }
 
 function _renderPinToDetail(pin) {
+  unmountMsgReview();
   const body = document.getElementById('msg-detail-body');
   const agentBtn = document.getElementById('msg-detail-agent-btn');
   agentBtn.style.display = 'none';
   if (pin.type === 'tool_use') {
     document.getElementById('msg-detail-title').textContent = pin.tool || 'Tool';
     const fullText = pin.fullDetail || pin.detail || '';
-    const pinParamsHtml = renderToolParamsHtml(pin.params);
-    const pinResultHtml = renderToolResultHtml(
-      pin.toolResult,
-      pin.toolResultTruncated,
-      pin.toolResultFull,
-      pin.toolUseId,
-    );
-    const pinDetailEscaped = escapeHtml(fullText);
+    const pinFindings = pin.tool === 'ReportFindings';
+    const pinParamsHtml = pinFindings
+      ? renderFindingsReport(pin.params, pin.toolResult)
+      : renderToolParamsHtml(pin.params);
+    const pinResultHtml = pinFindings
+      ? ''
+      : renderToolResultHtml(pin.toolResult, pin.toolResultTruncated, pin.toolResultFull, pin.toolUseId);
+    const pinDetailEscaped = escapeHtml(stripAnsi(fullText));
     const pinDetailRendered = pin.tool === 'Bash' ? highlightBash(pinDetailEscaped) : pinDetailEscaped;
+    // Tool-result images are intentionally omitted here: their URL is built from
+    // the global currentSessionId, but a pin can belong to a different session,
+    // so rendering them would point at the wrong session's image.
     body.innerHTML =
-      (fullText ? `<pre class="${TINTED_PRE_CLASS}">${pinDetailRendered}</pre>` : '<em>No details</em>') +
+      (fullText
+        ? `<pre class="${TINTED_PRE_CLASS}">${pinDetailRendered}</pre>`
+        : pinFindings
+          ? ''
+          : '<em>No details</em>') +
       pinParamsHtml +
       pinResultHtml;
   } else if (pin.type === 'agent') {
@@ -1373,13 +2324,16 @@ function _renderPinToDetail(pin) {
     body.innerHTML = lastMsg ? renderMarkdown(lastMsg) : '<em>No agent message</em>';
   } else {
     const text = stripAnsi(pin.fullText || pin.text || '');
-    document.getElementById('msg-detail-title').textContent = pin.type === 'assistant' ? 'Pi' : 'User';
+    document.getElementById('msg-detail-title').textContent = pin.type === 'assistant' ? 'Claude' : 'User';
     body.innerHTML = renderMarkdown(text);
   }
   document.getElementById('msg-detail-meta').textContent = formatDate(pin.timestamp);
 }
 
 const SESSION_PIN_SVG = PIN_SVG.replace('width="14" height="14"', 'width="12" height="12"');
+const BOOKMARK_SVG = PIN_SVG.replace('width="14" height="14"', 'width="10" height="10"');
+const SESSION_STAR_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 2 L15 9 L22 9 L17 14 L19 22 L12 18 L5 22 L7 14 L2 9 L9 9 Z"/></svg>';
 const LINK_SVG_PATHS =
   '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>';
 const linkSvg = (size) =>
@@ -1388,123 +2342,294 @@ const linkSvg = (size) =>
 //#endregion
 
 //#region MODALS
-function renderUserAttachments(m) {
-  if (!m.images?.length || !m.id || !currentSessionId) return '';
-  const imgs = m.images
-    .map((img) => {
-      const url = `/api/sessions/${encodeURIComponent(currentSessionId)}/user-image/${encodeURIComponent(m.id)}/${img.blockIndex}`;
-      return `<img src="${url}" loading="lazy" alt="attached image" class="user-attach-image" onerror="this.style.display='none'" />`;
-    })
-    .join('');
-  return `<div class="user-attach-section"><div class="user-attach-label">Attached images</div><div class="user-attach-images">${imgs}</div></div>`;
+// Shared markup for an attachment image and the labeled section that holds a grid
+// of them — used by both user-pasted images and agent tool-result images.
+function attachImageTag(url, alt) {
+  return `<img src="${escapeHtml(url)}" loading="lazy" alt="${escapeHtml(alt)}" class="user-attach-image" />`;
+}
+function attachImageSection(label, imgsHtml) {
+  return imgsHtml
+    ? `<div class="user-attach-section"><div class="user-attach-label">${label}</div><div class="user-attach-images">${imgsHtml}</div></div>`
+    : '';
 }
 
-function showMsgDetail(idx) {
-  currentMsgDetailIdx = idx;
-  const m = currentMessages[idx];
-  if (!m) return;
-  const body = document.getElementById('msg-detail-body');
+function renderUserAttachments(m) {
+  const parts = [];
+  if (m.images?.length && currentSessionId) {
+    const sid = encodeURIComponent(currentSessionId);
+    const imgs = m.images
+      .map((img) => {
+        // Cache-kind images live on disk (image-cache/<sessionId>/<n>.png); base64
+        // images are read from the JSONL block and need the message uuid.
+        if (img.kind === 'cache') return attachImageTag(`/api/sessions/${sid}/cached-image/${img.n}`, 'user image');
+        if (m.uuid)
+          return attachImageTag(
+            `/api/sessions/${sid}/user-image/${encodeURIComponent(m.uuid)}/${img.blockIndex}`,
+            'user image',
+          );
+        return '';
+      })
+      .join('');
+    const section = attachImageSection('Attached images', imgs);
+    if (section) parts.push(section);
+  }
+  if (m.toolResultRefs?.length) {
+    const refs = m.toolResultRefs
+      .map((ref) => {
+        const safeId = escapeHtml(ref.toolUseId);
+        const shortId = ref.toolUseId.length > 14 ? `${ref.toolUseId.slice(0, 14)}…` : ref.toolUseId;
+        const preview = ref.preview ? sanitizeOutputHtml(ref.preview) : '<em>(no text)</em>';
+        const expandId = `user-tr-${ref.toolUseId}`;
+        return `<details class="user-attach-toolresult">
+          <summary>Tool result <code>${escapeHtml(shortId)}</code></summary>
+          <pre class="${TINTED_PRE_CLASS}" id="${expandId}">${preview}</pre>
+          <button type="button" class="tool-result-expand-btn" data-expand-id="${expandId}" data-tool-use-id="${escapeHtml(safeId)}" onclick="_toggleToolResultExpand(this)">Show full</button>
+        </details>`;
+      })
+      .join('');
+    parts.push(
+      `<div class="user-attach-section"><div class="user-attach-label">Tool results in this message</div>${refs}</div>`,
+    );
+  }
+  return parts.join('');
+}
+
+// Highlight the message whose detail is open, mirroring task-card selection.
+function highlightSelectedMsg() {
+  const container = document.getElementById('message-panel-content');
+  if (!container) return;
+  for (const el of container.querySelectorAll('.msg-item.selected')) el.classList.remove('selected');
+  if (msgHighlightDimmed || currentMsgDetailIdx == null || currentMsgDetailIdx < 0) return;
+  const el = container.querySelector(`.msg-item[data-msg-idx="${currentMsgDetailIdx}"]`);
+  if (el) el.classList.add('selected');
+}
+
+function msgDetailTitle(m) {
+  if (m.type === 'tool_use') return m.tool;
+  if (m.type === 'teammate') return m.teammateId || 'Teammate';
+  return m.type === 'assistant' ? 'Claude' : m.agentMessage ? m.systemLabel : m.systemLabel ? 'System' : 'User';
+}
+
+// The message dialog and a message pane render a message the same way.
+function msgDetailContent(m) {
   if (m.type === 'tool_use') {
-    document.getElementById('msg-detail-title').textContent = m.tool;
     const fullText = m.fullDetail || m.detail || '';
     const descHtml =
       m.description && m.description !== fullText
         ? `<div style="margin-bottom:8px;color:var(--text-secondary);font-size:0.85rem">${escapeHtml(m.description)}</div>`
         : '';
     let agentExtraHtml = '';
-    const agentBtn = document.getElementById('msg-detail-agent-btn');
     if (m.tool === 'Agent' && m.agentId) {
       const agentRespText = m.agentLastMessage ? stripAnsi(m.agentLastMessage.trim()) : null;
       const agentPromptText = m.agentPrompt || null;
-      const respHtml = renderJsonOrMarkdown(agentRespText);
-      const promptHtml = renderJsonOrMarkdown(agentPromptText);
+      const respHtml = agentRespText ? renderMarkdown(agentRespText) : null;
+      const promptHtml = agentPromptText ? renderMarkdown(agentPromptText) : null;
       agentExtraHtml += renderAgentTabs(promptHtml, respHtml, agentPromptText, agentRespText);
-      agentBtn.style.display = '';
-      agentBtn.dataset.agentId = m.agentId;
-    } else {
-      agentBtn.style.display = 'none';
     }
     const sendProto = m.tool === 'SendMessage' && m.params?.protocol;
-    let toolParamsHtml = renderToolParamsHtml(
-      sendProto ? Object.fromEntries(Object.entries(m.params).filter(([k]) => k !== 'protocol')) : m.params,
-    );
-    const hideResult = m.tool === 'SendMessage' || m.tool === 'AskUserQuestion' || TASK_TOOLS.has(m.tool);
+    const isFindings = m.tool === 'ReportFindings';
+    const toolParamsHtml = isFindings
+      ? ''
+      : renderToolParamsHtml(
+          sendProto ? Object.fromEntries(Object.entries(m.params).filter(([k]) => k !== 'protocol')) : m.params,
+        );
+    const hideResult = m.tool === 'SendMessage' || TASK_TOOLS.has(m.tool) || isFindings;
     const taskResultHtml = TASK_TOOLS.has(m.tool) ? renderTaskResult(m.toolResult) : '';
+    const findingsHtml = isFindings ? renderFindingsReport(m.params, m.toolResult) : '';
     const toolResultHtml = hideResult
       ? ''
       : renderToolResultHtml(m.toolResult, m.toolResultTruncated, m.toolResultFull, m.toolUseId);
     const hasAgentTabs = m.tool === 'Agent' && m.agentId && (m.agentLastMessage || m.agentPrompt);
-    const isParallelAgent = m.tool === 'Agent' && Array.isArray(m.agentTasks) && m.agentTasks.length > 0;
     let mainHtml;
-    if (isParallelAgent) {
-      mainHtml = renderParallelSubagentHtml(m);
-      toolParamsHtml = '';
-    } else if (sendProto) {
+    if (sendProto) {
       mainHtml = descHtml + renderProtocolDetail(m.params.protocol);
-    } else if (m.tool === 'AskUserQuestion') {
-      mainHtml = renderAskUserQuestionHtml(m);
-      toolParamsHtml = '';
     } else if (m.tool === 'SendMessage' && fullText) {
       mainHtml = `${descHtml}<div class="markdown-body">${renderMarkdown(fullText)}</div>`;
     } else if (hasAgentTabs) {
       mainHtml = descHtml || '';
-    } else if (taskResultHtml) {
-      mainHtml = '';
+    } else if (taskResultHtml || findingsHtml) {
+      mainHtml = descHtml || '';
     } else if (fullText) {
-      const jsonHtml = m.tool !== 'Bash' ? renderJsonInputHtml(fullText) : null;
-      if (jsonHtml) {
-        mainHtml = `${descHtml}${jsonHtml}`;
-        toolParamsHtml = '';
-      } else {
-        const detailEscaped = escapeHtml(fullText);
-        const detailRendered = m.tool === 'Bash' ? highlightBash(detailEscaped) : detailEscaped;
-        mainHtml = `${descHtml}<pre class="${TINTED_PRE_CLASS}">${detailRendered}</pre>`;
-      }
+      const detailEscaped = escapeHtml(stripAnsi(fullText));
+      const detailRendered = m.tool === 'Bash' ? highlightBash(detailEscaped) : detailEscaped;
+      mainHtml = `${descHtml}<pre class="${TINTED_PRE_CLASS}">${detailRendered}</pre>`;
     } else {
       mainHtml = TASK_TOOLS.has(m.tool) ? '' : '<em>No details</em>';
     }
-    body.innerHTML = mainHtml + toolParamsHtml + taskResultHtml + (hasAgentTabs || isParallelAgent ? '' : toolResultHtml) + agentExtraHtml;
-  } else {
-    let rawText = stripAnsi(m.fullText || m.text);
-    const userExtras = renderUserAttachments(m);
-    const cmd = m.type === 'user' ? parseCommandMessage(rawText) : null;
-    document.getElementById('msg-detail-title').textContent =
-      m.type === 'assistant' ? 'Pi' : m.systemLabel ? 'System' : 'User';
-    document.getElementById('msg-detail-agent-btn').style.display = 'none';
-    if (m.compactSummary) {
-      body.innerHTML = renderMarkdown(m.compactSummary) + userExtras;
-    } else if (cmd) {
-      const argsMatch = rawText.match(/<command-args>([^<]*)<\/command-args>/);
-      const args = argsMatch?.[1].trim() ? argsMatch[1].trim() : null;
-      const cleanBody = rawText
-        .replace(/<command-[^>]+>[\s\S]*?<\/command-[^>]+>/g, '')
-        .replace(/<local-command-[^>]+>[\s\S]*?<\/local-command-[^>]+>/g, '')
-        .trim();
-      let cmdHtml = `<code>${escapeHtml(cmd)}${args ? ` ${escapeHtml(args)}` : ''}</code>`;
-      if (cleanBody) cmdHtml += `<div style="margin-top:10px">${renderMarkdown(cleanBody)}</div>`;
-      body.innerHTML = cmdHtml + userExtras;
-    } else {
-      body.innerHTML = renderMarkdown(rawText) + userExtras;
-    }
+    const answersHtml = m.answerPayload ? renderAnswerPayloadHtml(m.answerPayload) : '';
+    const toolResultImagesHtml = renderToolResultImagesHtml(m.toolResultImageCount, m.toolUseId);
+    return (
+      mainHtml +
+      toolParamsHtml +
+      answersHtml +
+      taskResultHtml +
+      findingsHtml +
+      (hasAgentTabs ? '' : toolResultHtml) +
+      toolResultImagesHtml +
+      agentExtraHtml
+    );
   }
-  const modal = document.getElementById('msg-detail-modal').querySelector('.modal');
-  autoSizeModal(modal, body);
-  modal.classList.toggle('live', msgDetailFollowLatest);
-  const overlay = document.getElementById('msg-detail-modal');
-  overlay.classList.toggle('live-overlay', msgDetailFollowLatest);
-
-  const meta = [formatDate(m.timestamp)];
-  if (m.model) meta.unshift(m.model);
-  meta.push(`${idx + 1} of ${currentMessages.length}`);
-  document.getElementById('msg-detail-meta').textContent = meta.join(' · ');
-  currentPinDetailId = null;
-  updateMsgDetailPinState();
-  overlay.classList.add('visible');
+  if (m.type === 'teammate') {
+    if (m.isProtocol) {
+      return m.protocolData
+        ? renderProtocolDetail(m.protocolData)
+        : `<div class="teammate-idle-detail"><span class="protocol-label">${escapeHtml(m.protocolLabel || m.protocolType)}</span></div>`;
+    }
+    return renderMarkdown(stripAnsi(m.fullText || m.text || ''));
+  }
+  const rawText = stripAnsi(m.fullText || m.text || '');
+  const cmd = m.type === 'user' ? parseCommandMessage(rawText) : null;
+  const userExtras = m.type === 'user' ? renderUserAttachments(m) : '';
+  if (m.compactSummary) return renderMarkdown(m.compactSummary) + userExtras;
+  if (cmd) {
+    const args = parseCommandArgs(rawText) || null;
+    const cleanBody = rawText
+      .replace(/<command-[^>]+>[\s\S]*?<\/command-[^>]+>/g, '')
+      .replace(/<local-command-[^>]+>[\s\S]*?<\/local-command-[^>]+>/g, '')
+      .trim();
+    let cmdHtml = `<code>${escapeHtml(cmd)}${args ? ` ${escapeHtml(args)}` : ''}</code>`;
+    if (cleanBody) cmdHtml += `<div style="margin-top:10px">${renderMarkdown(cleanBody)}</div>`;
+    return cmdHtml + userExtras;
+  }
+  if (rawText) return renderMarkdown(rawText) + userExtras;
+  return userExtras || '<em>No content</em>';
 }
 
-function closeMsgDetailModal() {
-  resetModalFullscreen('msg-detail-modal');
+// The detail modal holds an index, so a list that shifts under it must move the index too.
+function setCurrentMessages(msgs) {
+  const shown = currentMessages[currentMsgDetailIdx];
+  currentMessages = msgs;
+  if (!shown) return;
+  const id = getPinId(shown);
+  const same = msgs[currentMsgDetailIdx];
+  const idx = same && getPinId(same) === id ? currentMsgDetailIdx : msgs.findIndex((m) => getPinId(m) === id);
+  currentMsgDetailIdx = idx >= 0 ? idx : null;
+  setMsgDetailMeta(shown, idx >= 0 && msgPosition(idx));
+  syncMsgDetailPaneBtn();
+}
+
+const msgPosition = (idx) => `${idx + 1} of ${currentMessages.length}`;
+
+function showMsgDetail(idx) {
+  currentMsgDetailIdx = idx;
+  document.getElementById('msg-detail-waiting-footer').innerHTML = '';
+  msgHighlightDimmed = false;
+  const m = currentMessages[idx];
+  if (!m) return;
+  highlightSelectedMsg();
+  renderMsgDetail(m, msgPosition(idx));
+}
+
+// A message outside the loaded log has no index, so it shows like a pinned message, with follow off.
+function showUnloadedMsgDetail(m) {
+  currentMsgDetailIdx = null;
+  document.getElementById('msg-detail-waiting-footer').innerHTML = '';
+  highlightSelectedMsg();
   msgDetailFollowLatest = false;
+  renderMsgDetail(m);
+}
+
+const msgDetailMeta = (m) => [m.model, formatDate(m.timestamp)].filter(Boolean);
+
+function setMsgDetailMeta(m, position) {
+  const meta = msgDetailMeta(m);
+  if (position) meta.push(position);
+  document.getElementById('msg-detail-meta').textContent = meta.join(' · ');
+}
+
+function renderMsgDetail(m, position) {
+  const body = document.getElementById('msg-detail-body');
+  document.getElementById('msg-detail-title').textContent = msgDetailTitle(m);
+  body.innerHTML = msgDetailContent(m);
+  const agentBtn = document.getElementById('msg-detail-agent-btn');
+  const agentId = m.type === 'tool_use' && m.tool === 'Agent' ? m.agentId : null;
+  agentBtn.style.display = agentId ? '' : 'none';
+  if (agentId) agentBtn.dataset.agentId = agentId;
+  const overlay = document.getElementById('msg-detail-modal');
+  const modal = overlay.querySelector('.modal');
+  autoSizeModal(modal, body);
+  setMsgDetailFollow(msgDetailFollowLatest);
+
+  setMsgDetailMeta(m, position);
+  currentPinDetailId = null;
+  updateMsgDetailPinState();
+  syncMsgDetailPaneBtn();
+  overlay.classList.add('visible');
+  mountReplyReview(m, body, modal);
+}
+
+function setMsgDetailFollow(on) {
+  msgDetailFollowLatest = on;
+  const overlay = document.getElementById('msg-detail-modal');
+  overlay.classList.toggle('live-overlay', on);
+  overlay.querySelector('.modal').classList.toggle('live', on);
+}
+
+function unmountMsgReview() {
+  unmountReview(document.getElementById('msg-review-panel'));
+}
+
+// Only the main session's replies: the agent has them in context, so a quote is enough.
+function mountReplyReview(m, body, modal) {
+  const opts = !agentLogMode && replyReviewOpts(m, body, currentSessionId);
+  if (!opts) return unmountMsgReview();
+  mountReview({
+    ...opts,
+    panelEl: document.getElementById('msg-review-panel'),
+    hostEl: modal,
+    onComment: () => setMsgDetailFollow(false),
+    onSent: closeMsgDetailModal,
+  });
+}
+
+function replyReviewOpts(m, contentEl, sid) {
+  if (m.type !== 'assistant' || !m.timestamp) return null;
+  return {
+    contentEl,
+    source: {
+      kind: 'reply',
+      id: m.timestamp,
+      label: replyReviewLabel(m.timestamp),
+      locate: replyLocateHint(m.timestamp, sid),
+    },
+  };
+}
+
+function replyReviewLabel(timestamp) {
+  const d = new Date(timestamp);
+  const day =
+    d.toDateString() === new Date().toDateString()
+      ? ''
+      : ` on ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+  return `your reply${day} at ${d.toLocaleTimeString()}`;
+}
+
+function replyLocateHint(timestamp, sid) {
+  const transcript = sessions.find((s) => s.id === sid)?.jsonlPath;
+  if (!transcript) return undefined;
+  return `If that reply is not in your context, it is in ${transcript}, the assistant entry with timestamp ${timestamp}.`;
+}
+
+let msgDetailFromTerminal = false;
+
+function closeMsgDetailModal() {
+  unmountMsgReview();
+  hideModalOverlay('msg-detail-modal');
+  // A task later, so a modal opened right after this one (View Agent) keeps the focus.
+  if (msgDetailFromTerminal) {
+    setTimeout(() => {
+      if (!isAnyModalOpen() && wantsTerminal()) focusTerminalPane();
+    });
+  }
+  msgDetailFromTerminal = false;
+  msgDetailFollowLatest = false;
+  waitingDetailAutoOpened = false;
+  // Drop the message highlight on close, mirroring task-card behavior.
+  msgHighlightDimmed = true;
+  const container = document.getElementById('message-panel-content');
+  if (container) {
+    for (const el of container.querySelectorAll('.msg-item.selected')) el.classList.remove('selected');
+  }
 }
 
 function _setModalWidth(modal, slot, on, maxWidth, width) {
@@ -1521,19 +2646,45 @@ function _setModalWidth(modal, slot, on, maxWidth, width) {
   }
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function toggleModalFullscreen(modalId) {
-  const modal = document.querySelector(`#${modalId} .modal`);
-  const isFs = modal.classList.toggle('fullscreen');
-  _setModalWidth(modal, 'Fs', isFs, '', '');
-  updateFullscreenBtnIcon(`${modalId}-fullscreen-btn`, isFs);
+function _modalEl(modalId) {
+  return document.querySelector(`#${modalId} .modal`);
 }
 
-function resetModalFullscreen(modalId) {
+// The opt-in marker for fullscreen and drag-resize alike: the presence of a
+// `<modalId>-fullscreen-btn` button in the markup.
+function _forEachFullscreenModal(cb) {
+  for (const btn of document.querySelectorAll('[id$="-fullscreen-btn"]')) {
+    const modalId = btn.id.replace(/-fullscreen-btn$/, '');
+    const modal = _modalEl(modalId);
+    if (modal) cb(modalId, modal);
+  }
+}
+
+function _applyModalFullscreen(modalId, on) {
+  const modal = _modalEl(modalId);
+  modal.classList.toggle('fullscreen', on);
+  _setModalWidth(modal, 'Fs', on, '', '');
+  updateFullscreenBtnIcon(`${modalId}-fullscreen-btn`, on);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleModalFullscreen(modalId) {
+  const on = !_modalEl(modalId).classList.contains('fullscreen');
+  _applyModalFullscreen(modalId, on);
+  store.setItem(modalFullscreenKey(modalId), String(on));
+}
+
+function loadModalFullscreen() {
+  _forEachFullscreenModal((modalId) => {
+    if (store.getItem(modalFullscreenKey(modalId)) === 'true') _applyModalFullscreen(modalId, true);
+  });
+}
+
+// Hides the overlay only — the fullscreen state stays on the dialog, it is a
+// remembered preference so the next open comes back the way it was left.
+function hideModalOverlay(modalId) {
   const modal = document.getElementById(modalId);
   modal.classList.remove('visible');
-  modal.querySelector('.modal').classList.remove('fullscreen');
-  updateFullscreenBtnIcon(`${modalId}-fullscreen-btn`, false);
   return modal;
 }
 
@@ -1545,22 +2696,179 @@ function updateFullscreenBtnIcon(btnId, isFullscreen) {
     : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
 }
 
+// Free-form modal resize: drag the bottom-right grip, double-click it to reset.
+// The size lives in CSS custom properties + `.user-sized` (see style.css) rather
+// than inline width/height, so it never collides with the inline-style stash
+// that fullscreen and "Show more" do via _setModalWidth. The viewport cap lives
+// only in the CSS min(); JS clamps just the minimums.
+const MODAL_MIN_W = 360;
+const MODAL_MIN_H = 240;
+
+function _setModalUserSize(modal, w, h) {
+  modal.style.setProperty('--user-modal-w', w);
+  modal.style.setProperty('--user-modal-h', h);
+}
+
+function initModalResize() {
+  _forEachFullscreenModal((modalId, modal) => {
+    const wKey = `modal-width-${modalId}`;
+    const hKey = `modal-height-${modalId}`;
+    const savedW = store.getItem(wKey);
+    const savedH = store.getItem(hKey);
+    if (savedW && savedH) {
+      _setModalUserSize(modal, savedW, savedH);
+      modal.classList.add('user-sized');
+    }
+
+    let startW, startH, w, h;
+    const handle = createResizeGrip({
+      onStart() {
+        startW = modal.offsetWidth;
+        startH = modal.offsetHeight;
+        // autoSizeModal / "Show more" may have widened the dialog inline
+        // before the first drag; inline width beats the .user-sized CSS.
+        modal.style.width = '';
+        modal.style.maxWidth = '';
+        // Vars and class land together, so `.user-sized` never reads an
+        // undefined var.
+        _setModalUserSize(modal, `${startW}px`, `${startH}px`);
+        modal.classList.add('user-sized');
+      },
+      // The overlay centers the modal, so both edges move — double the delta
+      // to keep the grip under the cursor.
+      onMove(dx, dy) {
+        w = Math.max(MODAL_MIN_W, startW + dx * 2);
+        h = Math.max(MODAL_MIN_H, startH + dy * 2);
+        _setModalUserSize(modal, `${w}px`, `${h}px`);
+      },
+      onEnd() {
+        if (w && h) {
+          store.setItem(wKey, `${w}px`);
+          store.setItem(hKey, `${h}px`);
+        }
+      },
+      onReset() {
+        modal.classList.remove('user-sized');
+        store.removeItem(wKey);
+        store.removeItem(hKey);
+      },
+    });
+    modal.appendChild(handle);
+  });
+}
+
+function createResizeGrip({ onReset, ...drag }) {
+  const handle = document.createElement('div');
+  handle.className = 'modal-resize-handle';
+  handle.title = 'Drag to resize · double-click to reset';
+  _initDragResize(handle, drag);
+  handle.addEventListener('dblclick', onReset);
+  return handle;
+}
+
+const MODAL_ZOOM_KEY = 'modal-zoom';
+const MODAL_ZOOM_MIN = 0.7;
+const MODAL_ZOOM_MAX = 2.0;
+let modalZoom = clampModalZoom(Number.parseFloat(store.getItem(MODAL_ZOOM_KEY)) || 1);
+
+function clampModalZoom(v) {
+  return Math.min(MODAL_ZOOM_MAX, Math.max(MODAL_ZOOM_MIN, v));
+}
+
+function modalZoomLabel() {
+  return `${Math.round(modalZoom * 100)}%`;
+}
+
+function applyModalZoom() {
+  document.documentElement.style.setProperty('--modal-zoom', String(modalZoom));
+  for (const el of document.querySelectorAll('.pane-zoom-val')) el.textContent = modalZoomLabel();
+  postToShowFrames(() => ({ type: `${SHOW_MSG}zoom`, z: modalZoom }));
+}
+
+// delta 0 resets to 100%
+function adjustModalZoom(delta) {
+  const next = delta === 0 ? 1 : clampModalZoom(Math.round((modalZoom + delta) * 10) / 10);
+  if (next === modalZoom && delta !== 0) return;
+  modalZoom = next;
+  store.setItem(MODAL_ZOOM_KEY, String(modalZoom));
+  applyModalZoom();
+  showToast(`Text ${modalZoomLabel()}`);
+}
+
+// The markup decides what scales: `.modal-zoomable` marks a modal's reading
+// surface, and style.css hangs the zoom on that same class. Confirm dialogs
+// carry no such body — nothing there is worth enlarging.
+function isZoomableModalOpen() {
+  return document.querySelector('.modal-overlay.visible .modal-zoomable') !== null;
+}
+
+function isAnyModalOpen() {
+  return document.querySelector('.modal-overlay.visible') !== null;
+}
+
+// An open modal owns the zoom keys even when it has nothing to scale.
+function isZoomableOnScreen() {
+  return isAnyModalOpen() ? isZoomableModalOpen() : isAskOnScreen() || isPaneDocOnScreen() || isShowCardFocused();
+}
+
+const ZOOM_KEYS = { '+': 0.1, '=': 0.1, NumpadAdd: 0.1, '-': -0.1, _: -0.1, NumpadSubtract: -0.1, 0: 0, Numpad0: 0 };
+
+function zoomDelta(e) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return undefined;
+  return ZOOM_KEYS[e.key] ?? ZOOM_KEYS[e.code];
+}
+
 let _toastTimer = null;
 let _manualRefreshing = false;
 //#endregion
 
 //#region TOAST
-function showToast(msg, type) {
+// `action` ({label, onClick}) adds a button and keeps the toast up long enough to reach it.
+function showToast(msg, type, action, hint) {
   const el = document.getElementById('toast');
   clearTimeout(_toastTimer);
   el.style.transition = 'none';
-  el.classList.remove('visible', 'toast-success', 'toast-error', 'toast-info');
+  el.classList.remove('visible', 'toast-success', 'toast-error', 'toast-info', 'has-action');
   void el.offsetHeight;
   el.style.transition = '';
-  el.textContent = msg;
+  if (hint) {
+    const text = document.createElement('div');
+    const hintEl = document.createElement('div');
+    hintEl.className = 'toast-hint';
+    hintEl.textContent = hint;
+    text.append(msg, hintEl);
+    el.replaceChildren(text);
+  } else el.textContent = msg;
+  const hide = () => el.classList.remove('visible', 'has-action');
+  if (action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-action';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => {
+      hide();
+      action.onClick();
+    });
+    el.append(btn);
+    el.classList.add('has-action');
+  }
   if (type) el.classList.add(`toast-${type}`);
   el.classList.add('visible');
-  _toastTimer = setTimeout(() => el.classList.remove('visible'), 2000);
+  _toastTimer = setTimeout(hide, action ? 8000 : 2000);
+}
+
+function sendMessageAddress(peerName) {
+  return `SendMessage(${peerName})`;
+}
+
+async function copyText(text, what, okMsg = `Copied ${what}`) {
+  const ok = await navigator.clipboard.writeText(text).then(
+    () => true,
+    () => false,
+  );
+  if (!ok) showToast(`Failed to copy ${what}`, 'error');
+  else if (okMsg) showToast(okMsg, 'success');
+  return ok;
 }
 
 async function copyWithFeedback(text, btn) {
@@ -1569,14 +2877,14 @@ async function copyWithFeedback(text, btn) {
     await navigator.clipboard.writeText(text);
     btn.dataset.copying = '1';
     const svg = btn.innerHTML;
-    btn.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M20 6L9 17l-5-5"/></svg>';
+    btn.innerHTML = ICON_CHECKMARK;
     setTimeout(() => {
       btn.innerHTML = svg;
       delete btn.dataset.copying;
     }, 1500);
   } catch (e) {
     console.error('Failed to copy:', e);
+    showToast('Failed to copy', 'error');
   }
 }
 
@@ -1631,22 +2939,12 @@ function formatTaskToolDetail(params) {
     parts.push(`<span style="color:var(--text-muted)">#${escapeHtml(id)}</span>`);
   }
   if (params.status) parts.push(formatTaskStatusBadge(params.status));
-  if (params.subject) parts.push(`<span style="color:var(--text-muted)">${escapeHtml(params.subject)}</span>`);
+  if (params.subject) parts.push(`<span style="color:var(--text-secondary)">${escapeHtml(params.subject)}</span>`);
   return parts.length ? ` ${parts.join(' ')}` : '';
 }
-function getTodoStatusClass(m) {
-  if (!m || m.tool !== 'TodoWrite' || !m.params) return '';
-  const s = m.params.status;
-  if (s === 'completed') return ' todo-completed';
-  if (s === 'in_progress') return ' todo-in-progress';
-  return '';
-}
-
 function getToolDetail(tool, params, detail) {
-  if (tool === 'TodoWrite' && params && typeof params.status === 'string') {
-    return ` <span style="color:var(--text-muted)">${escapeHtml(params.status)}</span>`;
-  }
   if (TASK_TOOLS.has(tool)) return formatTaskToolDetail(params);
+  if (tool === 'ReportFindings') return formatFindingsToolDetail(params);
   if (!detail) return '';
   let extra = '';
   if (tool === 'Read' && params) {
@@ -1655,11 +2953,11 @@ function getToolDetail(tool, params, detail) {
     if (params.limit) parts.push(`+${params.limit}`);
     if (parts.length) extra = ` <span style="color:var(--text-muted)">${parts.join(' ')}</span>`;
   }
-  return ` <span style="color:var(--text-muted)">${escapeHtml(detail)}</span>${extra}`;
+  return ` <span style="color:var(--text-secondary)">${escapeHtml(detail)}</span>${extra}`;
 }
 function renderTaskResult(toolResult) {
   if (!toolResult) return '';
-  const lines = toolResult.trim().split('\n');
+  const lines = sanitizeOutput(toolResult).trim().split('\n');
   const fields = [];
   for (const line of lines) {
     const m = line.match(/^([A-Za-z #]+):\s*(.+)$/);
@@ -1682,94 +2980,201 @@ function renderTaskResult(toolResult) {
   return `${html}</div>`;
 }
 
+function renderAnswerPayloadHtml(answerPayload) {
+  if (!answerPayload?.answers || typeof answerPayload.answers !== 'object') return '';
+  const qs = Array.isArray(answerPayload.questions) ? answerPayload.questions : [];
+  const findOptionDesc = (qText, label) => {
+    const q = qs.find((x) => x && x.question === qText);
+    if (!q || !Array.isArray(q.options)) return null;
+    const opt = q.options.find((o) => o && o.label === label);
+    return opt?.description ? opt.description : null;
+  };
+  const rows = Object.entries(answerPayload.answers)
+    .map(([q, a]) => {
+      const ansList = Array.isArray(a) ? a : [a];
+      const items = ansList
+        .map((label) => {
+          const desc = findOptionDesc(q, label);
+          const descHtml = desc ? ` <span style="color:var(--text-muted)">— ${escapeHtml(desc)}</span>` : '';
+          return `<li><span style="font-weight:600">${escapeHtml(String(label))}</span>${descHtml}</li>`;
+        })
+        .join('');
+      return `<div style="margin-top:6px">
+      <div class="tool-detail-label">${escapeHtml(q)}</div>
+      <ul style="margin:2px 0 0 16px;padding:0">${items}</ul>
+    </div>`;
+    })
+    .join('');
+  return `<div class="tool-detail-section-wide">
+    <div class="tool-detail-heading">Answers</div>
+    ${rows}
+  </div>`;
+}
+
+//#region FINDINGS
+const FINDING_VERDICT_COLORS = {
+  CONFIRMED: 'var(--danger)',
+  PLAUSIBLE: 'var(--warning)',
+};
+const FINDING_OUTCOME_COLORS = {
+  fixed: 'var(--success)',
+  no_change_needed: 'var(--info)',
+  skipped: 'var(--text-muted)',
+};
+function findingBadge(label, color) {
+  return `<span class="finding-badge" style="color:${color}">${escapeHtml(label)}</span>`;
+}
+function formatFindingsToolDetail(params) {
+  const findings = Array.isArray(params?.findings) ? params.findings : [];
+  const parts = [
+    `<span style="color:var(--text-secondary)">${findings.length} finding${findings.length === 1 ? '' : 's'}</span>`,
+  ];
+  const confirmed = findings.filter((f) => f && f.verdict === 'CONFIRMED').length;
+  const plausible = findings.filter((f) => f && f.verdict === 'PLAUSIBLE').length;
+  if (confirmed) parts.push(`<span style="color:${FINDING_VERDICT_COLORS.CONFIRMED}">${confirmed} confirmed</span>`);
+  if (plausible) parts.push(`<span style="color:${FINDING_VERDICT_COLORS.PLAUSIBLE}">${plausible} plausible</span>`);
+  if (params?.level) parts.push(findingBadge(params.level, 'var(--text-muted)'));
+  return ` ${parts.join(' <span style="color:var(--text-muted)">·</span> ')}`;
+}
+function renderFindingsReport(params, toolResult) {
+  const findings = Array.isArray(params?.findings) ? params.findings : [];
+  let html = '<div class="protocol-detail findings-report">';
+  html += `<span class="protocol-type-badge">${findings.length} finding${findings.length === 1 ? '' : 's'}</span>`;
+  if (params?.level) html += ` ${findingBadge(`level: ${params.level}`, 'var(--text-muted)')}`;
+  if (!findings.length) {
+    html += '<div class="finding-scenario">No findings survived verification.</div>';
+  } else {
+    html += '<div class="findings-list">';
+    findings.forEach((f, i) => {
+      if (!f || typeof f !== 'object') return;
+      const badges = [];
+      if (f.verdict && FINDING_VERDICT_COLORS[f.verdict]) {
+        badges.push(findingBadge(f.verdict, FINDING_VERDICT_COLORS[f.verdict]));
+      }
+      if (f.outcome && FINDING_OUTCOME_COLORS[f.outcome]) {
+        badges.push(findingBadge(f.outcome.replace(/_/g, ' '), FINDING_OUTCOME_COLORS[f.outcome]));
+      }
+      const loc = f.file ? `${f.file}${f.line != null ? `:${f.line}` : ''}` : '';
+      html += `<div class="finding-card">
+          <span class="finding-rank">${i + 1}</span>
+          <div class="finding-main">
+            ${badges.length || loc ? `<div class="finding-badges">${badges.join('')}${loc ? `<span class="finding-file">${escapeHtml(loc)}</span>` : ''}</div>` : ''}
+            ${f.summary ? `<div class="finding-summary">${escapeHtml(f.summary)}</div>` : ''}
+            ${f.failure_scenario ? `<div class="finding-scenario">${escapeHtml(f.failure_scenario)}</div>` : ''}
+          </div>
+        </div>`;
+    });
+    html += '</div>';
+  }
+  if (toolResult) html += `<div class="findings-result-note">${sanitizeOutputHtml(toolResult.trim())}</div>`;
+  return `${html}</div>`;
+}
+//#endregion
+
 function renderToolParamsHtml(params) {
   if (!params) return '';
-  const BLOCK_KEYS = new Set(['old_string', 'new_string', 'content', 'plan', 'edits']);
+  const BLOCK_KEYS = new Set(['old_string', 'new_string', 'content', 'contentFull', 'plan']);
   const badges = [],
     blocks = [],
     jsonBlocks = [];
   for (const [k, v] of Object.entries(params)) {
     if (BLOCK_KEYS.has(k)) continue;
-    if (v !== null && typeof v === 'object') {
-      jsonBlocks.push({ k, obj: v });
-      continue;
-    }
-    if (typeof v === 'string') {
-      const parsed = tryParseJsonObject(v);
-      if (parsed) {
-        jsonBlocks.push({ k, obj: parsed });
+    // Skip sibling `<k>Full` entries — they're used as expand targets, not
+    // rendered as their own field. Only treat it as a sibling when the
+    // trimmed key holds a server-truncated string (ends with the truncation
+    // marker), otherwise a real param that happens to end in "Full" would
+    // disappear.
+    if (k.endsWith('Full')) {
+      const baseKey = k.slice(0, -4);
+      const base = params[baseKey];
+      if (typeof base === 'string' && base.endsWith('... (truncated)') && typeof v === 'string') {
         continue;
       }
     }
+    if (v !== null && typeof v === 'object') {
+      let pretty;
+      try {
+        pretty = JSON.stringify(v, null, 2);
+      } catch (_) {
+        pretty = String(v);
+      }
+      if (pretty.length > CONTENT_TRUNCATE_MAX) {
+        pretty = `${pretty.slice(0, CONTENT_TRUNCATE_MAX)}\n... (truncated)`;
+      }
+      jsonBlocks.push({ k, pretty });
+      continue;
+    }
     const display = typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v);
     if (display.length > 60) {
-      blocks.push({ k, display });
+      const fullKey = `${k}Full`;
+      const full = typeof params[fullKey] === 'string' ? params[fullKey] : null;
+      blocks.push({ k, display, full });
     } else {
       badges.push(
-        `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:3px;background:var(--bg-secondary);font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> ${escapeHtml(display)}</span>`,
+        `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:3px;background:var(--bg-hover);font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> ${escapeHtml(display)}</span>`,
       );
     }
   }
   let html = '';
   if (badges.length) html += `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">${badges.join('')}</div>`;
-  for (const { k, display } of blocks) {
-    html += `<div style="margin-top:6px;font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> <span style="word-break:break-all">${escapeHtml(display)}</span></div>`;
+  for (const { k, display, full } of blocks) {
+    let suffix = '';
+    if (full && full.length > display.length) {
+      const toggle = makeExpandToggle(escapeHtml(display), escapeHtml(full), { fontSize: '0.75rem' });
+      suffix = ` ${toggle.btn}${toggle.full}`;
+    }
+    html += `<div style="margin-top:6px;font-size:0.75rem"><span style="color:var(--text-muted)">${escapeHtml(k)}:</span> <span style="word-break:break-all">${escapeHtml(display)}</span>${suffix}</div>`;
   }
-  for (const { k, obj } of jsonBlocks) {
-    html += `<div style="margin-top:8px;font-size:0.75rem"><div style="color:var(--text-muted);margin-bottom:2px">${escapeHtml(k)}</div>${renderJsonPre(obj)}</div>`;
+  for (const { k, pretty } of jsonBlocks) {
+    html += `<div class="tool-detail-section">
+          <div class="tool-detail-label">${escapeHtml(k)}</div>
+          <pre class="${TINTED_PRE_CLASS} tool-detail-pre-scroll" style="font-size:0.75rem">${escapeHtml(pretty)}</pre>
+        </div>`;
   }
   if (params.old_string || params.new_string) {
-    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">`;
+    html += `<div class="tool-detail-section">`;
     if (params.old_string) {
-      html += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px">old_string</div>
-            <pre class="${TINTED_PRE_CLASS}" style="max-height:200px;overflow:auto;border-left:3px solid #e55;padding-left:8px">${escapeHtml(params.old_string)}</pre>`;
+      html += `<div class="tool-detail-label">old_string</div>
+            <pre class="${TINTED_PRE_CLASS} msg-detail-pre-old">${escapeHtml(params.old_string)}</pre>`;
     }
     if (params.new_string) {
-      html += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px;margin-top:6px">new_string</div>
-            <pre class="${TINTED_PRE_CLASS}" style="max-height:200px;overflow:auto;border-left:3px solid #5b5;padding-left:8px">${escapeHtml(params.new_string)}</pre>`;
+      html += `<div class="tool-detail-label" style="margin-top:6px">new_string</div>
+            <pre class="${TINTED_PRE_CLASS} msg-detail-pre-new">${escapeHtml(params.new_string)}</pre>`;
     }
     html += `</div>`;
   }
   if (params.content) {
-    const contentTruncated = params.content.length > CONTENT_TRUNCATE_MAX;
-    const truncContent = contentTruncated
-      ? `${params.content.slice(0, CONTENT_TRUNCATE_MAX)}\n... (truncated)`
-      : params.content;
+    // params.contentFull is set by the server when the truncated `content`
+    // ends with `... (truncated)`. Fall back to params.content otherwise so
+    // small writes render as before.
+    const fullContent = params.contentFull || params.content;
+    const isTruncated = !!params.contentFull || params.content.length > CONTENT_TRUNCATE_MAX;
+    const marker = '\n... (truncated)';
+    let code = params.content.slice(0, CONTENT_TRUNCATE_MAX);
+    if (code.endsWith(marker)) code = code.slice(0, -marker.length);
+    const lang = langOfPath(params.file_path);
+    const truncHtml = (highlightCode(code, lang) ?? escapeHtml(code)) + (isTruncated ? escapeHtml(marker) : '');
     let writeMoreBtn = '',
       fullBlock = '';
-    if (contentTruncated) {
-      const toggle = makeExpandToggle(escapeHtml(truncContent), escapeHtml(params.content), {
+    if (isTruncated) {
+      const toggle = makeExpandToggle(truncHtml, escapeHtml(fullContent), {
         fontSize: '0.75rem',
         maxHeight: '500px',
         tinted: true,
+        highlightLang: lang,
       });
       writeMoreBtn = ` ${toggle.btn}`;
       fullBlock = toggle.full;
     }
-    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
-          <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px">content${writeMoreBtn}</div>
-          <pre class="${TINTED_PRE_CLASS}" style="max-height:300px;overflow:auto">${escapeHtml(truncContent)}</pre>
+    html += `<div class="tool-detail-section">
+          <div class="tool-detail-label">content${writeMoreBtn}</div>
+          <pre class="${TINTED_PRE_CLASS} tool-detail-pre-scroll">${truncHtml}</pre>
           ${fullBlock}
         </div>`;
   }
-  if (Array.isArray(params.edits) && params.edits.length) {
-    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">`;
-    html += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">${params.edits.length} edits</div>`;
-    params.edits.forEach((e, i) => {
-      const oldS = e.old_string || e.oldText || '';
-      const newS = e.new_string || e.newText || '';
-      html += `<div style="margin-top:${i ? 8 : 0}px">
-            <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">edit ${i + 1} — old</div>
-            <pre class="${TINTED_PRE_CLASS}" style="max-height:160px;overflow:auto;border-left:3px solid #e55;padding-left:8px">${escapeHtml(oldS)}</pre>
-            <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;margin-bottom:2px">edit ${i + 1} — new</div>
-            <pre class="${TINTED_PRE_CLASS}" style="max-height:160px;overflow:auto;border-left:3px solid #5b5;padding-left:8px">${escapeHtml(newS)}</pre>
-          </div>`;
-    });
-    html += `</div>`;
-  }
   if (params.plan) {
-    html += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
-          <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">Plan</div>
+    html += `<div class="tool-detail-section">
+          <div class="tool-detail-label" style="margin-bottom:4px">Plan</div>
           <div class="markdown-body">${renderMarkdown(params.plan)}</div>
         </div>`;
   }
@@ -1781,20 +3186,43 @@ function stripLineNumbers(text) {
   return text.replace(/^ *\d+[→\t]/gm, '');
 }
 
+// The two entry points for raw tool output: plain text (clipboard, field
+// parsing) and HTML (any pane that renders it, where ANSI becomes colour).
+function sanitizeOutput(text) {
+  return typeof text === 'string' ? stripAnsi(stripLineNumbers(text)) : text;
+}
+
+function sanitizeOutputHtml(text) {
+  return typeof text === 'string' ? ansiToHtml(stripLineNumbers(text)) : '';
+}
+
+function toolOutputHtml(text) {
+  if (typeof text === 'string' && text.length <= HLJS_MAX_CHARS && /^\s*[[{]/.test(text)) {
+    try {
+      const pretty = JSON.stringify(JSON.parse(text), null, 2);
+      if (typeof hljs === 'undefined' || !hljs.getLanguage('json')) return escapeHtml(pretty);
+      return `<code class="hljs language-json">${hljs.highlight(pretty, { language: 'json' }).value}</code>`;
+    } catch (_) {}
+  }
+  return sanitizeOutputHtml(text);
+}
+
+// Strings and comments share one pass, so the apostrophe in "# don't" does not open a string.
 function highlightBash(escaped) {
   return escaped
-    .replace(/^(\s*)(#.*)$/gm, '$1<span style="color:#6a9955">$2</span>')
-    .replace(/(&#x27;[\s\S]*?&#x27;|&quot;[\s\S]*?&quot;)/g, '<span style="color:#ce9178">$1</span>')
+    .replace(/(&#39;[\s\S]*?&#39;|&quot;[\s\S]*?&quot;)|^(\s*)(#.*)$/gm, (_, str, indent, comment) =>
+      str ? `<span class="hljs-string">${str}</span>` : `${indent}<span class="hljs-comment">${comment}</span>`,
+    )
     .replace(
       /\b(if|then|else|elif|fi|for|do|done|while|until|case|esac|function|return|in|select)\b/g,
-      '<span style="color:#c586c0">$1</span>',
+      '<span class="hljs-keyword">$1</span>',
     )
     .replace(
       /\b(echo|cd|ls|cat|grep|awk|sed|rm|cp|mv|mkdir|chmod|chown|export|source|exit|test|read|printf|set|unset|eval|exec|trap|wait|kill|sudo|apt|npm|npx|git|docker|curl|wget|pip|python|node|make|dotnet)\b/g,
-      '<span style="color:#569cd6">$1</span>',
+      '<span class="hljs-built_in">$1</span>',
     )
-    .replace(/(\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*)/g, '<span style="color:#9cdcfe">$1</span>')
-    .replace(/((?:^|\s)(?:&amp;&amp;|\|\||[|;])(?:\s|$))/g, '<span style="color:#d4d4d4;font-weight:bold">$1</span>');
+    .replace(/(\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*)/g, '<span class="hljs-variable">$1</span>')
+    .replace(/((?:^|\s)(?:&amp;&amp;|\|\||[|;])(?:\s|$))/g, '<span style="font-weight:bold">$1</span>');
 }
 
 const TINTED_PRE_CLASS = 'msg-detail-pre msg-detail-pre-tinted';
@@ -1802,13 +3230,20 @@ let _expandIdCounter = 0;
 function _applyExpandToggle(btn, fullEl) {
   const truncEl = btn.parentElement.nextElementSibling;
   const expand = fullEl.style.display === 'none';
+  // The full text is highlighted on first expand, so opening a message with a large Write stays fast.
+  if (expand && fullEl.dataset.hlLang) {
+    const html = highlightCode(fullEl.textContent, fullEl.dataset.hlLang);
+    if (html) fullEl.innerHTML = html;
+    delete fullEl.dataset.hlLang;
+  }
   fullEl.style.display = expand ? 'block' : 'none';
   if (truncEl) truncEl.style.display = expand ? 'none' : 'block';
   btn.textContent = expand ? 'Show less' : 'Show more';
   const panel = btn.closest('.message-panel');
   if (panel) panel.classList.toggle('msg-expanded-wide', expand);
   const modal = btn.closest('.modal');
-  if (modal) _setModalWidth(modal, 'Expand', expand, '60vw', '60vw');
+  // A user-dragged size is an explicit choice — don't widen over it.
+  if (modal && !modal.classList.contains('user-sized')) _setModalWidth(modal, 'Expand', expand, '60vw', '60vw');
 }
 function _toggleExpand(btn) {
   const f = document.getElementById(btn.dataset.expandId);
@@ -1821,12 +3256,13 @@ function makeExpandToggle(_truncatedHtml, fullHtml, opts = {}) {
   const cls = opts.tinted ? TINTED_PRE_CLASS : 'msg-detail-pre';
   const btn = `<button data-expand-id="${id}" onclick="_toggleExpand(this)" class="expand-toggle-btn" style="font-size:${fontSize}">Show more</button>`;
   const mhStyle = maxHeight ? `max-height:${maxHeight};` : '';
-  const full = `<pre id="${id}" class="${cls}" style="${mhStyle}overflow:auto;display:none">${fullHtml}</pre>`;
+  const hl = opts.highlightLang ? ` data-hl-lang="${escapeHtml(opts.highlightLang)}"` : '';
+  const full = `<pre id="${id}" class="${cls}"${hl} style="${mhStyle}overflow:auto;display:none">${fullHtml}</pre>`;
   return { btn, full };
 }
 
 function autoSizeModal(modal, body) {
-  if (modal.classList.contains('fullscreen')) return;
+  if (modal.classList.contains('fullscreen') || modal.classList.contains('user-sized')) return;
   modal.style.maxWidth = '';
   modal.classList.remove('has-mermaid');
   const hasMermaid = body.querySelector('pre.mermaid') !== null;
@@ -1836,19 +3272,21 @@ function autoSizeModal(modal, body) {
   }
   const hasTable = body.querySelector('table') !== null;
   const hasPre = body.querySelector('pre') !== null;
-  const desired = hasTable ? 1100 : body.textContent.length > 2000 || hasPre ? 960 : 860;
-  const current = parseFloat(getComputedStyle(modal).maxWidth) || 0;
-  if (desired > current) modal.style.maxWidth = `${desired}px`;
+  // hasPre is already computed and short-circuits the textContent walk, which is
+  // no longer cheap now that colourised output puts thousands of spans in there.
+  const desired = hasTable ? 1100 : hasPre || body.textContent.length > 2000 ? 960 : 860;
+  const style = getComputedStyle(modal);
+  const current = (parseFloat(style.maxWidth) || 0) - (parseFloat(style.getPropertyValue('--review-extra')) || 0);
+  if (desired > current) modal.style.maxWidth = `calc(${desired}px + var(--review-extra, 0px))`;
 }
 
 function renderToolResultHtml(toolResult, isTruncated, fullResult, toolUseId) {
   if (!toolResult) return '';
-  const stripped = stripLineNumbers(toolResult);
-  const escaped = escapeHtml(stripped);
+  const escaped = toolOutputHtml(toolResult);
   let truncLabel = '',
     fullBlock = '';
   if (isTruncated && fullResult) {
-    const toggle = makeExpandToggle(escaped, escapeHtml(stripLineNumbers(fullResult)));
+    const toggle = makeExpandToggle(escaped, toolOutputHtml(fullResult));
     truncLabel = toggle.btn;
     fullBlock = toggle.full;
   } else if (isTruncated && toolUseId) {
@@ -1858,11 +3296,23 @@ function renderToolResultHtml(toolResult, isTruncated, fullResult, toolUseId) {
   } else if (isTruncated) {
     truncLabel = '<span style="color:var(--text-muted);font-size:0.8rem;margin-left:6px">(truncated)</span>';
   }
-  return `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
-        <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:4px">Output${truncLabel}</div>
+  return `<div class="tool-detail-section-wide">
+        <div class="tool-detail-heading">Output${truncLabel}</div>
         <pre class="msg-detail-pre" style="overflow:auto">${escaped}</pre>
         ${fullBlock}
       </div>`;
+}
+
+// Render base64 images returned by a tool (e.g. a Read on a .png) so the user
+// can see what the agent saw, mirroring how user-attached images are shown.
+function renderToolResultImagesHtml(count, toolUseId) {
+  if (!count || !currentSessionId || !toolUseId) return '';
+  const sid = encodeURIComponent(currentSessionId);
+  const tid = encodeURIComponent(toolUseId);
+  const imgs = Array.from({ length: count }, (_, i) =>
+    attachImageTag(`/api/sessions/${sid}/tool-result-image/${tid}/${i}`, 'tool result image'),
+  ).join('');
+  return attachImageSection('Image output', imgs);
 }
 
 async function _toggleToolResultExpand(btn) {
@@ -1873,17 +3323,15 @@ async function _toggleToolResultExpand(btn) {
     btn.disabled = true;
     btn.textContent = 'Loading…';
     try {
-      const r = await fetch(
-        `/api/sessions/${encodeURIComponent(currentSessionId)}/tool-result/${encodeURIComponent(btn.dataset.toolUseId)}`,
-      );
+      const r = await api(apiPath`/api/sessions/${currentSessionId}/tool-result/${btn.dataset.toolUseId}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const { content } = await r.json();
-      f.textContent = stripLineNumbers(content);
+      f.innerHTML = toolOutputHtml(content);
       btn.dataset.loaded = '1';
     } catch (_e) {
       btn.textContent = 'Show more';
       btn.disabled = false;
-      showToast('Failed to load full output');
+      showToast('Failed to load full output', 'error');
       return;
     }
     btn.disabled = false;
@@ -1893,7 +3341,7 @@ async function _toggleToolResultExpand(btn) {
 
 function buildToolContent(m) {
   let content = m.fullDetail || m.detail || '';
-  if (m.toolResult) content += `\n\n--- Output ---\n\n${m.toolResultFull || m.toolResult}`;
+  if (m.toolResult) content += `\n\n--- Output ---\n\n${sanitizeOutput(m.toolResultFull || m.toolResult)}`;
   return content;
 }
 
@@ -1916,14 +3364,10 @@ async function copyMsgToClipboard(btn) {
 
 async function postAndToast(url, body, label) {
   try {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    showToast(r.ok ? `Opened ${label}` : `Failed to open ${label}`);
+    const r = await api(url, { method: 'POST', body });
+    showToast(`${r.ok ? 'Opened' : 'Failed to open'} ${label}`, r.ok ? 'success' : 'error');
   } catch (_e) {
-    showToast(`Failed to open ${label}`);
+    showToast(`Failed to open ${label}`, 'error');
   }
 }
 
@@ -1931,6 +3375,16 @@ async function postAndToast(url, body, label) {
 async function openMsgInEditor() {
   const m = getDetailMsg();
   if (!m) return;
+  // Write/Edit tool calls record the source path — open that directly instead
+  // of dumping the rendered modal body into a temp buffer.
+  const filePath =
+    m.type === 'tool_use' && (m.tool === 'Write' || m.tool === 'Edit')
+      ? m.params?.file_path || m.fullDetail || null
+      : null;
+  if (filePath) {
+    postAndToast('/api/open-in-editor', { file: filePath }, 'in editor');
+    return;
+  }
   const title = m.type === 'tool_use' ? m.tool : m.compactSummary ? 'compact-summary' : m.type;
   postAndToast('/api/open-in-editor', { content: getMessageDisplayContent(m), title }, 'in editor');
 }
@@ -1944,119 +3398,116 @@ function formatDuration(ms) {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-function renderAskUserQuestionHtml(m) {
-  const questions = (m.params && m.params.questions) || [];
-  const details = m.toolResultDetails || null;
-  const answers = details && Array.isArray(details.answers) ? details.answers : null;
-  const cancelled = details && details.cancelled;
-
-  const pending = !details;
-
-  const renderOption = (label, description, checked, mark) => {
-    const cls = `ask-user-option${checked ? ' ask-user-option--checked' : ''}`;
-    const desc = description ? `<span class="ask-user-option-desc">${escapeHtml(description)}</span>` : '';
-    return `<li class="${cls}"><span class="ask-user-check">${mark}</span><span class="ask-user-option-label">${escapeHtml(label)}</span>${desc}</li>`;
-  };
-  const isChecked = (answerRec, label) => {
-    if (!answerRec) return false;
-    if (answerRec.kind === 'multi' && Array.isArray(answerRec.selected)) return answerRec.selected.includes(label);
-    if (answerRec.kind === 'option' || answerRec.kind === 'custom') return answerRec.answer === label;
-    return false;
-  };
-
-  let html = '<div class="ask-user-questions">';
-  questions.forEach((q, qi) => {
-    const answerRec = answers ? answers.find((a) => a.questionIndex === qi) : null;
-    html += `<div class="ask-user-card">`;
-    if (q.header) html += `<div class="ask-user-header">${escapeHtml(q.header)}</div>`;
-    html += `<div class="ask-user-question-text">${escapeHtml(q.question)}</div>`;
-    if (q.multiSelect) html += `<div class="ask-user-hint">Multi-select</div>`;
-    html += '<ul class="ask-user-options">';
-    (q.options || []).forEach((opt) => {
-      const checked = isChecked(answerRec, opt.label);
-      html += renderOption(opt.label, opt.description, checked, checked ? '✓' : '○');
-    });
-    if (answerRec && answerRec.kind === 'custom' && answerRec.answer
-        && !(q.options || []).some((o) => o.label === answerRec.answer)) {
-      html += renderOption(answerRec.answer, null, true, '✎');
-    }
-    html += '</ul>';
-    html += '</div>';
-  });
-  html += '</div>';
-
-  if (pending) {
-    html += '<div class="ask-user-pending">⏳ Awaiting user response…</div>';
-  } else if (cancelled) {
-    html += '<div class="ask-user-cancelled">Cancelled by user</div>';
-  }
-  return html;
-}
-
-function renderParallelSubagentHtml(m) {
-  const tasks = m.agentTasks || [];
-  const results = m.parallelResults || [];
-  if (!tasks.length) return '';
-
-  const id = `psa-${m.toolUseId || Math.random().toString(36).slice(2, 8)}`;
-  const n = tasks.length;
-  const concurrency = m.params?.concurrency;
-  const modeLine = `parallel \u00b7 ${n} task${n !== 1 ? 's' : ''}${concurrency ? ` \u00b7 concurrency ${concurrency}` : ''}`;
-
-  const tabsHtml = tasks
-    .map((t, i) => {
-      const key = `t${i}`;
-      const label = `${i + 1}. ${t.agent || '?'}`;
-      return `<div class="agent-tab${i === 0 ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${key}" onclick="document.querySelectorAll('[data-tab-group=\\'${id}\\']').forEach(el=>{el.classList.toggle('active',el.dataset.tabKey==='${key}')})">${escapeHtml(label)}</div>`;
-    })
-    .join('');
-
-  const copyBtnHtml = `<button class="agent-tab-copy" title="Copy" onclick="copyParallelSubagentTab('${id}',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>`;
-
-  const panelsHtml = tasks
-    .map((t, i) => {
-      const key = `t${i}`;
-      const otherParams = Object.fromEntries(Object.entries(t).filter(([k]) => k !== 'agent' && k !== 'task'));
-      const result = results[i] || null;
-      let content = `<div class="psa-row"><span class="psa-key">agent</span><span class="detail-badge bg-secondary">${escapeHtml(t.agent || '?')}</span></div>`;
-      if (t.task) {
-        content += `<div class="psa-row psa-task-row"><span class="psa-key">task</span><div class="psa-task-text">${escapeHtml(t.task)}</div></div>`;
-      }
-      content += renderToolParamsHtml(otherParams);
-      const exitCode = result?.exitCode;
-      if (exitCode !== undefined && exitCode !== null) {
-        const ok = exitCode === 0;
-        const cls = ok ? 'psa-status-ok' : 'psa-status-err';
-        const label = ok ? 'done' : `failed (exit ${exitCode})`;
-        content += `<div class="psa-status ${cls}">${escapeHtml(label)}</div>`;
-      }
-      return `<div class="agent-tab-panel${i === 0 ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${key}"><div class="detail-desc" style="font-size:13px">${content}</div></div>`;
-    })
-    .join('');
-
-  return `<div class="psa-mode-label">${escapeHtml(modeLine)}</div><div class="agent-tabs">${tabsHtml}${copyBtnHtml}</div>${panelsHtml}`;
-}
-
 //#endregion
 
 //#region AGENTS
+function agentTypeParts(a) {
+  const raw = a.type || 'unknown';
+  const colonIdx = raw.indexOf(':');
+  return colonIdx > 0
+    ? { raw, ns: raw.substring(0, colonIdx + 1), name: raw.substring(colonIdx + 1) }
+    : { raw, ns: '', name: raw };
+}
+
+function agentTaskText(a) {
+  if (a.description) return a.description;
+  const prompt = stripAnsi(stripTeammateWrapper((a.prompt || '').trim())).replace(/[\r\n]+/g, ' ');
+  return prompt || agentTypeParts(a).name;
+}
+
+function agentElapsed(a, now) {
+  return a.status === 'stopped' && a.stoppedAt
+    ? new Date(a.stoppedAt).getTime() - new Date(a.startedAt || a.stoppedAt).getTime()
+    : now - new Date(a.startedAt || a.updatedAt).getTime();
+}
+
+function agentIdentHtml(a) {
+  const { raw, ns, name } = agentTypeParts(a);
+  const fullModel = agentModel(a);
+  const model = shortModelName(fullModel);
+  const modelHtml = model
+    ? `<span class="agent-card-model" title="${escapeHtml(fullModel)}">${escapeHtml(model)}</span><span class="agent-ident-sep">·</span>`
+    : '';
+  return `${modelHtml}<span class="agent-type-name" title="${escapeHtml(raw)}">${ns ? `<span class="agent-type-ns">${escapeHtml(ns)}</span>` : ''}${escapeHtml(name)}</span>`;
+}
+
+// The count names every running agent; the rows stop at ZEN_AGENTS_MAX, and the Agents Log
+// below the board lists the rest.
+function zenAgentsHtml(active) {
+  if (!active.length) return '';
+  const rows = active.slice(0, ZEN_AGENTS_MAX).map((a) => {
+    const task = truncateAtWord(agentTaskText(a), 200);
+    return `<button type="button" class="zen-agent" title="${escapeHtml(task)}" onclick="showAgentModal('${escAttrJs(a.agentId)}')">
+      <span class="agent-dot active"></span>
+      <span class="zen-agent-text"><span class="zen-agent-task">${escapeHtml(task)}</span><span class="agent-ident-row">${agentIdentHtml(a)}</span></span>
+      <span class="zen-agent-time"></span>
+    </button>`;
+  });
+  return `<div class="panel-section-header"><span>Agents</span><span class="panel-section-count">${active.length}</span></div>${rows.join('')}`;
+}
+
+// The 1 s duration tick calls this. Rewriting the rows each time would drop the focus of a row,
+// so the rows are rewritten only when they change and the times are set in place.
+function renderZenAgents(agents) {
+  const el = zenMode && sessionsList.querySelector('.zen-agents');
+  if (!el) return;
+  const active = agents.filter((a) => a.status === 'active');
+  const html = zenAgentsHtml(active);
+  if (html !== el.dataset.shape) {
+    el.dataset.shape = html;
+    el.innerHTML = html;
+  }
+  const now = Date.now();
+  el.querySelectorAll('.zen-agent-time').forEach((t, i) => {
+    t.textContent = formatDuration(agentElapsed(active[i], now));
+  });
+}
+
+// Filter shutdown ghosts: for same-type agents, keep if they overlapped (parallel)
+// or started >30s after previous stopped (legitimate re-spawn). Filter the rest.
+function visibleAgents() {
+  const byType = {};
+  for (const a of currentAgents) {
+    const groupKey = a.agentName || a.type;
+    if (!byType[groupKey]) byType[groupKey] = [];
+    byType[groupKey].push(a);
+  }
+  const filtered = [];
+  for (const group of Object.values(byType)) {
+    group.sort((a, b) => new Date(a.startedAt || 0) - new Date(b.startedAt || 0));
+    filtered.push(group[0]);
+    let maxStop = group[0].stoppedAt ? new Date(group[0].stoppedAt).getTime() : Infinity;
+    for (let i = 1; i < group.length; i++) {
+      const cur = group[i];
+      const hasContent = cur.prompt || cur.lastMessage;
+      const curStart = new Date(cur.startedAt || 0).getTime();
+      const overlapped = curStart < maxStop;
+      const reSpawn = curStart - maxStop > 30000;
+      const isActive = cur.status === 'active' || cur.status === 'idle';
+      if (overlapped || reSpawn || isActive || hasContent) filtered.push(cur);
+      const curStop = cur.stoppedAt ? new Date(cur.stoppedAt).getTime() : Infinity;
+      if (curStop > maxStop) maxStop = curStop;
+    }
+  }
+  // Sort: active/idle first, then by updatedAt desc
+  const statusOrder = { active: 0, idle: 1, stopped: 2 };
+  return filtered.sort(
+    (a, b) =>
+      (statusOrder[a.status] ?? 2) - (statusOrder[b.status] ?? 2) ||
+      new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0),
+  );
+}
+
 function renderAgentFooter() {
   const footer = document.getElementById('agent-footer');
   const content = document.getElementById('agent-footer-content');
   const label = document.getElementById('agent-footer-label');
   const now = Date.now();
+  const agents = visibleAgents();
+  renderZenAgents(agents);
+  const visible = agents.slice(0, AGENT_LOG_MAX);
 
-  const statusOrder = { active: 0, idle: 1, stopped: 2 };
-  const visible = currentAgents
-    .slice()
-    .sort(
-      (a, b) =>
-        (statusOrder[a.status] ?? 2) - (statusOrder[b.status] ?? 2) ||
-        new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0),
-    )
-    .slice(0, AGENT_LOG_MAX);
-
-  const permFresh = currentWaiting?.timestamp && now - new Date(currentWaiting.timestamp).getTime() < WAITING_TTL_MS;
+  const permFresh = isWaitingFresh();
 
   if (visible.length === 0 && !permFresh) {
     footer.classList.remove('visible');
@@ -2070,36 +3521,23 @@ function renderAgentFooter() {
   footer.classList.add('visible');
   label.textContent = `Agents Log (${visible.length})`;
 
-  const collapsed = localStorage.getItem('agentFooterCollapsed') === 'true';
-  footer.classList.toggle('collapsed', collapsed);
-  document.getElementById('agent-footer-toggle').innerHTML = collapsed ? '&#x25B4;' : '&#x25BE;';
-
   const permHtml = permFresh
-    ? `<div class="permission-badge">${currentWaiting.kind === 'question' ? '❓ Question pending' : `⏳ Awaiting: ${escapeHtml(currentWaiting.toolName || 'unknown')}`}</div>`
+    ? `<button type="button" class="permission-badge" onclick="showWaitingDetail()">${currentWaiting.kind === 'question' ? '❓ Question pending' : currentWaiting.kind === 'plan' ? '📋 Plan pending' : `⏳ Awaiting: ${escapeHtml(currentWaiting.toolName || 'unknown')}`}</button>`
     : '';
 
   content.innerHTML =
     permHtml +
     visible
       .map((a) => {
-        const isTerminal = a.status === 'stopped' || a.status === 'cancelled';
-        const elapsed =
-          isTerminal && a.stoppedAt
-            ? new Date(a.stoppedAt).getTime() - new Date(a.startedAt || a.stoppedAt).getTime()
-            : now - new Date(a.startedAt || a.updatedAt).getTime();
-        const statusLabel = ['stopped', 'cancelled', 'idle'].includes(a.status) ? a.status : 'active';
-        const statusText = `${statusLabel} · ${formatDuration(elapsed)}`;
-        const descText = a.description || '';
-        const promptTrimmed = stripAnsi((a.prompt || '').trim()).replace(/[\r\n]+/g, ' ');
-        const displayText = descText || promptTrimmed;
-        const displayTrunc = displayText.length > 60 ? `${displayText.substring(0, 60)}…` : displayText;
-        const msgHtml = displayTrunc
-          ? `<div class="agent-message" title="${escapeHtml(displayText)}">${escapeHtml(displayTrunc)}</div>`
-          : '';
-        const rawType = a.type || 'unknown';
-        const colonIdx = rawType.indexOf(':');
-        const typeNs = colonIdx > 0 ? rawType.substring(0, colonIdx + 1) : '';
-        const typeName = colonIdx > 0 ? rawType.substring(colonIdx + 1) : rawType;
+        const elapsed = agentElapsed(a, now);
+        const statusText =
+          a.status === 'stopped'
+            ? `stopped · ${formatDuration(elapsed)}`
+            : a.status === 'idle'
+              ? `idle · ${formatDuration(elapsed)}`
+              : `active · ${formatDuration(elapsed)}`;
+        const displayText = agentTaskText(a);
+        const taskHtml = `<div class="agent-task" title="${escapeHtml(displayText)}">${escapeHtml(displayText)}</div>`;
         const agentNameVal = a.agentName || null;
         const nameColor = agentNameVal ? getOwnerColor(agentNameVal) : null;
         const nameBadgeHtml = nameColor
@@ -2107,19 +3545,22 @@ function renderAgentFooter() {
           : '';
         const agentColor = resolveNamedColor(a.color);
         const colorStyle = agentColor ? ` style="border-left:3px solid ${agentColor.color}"` : '';
-        return `<div class="agent-card"${colorStyle} onclick="showAgentModal('${a.agentId}')">
-          <div class="agent-type-row">${typeNs ? `<span class="agent-type-ns">${escapeHtml(typeNs)}</span>` : ''}<span class="agent-type-name">${escapeHtml(typeName)}</span>${nameBadgeHtml}</div>
+        const selectedClass = a.agentId === currentAgentModalId ? ' selected' : '';
+        return `<div class="agent-card${selectedClass}" data-agent-id="${escapeHtml(a.agentId)}"${colorStyle} onclick="showAgentModal('${escAttrJs(a.agentId)}')">
+          ${agentLogButton(a.agentId, 'agent-card-log-btn')}
+          ${taskHtml}
+          <div class="agent-ident-row">${agentIdentHtml(a)}${nameBadgeHtml}</div>
           <div class="agent-status-row"><span class="agent-dot ${a.status}"></span><span class="agent-status">${statusText}</span></div>
-          ${msgHtml}
         </div>`;
       })
       .join('');
 
   clearInterval(agentDurationInterval);
   if (visible.some((a) => a.status === 'active' || a.status === 'idle')) {
-    agentDurationInterval = setInterval(() => renderAgentFooter(), 1000);
+    agentDurationInterval = setInterval(() => isOnScreen() && renderAgentFooter(), 1000);
     if (!agentPollInterval) {
       agentPollInterval = setInterval(() => {
+        if (skipOffScreen()) return;
         if (viewMode === 'project' && currentProjectPath) {
           refreshProjectAgents();
         } else if (currentSessionId) {
@@ -2128,7 +3569,7 @@ function renderAgentFooter() {
       }, 3000);
     }
   } else {
-    agentDurationInterval = setInterval(() => renderAgentFooter(), 10000);
+    agentDurationInterval = setInterval(() => isOnScreen() && renderAgentFooter(), 10000);
     clearInterval(agentPollInterval);
     agentPollInterval = null;
   }
@@ -2137,9 +3578,24 @@ function renderAgentFooter() {
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function toggleAgentFooter() {
   const footer = document.getElementById('agent-footer');
-  const collapsed = !footer.classList.contains('collapsed');
-  footer.classList.toggle('collapsed', collapsed);
-  localStorage.setItem('agentFooterCollapsed', collapsed);
+  store.setItem(agentFooterCollapseKey(), !footer.classList.contains('collapsed'));
+  applyAgentFooterCollapsed();
+}
+
+function boardInSplit() {
+  const board = document.getElementById('board-side');
+  return board.classList.contains('side-l') || board.classList.contains('side-r');
+}
+
+// With the board in a split, the agents log keeps its own collapse preference and starts collapsed.
+function agentFooterCollapseKey() {
+  return boardInSplit() ? 'agentFooterCollapsedSplit' : 'agentFooterCollapsed';
+}
+
+function applyAgentFooterCollapsed() {
+  const saved = store.getItem(agentFooterCollapseKey());
+  const collapsed = saved === null ? boardInSplit() : saved === 'true';
+  document.getElementById('agent-footer').classList.toggle('collapsed', collapsed);
   document.getElementById('agent-footer-toggle').innerHTML = collapsed ? '&#x25B4;' : '&#x25BE;';
 }
 
@@ -2173,15 +3629,15 @@ function togglePinFromAgentModal() {
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 async function dismissAgent(agentId) {
   if (!currentSessionId || !agentId) return;
-  dismissedAgentIds.add(agentId);
-  currentWaiting = null;
-  lastAgentsHash = '';
   try {
-    await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/agents/${encodeURIComponent(agentId)}/stop`, { method: 'POST' });
+    const res = await api(apiPath`/api/sessions/${currentSessionId}/agents/${agentId}/stop`, { method: 'POST' });
+    if (res.ok) {
+      currentWaiting = null;
+      fetchAgents(currentSessionId);
+    }
   } catch (e) {
     console.error('[dismissAgent]', e);
   }
-  fetchAgents(currentSessionId);
 }
 
 function findAgentById(agentId) {
@@ -2199,6 +3655,7 @@ function showAgentModal(agentId) {
   const agent = findAgentById(agentId);
   if (!agent) return;
   currentAgentModalId = agentId;
+  highlightSelectedAgent();
   const modal = document.getElementById('agent-modal');
   const title = document.getElementById('agent-modal-title');
   const body = document.getElementById('agent-modal-body');
@@ -2211,7 +3668,7 @@ function showAgentModal(agentId) {
   const modalNameLabel = agent.agentName ? ` · ${escapeHtml(agent.agentName)}` : '';
   title.innerHTML = `${statusDot} ${escapeHtml(agent.type || 'unknown')}${modalNameLabel}`;
 
-  const shortModel = agent.model ?? null;
+  const shortModel = shortModelName(agentModel(agent));
   const shortId = agent.agentId ? agent.agentId.slice(0, 8) : '';
   const chip = (label, value, opts = {}) => {
     const cls = opts.cls ? ` ${opts.cls}` : '';
@@ -2221,10 +3678,16 @@ function showAgentModal(agentId) {
     return `<span class="agent-chip${cls}"${style}${title}>${labelHtml}<span class="agent-chip-val">${value}</span></span>`;
   };
 
+  const agentMsg = currentMessages.find((m) => m.tool === 'Agent' && m.agentId === agentId);
+  const usageStats = agent.usage || null;
+  const fmtTok = fmtTokens;
+
   const chips = [];
   if (agent.agentId) chips.push(chip('id', escapeHtml(shortId), { cls: 'agent-chip-mono', title: agent.agentId }));
   chips.push(chip('', escapeHtml(agent.status), { cls: `agent-chip-status agent-chip-${agent.status}` }));
   chips.push(chip('⏱', formatDuration(elapsed)));
+  if (usageStats?.tokens != null) chips.push(chip('tokens', fmtTok(usageStats.tokens), { cls: 'agent-chip-mono' }));
+  if (usageStats?.tools != null) chips.push(chip('tools', String(usageStats.tools), { cls: 'agent-chip-mono' }));
   if (shortModel) chips.push(chip('model', escapeHtml(shortModel), { cls: 'agent-chip-mono' }));
   if (agent.agentName) {
     const c = getOwnerColor(agent.agentName);
@@ -2237,17 +3700,14 @@ function showAgentModal(agentId) {
   if (started) chips.push(chip('started', started.toLocaleTimeString()));
   if (stopped) chips.push(chip('stopped', stopped.toLocaleTimeString()));
 
-  const agentMsg = currentMessages.find((m) => m.tool === 'Agent' && m.agentId === agentId);
-
   let html = `<div class="agent-chips">${chips.join('')}</div>`;
 
-  const promptText = agentMsg?.agentPrompt || agent.prompt || null;
-  const rawResponse = agent.lastMessage || agentMsg?.agentLastMessage || null;
-  const responseText = rawResponse ? stripAnsi(rawResponse.trim()) : null;
+  const promptText = stripTeammateWrapper(agentMsg?.agentPrompt || agent.prompt || null);
+  const responseText = agent.lastMessage ? stripAnsi(agent.lastMessage.trim()) : null;
   _agentModalPromptText = promptText;
   _agentModalResponseText = responseText;
-  const promptHtml = renderJsonOrMarkdown(promptText);
-  const responseHtml = renderJsonOrMarkdown(responseText);
+  const promptHtml = promptText ? renderMarkdown(promptText) : null;
+  const responseHtml = responseText ? renderMarkdown(responseText) : null;
   html += renderAgentTabs(promptHtml, responseHtml, promptText, responseText);
 
   body.innerHTML = html;
@@ -2256,19 +3716,21 @@ function showAgentModal(agentId) {
   const dismissBtn = document.getElementById('agent-modal-dismiss-btn');
   dismissBtn.style.display = agent.status === 'active' || agent.status === 'idle' ? '' : 'none';
   modal.classList.add('visible');
-  const keyHandler = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeAgentModal();
-      document.removeEventListener('keydown', keyHandler);
-    }
-  };
-  document.addEventListener('keydown', keyHandler);
 }
 
 function closeAgentModal() {
-  resetModalFullscreen('agent-modal');
+  hideModalOverlay('agent-modal');
   currentAgentModalId = null;
+  highlightSelectedAgent();
+}
+
+function highlightSelectedAgent() {
+  const content = document.getElementById('agent-footer-content');
+  if (!content) return;
+  for (const el of content.querySelectorAll('.agent-card.selected')) el.classList.remove('selected');
+  if (currentAgentModalId == null) return;
+  const el = content.querySelector(`.agent-card[data-agent-id="${escSel(currentAgentModalId)}"]`);
+  if (el) el.classList.add('selected');
 }
 
 //#endregion
@@ -2276,6 +3738,28 @@ function closeAgentModal() {
 //#region RENDERING
 let revealedPlanSessionId = null;
 let revealedStorageSessionId = null;
+
+// Opens a session and scrolls the sidebar to it, refetching first when the id
+// fell outside the session list the current filters asked for.
+async function revealSession(id) {
+  // Explicit opens restore a dismissed session; activity and auto-follow do not.
+  setSessionDismissed(id, false);
+  let session = sessions.find((s) => s.id === id);
+  if (!session) {
+    lastSessionsHash = '';
+    await fetchSessions(true, id);
+    session = await ensureSessionLoaded(id);
+  }
+  const uncollapsed = session ? uncollapseFor(session) : false;
+  if (uncollapsed) persistCollapsedGroups();
+  expandSidebar();
+  await openSession(id);
+  // fetchTasks skips its render when the session and task hash are unchanged.
+  if (uncollapsed) renderSessions();
+  const el = document.querySelector(`.session-item[data-session-id="${escSel(id)}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 async function revealPlanSession(planSessionId) {
   if (revealedPlanSessionId === planSessionId) {
@@ -2284,91 +3768,41 @@ async function revealPlanSession(planSessionId) {
     return;
   }
   revealedPlanSessionId = planSessionId;
-  if (!sessions.some((s) => s.id === planSessionId)) {
-    lastSessionsEtag = '';
-    await fetchSessions();
-  }
-  await fetchTasks(planSessionId);
-  const el = document.querySelector(`.session-item[data-session-id="${CSS.escape(planSessionId)}"]`);
-  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  await revealSession(planSessionId);
 }
 
-async function showAllTasks() {
-  try {
-    viewMode = 'all';
-    if (agentLogMode) exitAgentLogMode();
-    currentSessionId = null;
-      resetAgentState();
-    const res = await fetch('/api/tasks/all');
-    allTasksCache = await res.json();
-    let tasks = allTasksCache;
-    if (filterProject) {
-      tasks = tasks.filter((t) => matchesProjectFilter(t.project));
-    }
-    currentTasks = tasks;
-    updateUrl();
-    renderAllTasks();
-    renderSessions();
-  } catch (error) {
-    console.error('Failed to fetch all tasks:', error);
-  }
+function showNoSession() {
+  viewMode = 'none';
+  if (agentLogMode) exitAgentLogMode();
+  currentSessionId = null;
+  switchSeq++;
+  endLogLoading();
+  ownerFilter = '';
+  resetAgentState();
+  currentTasks = [];
+  updateUrl();
+  sessionView.classList.remove('visible');
+  noSession.style.display = '';
+  renderSessions();
+  renderActivityChip();
 }
 
-function renderAllTasks() {
-  noSession.style.display = 'none';
-  sessionView.classList.add('visible');
-  const visibleTasks = currentTasks.filter((t) => !isInternalTask(t) && isLiveTask(t));
-  const totalTasks = visibleTasks.length;
-  const completed = visibleTasks.filter((t) => t.status === 'completed').length;
-  const percent = totalTasks > 0 ? Math.round((completed / totalTasks) * 100) : 0;
-
-  const isFiltered = filterProject && filterProject !== '__recent__';
-  const projectName = isFiltered ? filterProject.split(/[/\\]/).pop() : null;
-  sessionTitle.textContent = isFiltered
-    ? `Tasks: ${projectName}`
-    : filterProject === '__recent__'
-      ? 'Recent Tasks'
-      : 'All Tasks';
-  sessionMeta.textContent = isFiltered
-    ? `${totalTasks} tasks in this project`
-    : `${totalTasks} tasks across ${sessions.length} sessions`;
-  progressPercent.textContent = `${percent}%`;
-  progressBar.style.width = `${percent}%`;
-
-  renderKanban();
-}
-
-let _renderSessionsQueued = false;
-function renderSessions() {
-  if (_renderSessionsQueued) return;
-  _renderSessionsQueued = true;
-  requestAnimationFrame(() => {
-    _renderSessionsQueued = false;
-    _renderSessions();
-  });
-}
-
-function _renderSessions() {
-  // Update project dropdown
-  updateProjectDropdown();
-
-  // Filter pipeline: active filter → force-include revealed/current (non-pinned) sessions →
-  // project filter → search filter → ensure pinned/sticky sessions are always included
-  const LIVE_INDICATOR_MS = 10 * 1000;
+// Filter pipeline: active filter → force-include revealed/current (non-pinned) sessions →
+// project filter → search filter → ensure pinned/sticky sessions are always included.
+// Pure over module state, so the session picker can ask for the same list without a render.
+function getFilteredSessions() {
   let filteredSessions = sessions;
   if (sessionFilter === 'active') {
-    const ACTIVE_PLAN_MS = 10 * 60 * 1000;
-    const now = Date.now();
     const activeSessionIds = new Set();
     filteredSessions = filteredSessions.filter((s) => {
       if (dismissedSessionIds.has(s.id)) return false;
       const isActive =
-        s.hasMessages &&
-        ((!s.sharedTaskList && (s.pending > 0 || s.inProgress > 0)) ||
-          s.hasActiveAgents ||
-          s.hasWaitingForUser ||
-          s.hasRecentLog ||
-          (s.hasPlan && !s.planImplementationSessionId && now - new Date(s.modifiedAt).getTime() <= ACTIVE_PLAN_MS));
+        runningTerminals.has(s.id) ||
+        (s.hasMessages &&
+          ((!s.sharedTaskList && (s.pending > 0 || s.inProgress > 0)) ||
+            s.hasActiveAgents ||
+            s.hasWaitingForUser ||
+            s.hasRecentActivity));
       if (isActive) activeSessionIds.add(s.id);
       return isActive;
     });
@@ -2376,7 +3810,7 @@ function _renderSessions() {
     // Skip pinned sessions — they are prepended separately below (lines ~2180) to preserve stable position.
     const filteredIds = new Set(filteredSessions.map((s) => s.id));
     for (const id of [revealedPlanSessionId, revealedStorageSessionId, currentSessionId]) {
-      if (id && !filteredIds.has(id) && !isAnyPinned(id)) {
+      if (id && !filteredIds.has(id) && !(isAnyPinned(id) && activityFilter.size === 0)) {
         const session = sessions.find((s) => s.id === id);
         if (session) {
           const insertAt = filteredSessions.findIndex((s) => s.modifiedAt < session.modifiedAt);
@@ -2387,10 +3821,26 @@ function _renderSessions() {
     }
   }
   if (filterProject) {
-    filteredSessions = filteredSessions.filter((s) => matchesProjectFilter(s.project));
+    // The open session keeps its row even when it belongs to another project, so that
+    // revealing one by id has something to scroll to. Same exemption the active branch
+    // above already makes, for the same reason. recentProjects lags behind the session list, so a
+    // session in a new folder counts as recent on its own.
+    const recentCutoff = Date.now() - RECENT_PROJECT_HOURS * 60 * 60 * 1000;
+    filteredSessions = filteredSessions.filter(
+      (s) =>
+        matchesProjectFilter(s.project, s.worktree?.repo) ||
+        s.id === currentSessionId ||
+        (filterProject === '__recent__' && (isAnyPinned(s.id) || Date.parse(s.modifiedAt) >= recentCutoff)),
+    );
   }
 
-  // Apply search filter
+  if (activityFilter.size > 0) {
+    const preds = [...activityFilter].map((k) => ACTIVITY_PREDICATES[k]).filter(Boolean);
+    if (preds.length) {
+      filteredSessions = filteredSessions.filter((s) => s.id === currentSessionId || preds.some((p) => p(s)));
+    }
+  }
+
   if (searchQuery) {
     const taskMatchIds = new Set();
     for (const t of allTasksCache) {
@@ -2401,43 +3851,251 @@ function _renderSessions() {
       )
         taskMatchIds.add(t.sessionId);
     }
+    const groupMatchIds = sgSearchMatchIds(searchQuery);
     const matchesSearch = (s) =>
       (s.name && fuzzyMatch(s.name, searchQuery)) ||
       (s.id && fuzzyMatch(s.id, searchQuery)) ||
       (s.project && fuzzyMatch(s.project, searchQuery)) ||
       (s.description && fuzzyMatch(s.description, searchQuery)) ||
-      taskMatchIds.has(s.id);
+      taskMatchIds.has(s.id) ||
+      groupMatchIds.has(s.id);
 
     filteredSessions = filteredSessions.filter(matchesSearch);
 
     // Re-add pinned/sticky sessions that match the query but were excluded by active filter
-    if (showPins && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
+    if (
+      sessionFilter === 'active' &&
+      activityFilter.size === 0 &&
+      (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)
+    ) {
       const filteredIds = new Set(filteredSessions.map((s) => s.id));
       const missingPinned = sessions.filter((s) => isAnyPinned(s.id) && !filteredIds.has(s.id) && matchesSearch(s));
       if (missingPinned.length) filteredSessions = [...missingPinned, ...filteredSessions];
     }
   }
 
-  // Include pinned/sticky sessions even if they don't match active filter
-  if (sessionFilter === 'active' && showPins && !searchQuery && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
+  // Include pinned/sticky sessions even if they don't match the active filter.
+  // Only in the "active" view — the "all" view is a plain list with no pin prioritization.
+  if (
+    sessionFilter === 'active' &&
+    activityFilter.size === 0 &&
+    !searchQuery &&
+    (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)
+  ) {
     const filteredIds = new Set(filteredSessions.map((s) => s.id));
     const missingPinned = sessions.filter((s) => isAnyPinned(s.id) && !filteredIds.has(s.id));
     if (missingPinned.length) filteredSessions = [...missingPinned, ...filteredSessions];
   }
 
-  if (filteredSessions.length === 0) {
-    let emptyMsg = 'No sessions found';
-    let emptyHint = 'Tasks appear when you use Pi';
+  return filteredSessions;
+}
 
-    if (searchQuery) {
-      emptyMsg = `No results for "${searchQuery}"`;
-      emptyHint = 'Try a different search term or clear the search';
+function saveOrder(key, prev, next) {
+  if (next.length === prev.length && next.every((id, i) => id === prev[i])) return prev;
+  store.writeJson(key, next);
+  return next;
+}
+
+// An entry keeps its slot while `loaded` has it; one not seen before enters at the top.
+function mergeOrder(key, prev, loaded, incoming) {
+  const kept = prev.filter((id) => loaded.has(id));
+  const known = new Set(kept);
+  return saveOrder(key, prev, [...incoming.filter((id) => !known.has(id)), ...kept]);
+}
+
+// Only the Active view groups into blocks; the other views stay in recency order.
+function applyStableSessionOrder(list) {
+  if (sessionFilter !== 'active' || sessions.length === 0) return list;
+  const loaded = new Set(sessions.map((s) => s.id));
+  const ids = list.map((s) => s.id);
+  sessionOrder = mergeOrder(SESSION_ORDER_KEY, sessionOrder, loaded, ids);
+  const rank = new Map(sessionOrder.map((id, i) => [id, i]));
+  return [...list].sort((a, b) => rank.get(a.id) - rank.get(b.id));
+}
+
+function insertNear(arr, isRef, item, after) {
+  const at = arr.findIndex(isRef);
+  if (at < 0) return null;
+  const out = [...arr];
+  out.splice(at + (after ? 1 : 0), 0, item);
+  return out;
+}
+
+// A live refresh would replace the zen panel's link-a-file input mid-type, the same way it
+// would swallow a half-typed group name. Off zen there is no panel, so skip the DOM probe.
+function zenPanelIsEditing() {
+  return zenMode && !!sessionsList.querySelector('.linked-doc-input');
+}
+
+function renderSessions() {
+  // Rebuilding the list under the pointer cancels an in-flight drop and would swallow a
+  // half-typed group name, and the SSE path can fire at any moment — defer instead.
+  if (sgDrag || sgIsEditing() || zenPanelIsEditing()) return;
+  scheduleJustFinishedExpiry();
+  refreshProjectList();
+  syncPinPeek();
+
+  if (zenGroup && !sgGroupById(zenGroup)) {
+    zenGroup = null;
+    renderZenState();
+  }
+  // Zen narrows the rendered list only — the session picker keeps calling getFilteredSessions()
+  // and still offers everything, or there would be no way to switch sessions without leaving zen.
+  // Group zen renders only its subtree's buckets, so it takes every session unfiltered.
+  const zenSession = zenMode && currentSessionId ? sessions.find((s) => s.id === currentSessionId) : null;
+  sessionsList.classList.toggle('zen', !!zenSession);
+  sessionsList.dataset.zenState = zenSession ? sessionState(zenSession) : '';
+  let filteredSessions;
+  if (zenGroup) filteredSessions = applyStableSessionOrder(sessions);
+  else if (zenMode) filteredSessions = zenSession ? [zenSession] : [];
+  else filteredSessions = applyStableSessionOrder(getFilteredSessions());
+
+  const outside = sidebarSearch.rows(zenMode || zenGroup ? '' : searchQuery, filteredSessions);
+
+  const childDepth = new Map();
+  const parentOf = new Map();
+  for (const g of sessionGroups) for (const m of g.members) if (m.parent) parentOf.set(m.ref, m.parent);
+  const nestChildren = (list) => {
+    if (parentOf.size === 0) return list;
+    const ids = new Set(list.map((s) => s.id));
+    const kids = new Map();
+    for (const s of list) {
+      const p = parentOf.get(s.id);
+      if (p && ids.has(p)) {
+        if (!kids.has(p)) kids.set(p, []);
+        kids.get(p).push(s);
+      }
+    }
+    if (kids.size === 0) return list;
+    const out = [];
+    const seen = new Set();
+    const add = (s, depth) => {
+      if (seen.has(s.id)) return;
+      seen.add(s.id);
+      out.push(s);
+      if (depth) childDepth.set(s.id, Math.min(depth, 3));
+      for (const k of kids.get(s.id) || []) add(k, depth + 1);
+    };
+    for (const s of list) if (!ids.has(parentOf.get(s.id))) add(s, 0);
+    // Sessions that are each other's parents have no top; show them as they came.
+    for (const s of list) add(s, 0);
+    return out;
+  };
+
+  const renderSessionCard = (session) => {
+    if (session.placeholder) return renderPlaceholderCard(session, childDepth.get(session.id));
+    const total = session.taskCount;
+    const pct = (n) => Math.round((n / total) * 100);
+    const isActive = session.id === currentSessionId && viewMode === 'session';
+    const isLive = isSessionLive(session);
+    const sessionName = sessionDisplayName(session);
+    const projectHtml = renderProjectIdentity(session);
+
+    const gitBranch = session.gitBranch ? escapeHtml(session.gitBranch) : null;
+    const isTeam = session.isTeam;
+    const memberCount = session.memberCount || 0;
+
+    const pinState = getSessionPinState(session.id);
+    const pinClass = pinState === 'sticky' ? ' sticky' : pinState === 'pinned' ? ' pinned' : '';
+    const pinTitle =
+      pinState === 'pinned' || pinState === 'sticky' ? 'Unpin session (.)' : 'Pin session (. · > sticky)';
+    // Zen renders the full context detail below the card, so the compact bar would just repeat it.
+    const showCtx = !!session.contextStatus && !zenMode;
+    const linkedDocsCount = getSessionPreviewPaths(session.id).length;
+    const bookmarksCount = loadPins(session.id).length;
+    const padEmoji = store.getItem(_padEmojiKey(session.id));
+    const hasScratchpad = !!padEmoji || _hasScratchpad(_sessionScratchpadKey(session.id));
+    const tempClass =
+      session.hasRecentLog || session.hasRecentActivity || session.inProgress || isWaitingSession(session)
+        ? 'warm'
+        : 'stale';
+    // Open tasks keep an idle session warm, but the green dot is for a session that is working.
+    const idleClass =
+      tempClass === 'warm' && !isWaitingSession(session) && !session.hasRecentLog && !session.hasRunningAgents
+        ? 'idle'
+        : '';
+    const justFinishedClass = isJustFinished(session) ? 'just-finished' : '';
+    const sid = escAttrJs(session.id);
+    const progressHtml =
+      total > 0
+        ? `<div class="session-progress" title="${escapeHtml(`${session.pending} pending, ${session.inProgress} in progress, ${session.completed} completed`)}"><div class="progress-bar"><div class="progress-fill done" style="width: ${pct(session.completed)}%"></div>${session.inProgress > 0 ? `<div class="progress-fill wip" style="width: ${pct(session.inProgress)}%"></div>` : ''}</div><span class="progress-text">${session.completed + session.inProgress}/${total}</span></div>`
+        : '';
+    const metricsHtml = progressHtml + (showCtx ? renderContextBar(session) : '');
+    return `
+          <button onclick="openSession('${sid}')" draggable="true" data-session-id="${escapeHtml(session.id)}" class="session-item ${isActive ? 'active' : ''} ${sessionBarClass(session)} ${tempClass} ${idleClass} ${justFinishedClass}${childDepthClass(childDepth.get(session.id))}">
+            <span class="session-pin-btn${pinClass}" onclick="event.stopPropagation();toggleSessionPin('${sid}')" title="${pinTitle} session">${pinState === 'sticky' ? SESSION_STAR_SVG : SESSION_PIN_SVG}</span>
+            <div class="session-name">${escapeHtml(sessionName)}</div>
+            ${projectHtml ? `<div class="session-secondary">${projectHtml}</div>` : ''}
+            ${gitBranch ? `<div class="session-branch">${gitBranch}</div>` : ''}
+            ${metricsHtml ? `<div class="session-metrics">${metricsHtml}</div>` : ''}
+            <div class="session-footer">
+              <div class="session-time">${formatDate(session.modifiedAt)}</div>
+              <span class="session-indicators">
+                ${isTeam ? `<span class="team-badge" title="${memberCount} team members"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>${memberCount}</span>` : ''}
+                ${isTeam || session.project || showCtx ? `<span class="team-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="View session info"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>` : ''}
+                ${renderWorkflowBadge(session)}
+                ${renderLoopBadge(session)}
+                ${hasScratchpad ? `<span class="scratchpad-badge${padEmoji ? ' has-emoji' : ''}" onclick="event.stopPropagation(); openSessionScratchpad('${sid}')" title="Open scratchpad">${padEmoji ? escapeHtml(padEmoji) : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`}</span>` : ''}
+                ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${sid}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}">${BOOKMARK_SVG}${bookmarksCount}</span>` : ''}
+                ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
+                ${session.hasPlan && !session.planSourceSessionId ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${sid}')" title="View plan">${ICON_PLAN}</span>` : ''}
+                ${session.planSourceSessionId ? `<span class="plan-indicator" title="Implements plan — click to reveal plan session" onclick="event.stopPropagation(); revealPlanSession('${escAttrJs(session.planSourceSessionId)}')">${ICON_PLAN}</span>` : ''}
+                ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
+                ${session.dispatched ? `<span class="dispatched-badge"${session.dispatched.parent ? ` onclick="event.stopPropagation(); revealSession('${escAttrJs(session.dispatched.parent)}')"` : ''} title="${escapeHtml(dispatchedTitle(session.dispatched))}">${ICON_DISPATCHED}</span>` : ''}
+                ${runningTerminals.has(session.id) ? `<span class="terminal-badge" onclick="event.stopPropagation(); showSessionTerminal('${escAttrJs(session.id)}')" title="${TERMINAL_TITLE}">${ICON_TERMINAL}</span>` : ''}
+                ${isWaitingSession(session) ? `<span class="agent-badge agent-badge-waiting" title="Waiting for user">${ICON_AGENT_WAITING}</span>` : ''}
+                ${session.hasRunningAgents && !isWaitingSession(session) ? `<span class="agent-badge agent-badge-active" title="Agents running">${ICON_AGENT_ACTIVE}</span>` : ''}
+                ${isLive || session.hasRunningAgents ? `<span class="pulse" title="${isLive ? 'Live' : 'Active agents'}"></span>` : ''}
+              </span>
+            </div>
+          </button>
+        `;
+  };
+
+  // `ungroup` marks the label as the drop target for pulling an item out of a named group.
+  const sectionHtml = (key, text, ungroup, body, empty = false) => {
+    const collapsed = collapsedProjectGroups.has(key);
+    const escPath = escapeHtml(key);
+    const title = ungroup ? 'Click to collapse — drop here to remove from a group' : 'Click to collapse';
+    const emptyCls = empty ? ' sg-section-empty' : '';
+    return `<div class="sg-section-label sg-section-toggle${ungroup ? ' sg-ungroup-zone' : ''}${collapsed ? ' collapsed' : ''}${emptyCls}" data-group-path="${escPath}" title="${escapeHtml(title)}">${groupChevronSvg(10)}<span>${text}</span></div>
+      <div class="sg-section-body${collapsed ? ' collapsed' : ''}${emptyCls}" data-group-path="${escPath}">${body}</div>`;
+  };
+
+  const countHtml = (arr) => {
+    const active = arr.reduce((n, s) => n + (isSessionActive(s) ? 1 : 0), 0);
+    return `<span class="group-count" title="${active} active / ${arr.length} total">${active > 0 ? `<span class="group-count-active">${active}</span><span class="group-count-sep">/</span>` : ''}${arr.length}</span>`;
+  };
+
+  const outsideHtml = outside.rows.length
+    ? sectionHtml(
+        SECTION_OUTSIDE,
+        `Outside current filters ${countHtml(outside.rows)}`,
+        false,
+        collapsedProjectGroups.has(SECTION_OUTSIDE) ? '' : outside.rows.map(renderSessionCard).join(''),
+      )
+    : '';
+
+  if (filteredSessions.length === 0 && !zenGroup) {
+    let emptyMsg = 'No sessions found';
+    let emptyHint = 'Tasks appear when you use Claude Code';
+
+    if (zenMode) {
+      emptyMsg = 'Zen mode: no session open';
+      emptyHint = 'Press Ctrl+Shift+Z to leave zen mode, then open a session';
+    } else if (searchQuery) {
+      emptyMsg = `No results for "${escapeHtml(searchQuery)}"`;
+      emptyHint = outside.rows.length
+        ? 'Matches outside the current filters are below'
+        : outside.pending
+          ? 'Searching all sessions…'
+          : 'Try a different search term or clear the search';
     } else if (filterProject && sessionFilter === 'active') {
-      emptyMsg = 'No active sessions for this project';
-      emptyHint = 'Try "All Sessions" or "All Projects"';
+      emptyMsg = 'No active sessions for this project filter';
+      emptyHint = 'Try "All Sessions" or clear the project filter';
     } else if (filterProject) {
-      emptyMsg = 'No sessions for this project';
-      emptyHint = 'Select "All Projects" to see all';
+      emptyMsg = 'No sessions for this project filter';
+      emptyHint = 'Clear the project filter to see all';
     } else if (sessionFilter === 'active') {
       emptyMsg = 'No active sessions';
       emptyHint = 'Select "All Sessions" to see all';
@@ -2447,194 +4105,281 @@ function _renderSessions() {
             <p>${emptyMsg}</p>
             <p style="margin-top: 8px; font-size: 11px;">${emptyHint}</p>
           </div>
-        `;
+        ${outsideHtml}`;
     return;
   }
 
-  // Helper to render a single session card
-  const renderSessionCard = (session) => {
-    const total = session.taskCount;
-    const percent = total > 0 ? Math.round((session.completed / total) * 100) : 0;
-    const isActive = session.id === currentSessionId && viewMode === 'session';
-    const hasInProgress = session.inProgress > 0;
-    const isLive =
-      hasInProgress || (session.modifiedAt && Date.now() - new Date(session.modifiedAt).getTime() <= LIVE_INDICATOR_MS);
-    const rawName = session.name || session.id;
-    const sessionName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawName)
-      ? rawName.slice(0, 8)
-      : rawName;
-    const useGrouped = sessionFilter === 'active' && session.project;
-    const primaryName = useGrouped ? sessionName : session.project ? session.project.split('/').pop() : sessionName;
-    const secondaryName = useGrouped ? null : session.project ? sessionName : null;
+  // Zen draws one card and its panel, so it returns before the grouping below — leaving it in
+  // that chain would build the whole list only to discard it.
+  if (zenMode) {
+    sessionsList.innerHTML = `${renderSessionCard(zenSession)}
+      <div class="zen-panel">
+        ${renderContextDetail(zenSession, { tokens: false }) || '<div class="zen-panel-empty">No context data for this session</div>'}
+        ${renderScratchpadRow(zenSession)}
+        ${renderLinkedDocsHtml(zenSession.id)}
+        ${renderArtifactsHtml(zenSession.id)}
+        ${renderZenBookmarksHtml(zenSession.id)}
+      </div>
+      ${zenSession.hasWorkflow ? renderWorkflowLiveHtml(zenSession.id) : ''}
+      <div class="zen-agents"></div>`;
+    renderZenAgents(visibleAgents());
+    bindLinkedDocsHandlers(sessionsList.querySelector('.linked-docs-section'), zenSession.id);
+    artifactsSection.load(zenSession.id);
+    scratchFilesSection.load(zenSession.id);
+    if (zenSession.hasWorkflow) pollWorkflowLive(zenSession.id);
+    restoreSessionCursor();
+    return;
+  }
 
-    const gitBranch = session.gitBranch ? escapeHtml(session.gitBranch) : null;
-    const createdDisplay = session.createdAt ? formatDate(session.createdAt) : '';
-    const modifiedDisplay = formatDate(session.modifiedAt);
-    const timeDisplay =
-      session.createdAt && createdDisplay !== modifiedDisplay
-        ? `Created ${createdDisplay} · Modified ${modifiedDisplay}`
-        : modifiedDisplay;
-    const tooltip = [session.id, timeDisplay, gitBranch ? `Branch: ${gitBranch}` : ''].filter(Boolean).join(' | ');
-    const pinState = getSessionPinState(session.id);
-    const pinClass = pinState === 'sticky' ? ' sticky' : pinState === 'pinned' ? ' pinned' : '';
-    const pinTitle =
-      pinState === 'pinned' || pinState === 'sticky' ? 'Unpin session (.)' : 'Pin session (. · > sticky)';
-    const showCtx = !!session.contextStatus;
-    const linkedDocsCount = getSessionPreviewPaths(session.id).length;
-    const bookmarksCount = loadPins(session.id).length;
-    const tempClass = session.hasRecentLog || session.inProgress || session.hasWaitingForUser ? 'warm' : 'stale';
-    return `
-          <button onclick="fetchTasks('${session.id}')" data-session-id="${session.id}" class="session-item ${isActive ? 'active' : ''} ${session.hasWaitingForUser ? 'permission-pending' : ''} ${tempClass} ${showCtx ? 'has-context' : ''}" title="${tooltip}">
-            <span class="session-pin-btn${pinClass}" onclick="event.stopPropagation();toggleSessionPin('${escapeHtml(session.id)}')" title="${pinTitle} session">${SESSION_PIN_SVG}</span>
-            <div class="session-name">${escapeHtml(primaryName)}</div>
-            ${secondaryName ? `<div class="session-secondary">${escapeHtml(secondaryName)}</div>` : ''}
-            ${gitBranch ? `<div class="session-branch">${gitBranch}</div>` : ''}
-            ${session.planTitle ? `<div class="session-plan">${escapeHtml(session.planTitle)}</div>` : ''}
-            <div class="session-progress">
-              <span class="session-indicators">
-                ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
-                ${session.project || showCtx ? `<span class="session-info-btn" onclick="event.stopPropagation(); showSessionInfoModal('${session.id}')" title="View session info">ℹ</span>` : ''}
-                ${session.hasPlan ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${session.id}')" title="View plan"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
-                ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${session.id}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
-                ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${session.id}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>${bookmarksCount}</span>` : ''}
-                ${session.hasRunningAgents ? '<span class="agent-badge" title="Active agents">🤖</span>' : ''}
-                ${session.planSourceSessionId ? `<span class="plan-indicator" title="Implements plan — click to reveal plan session" onclick="event.stopPropagation(); revealPlanSession('${escapeHtml(session.planSourceSessionId)}')">📋</span>` : ''}
-                ${session.hasWaitingForUser ? '<span class="agent-badge" title="Waiting for user">❓</span>' : ''}
-                ${isLive ? '<span class="pulse"></span>' : ''}
-              </span>
-              <div class="progress-bar"><div class="progress-fill" style="width: ${percent}%"></div></div>
-              <span class="progress-text">${session.completed}/${total}</span>
-            </div>
-            ${showCtx ? renderContextBar(session.contextStatus) : ''}
-            <div class="session-time">${formatDate(session.modifiedAt)}</div>
-          </button>
-        `;
+  const groupPinned = store.getItem(GROUP_PINNED_KEY) !== 'false';
+  const pinWeight = (s) => (isPlacedSticky(s.id) ? 2 : isInPinnedGroup(s) ? 1 : 0);
+  const pinSort = (a, b) => pinWeight(b) - pinWeight(a);
+  const renderGroupSessions = (list, pinKey) => {
+    if (!groupPinned || pinnedSessionIds.size === 0) return nestChildren(list).map(renderSessionCard).join('');
+    const gPinned = nestChildren(list.filter(isInPinnedGroup));
+    if (gPinned.length === 0) return nestChildren(list).map(renderSessionCard).join('');
+    const gUnpinned = nestChildren(list.filter((s) => !isInPinnedGroup(s)));
+    const pinCollapsed = collapsedProjectGroups.has(pinKey);
+    return (
+      '<div class="pinned-sub-section">' +
+      '<div class="pinned-sub-header' +
+      (pinCollapsed ? ' collapsed' : '') +
+      '" data-group-path="' +
+      escapeHtml(pinKey) +
+      '">' +
+      groupChevronSvg(10) +
+      '<span class="pinned-sub-label">Pinned</span>' +
+      '<span class="group-count">' +
+      gPinned.length +
+      '</span>' +
+      '<span class="pinned-ungroup-btn" title="Ungroup pinned sessions">&times;</span>' +
+      '</div>' +
+      '<div class="pinned-sub-items' +
+      (pinCollapsed ? ' collapsed' : '') +
+      '">' +
+      gPinned.map(renderSessionCard).join('') +
+      '</div>' +
+      '</div>' +
+      gUnpinned.map(renderSessionCard).join('')
+    );
   };
 
-  // Group active sessions by project
-  if (sessionFilter === 'active') {
+  // Renders one project block. `nested` = it sits inside a named group, so it is indented and
+  // its own drag payload still resolves to the project path.
+  const projectBlock = (projectPath, projectSessions, nested) => {
+    const folderName = projectPath.split(/[/\\]/).pop();
+    const isCollapsed = collapsedProjectGroups.has(projectPath);
+    const escapedPath = escapeHtml(projectPath);
+    const nestedCls = nested ? ' sg-nested' : '';
+    const breadcrumbParts = projectPath
+      .replace(/^\/home\/[^/]+/, '~')
+      .split(/[/\\]/)
+      .filter(Boolean);
+    const breadcrumbHtml = breadcrumbParts
+      .map((p, i) => (i < breadcrumbParts.length - 1 ? `${escapeHtml(p)}<span class="sep">/</span>` : escapeHtml(p)))
+      .join('');
+
+    return `
+            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}${nestedCls}" draggable="true" data-group-path="${escapedPath}" data-project-path="${escapedPath}">
+              ${groupChevronSvg()}
+              <span class="group-name">${escapeHtml(folderName)}</span>
+              ${terminalAvailable() ? `<span class="project-new-btn" data-project-path="${escapedPath}" title="New session in ${escapeHtml(folderName)}">${PLUS_SVG}</span>` : ''}
+              ${headerPadBtnHtml(_projectScratchpadKey(projectPath), folderName)}
+              <span class="project-view-btn" data-project-path="${escapedPath}" title="Open project view — combined tasks from all sessions">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              </span>
+              ${countHtml(projectSessions)}
+            </div>
+            <div class="project-group-breadcrumb${nestedCls}" data-full-path="${escapedPath}" title="Click to copy path">${breadcrumbHtml}</div>
+            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}${nestedCls}" data-project-path="${escapedPath}">
+              ${renderGroupSessions(projectSessions, pinKey(projectPath))}
+            </div>
+          `;
+  };
+
+  // Named groups are a pure partition of the already-filtered list: whatever they don't claim
+  // falls through to the project blocks below, which look exactly as they did before groups.
+  const sgBuckets = new Map();
+  const sgRest = [];
+  for (const session of filteredSessions) {
+    const group = sgGroupForSession(session);
+    if (group) {
+      if (!sgBuckets.has(group.id)) sgBuckets.set(group.id, []);
+      sgBuckets.get(group.id).push(session);
+    } else {
+      sgRest.push(session);
+    }
+  }
+  // A group emptied by a filter hides its header; a group the user just created (no filters)
+  // shows its drop-here state instead of vanishing.
+  const sgFiltering = !zenGroup && sgListFiltered();
+
+  // A group whose parent is gone renders at the top.
+  const sgIds = new Set(sessionGroups.map((g) => g.id));
+  const sgChildren = new Map();
+  for (const g of sessionGroups) {
+    const p = g.parent && sgIds.has(g.parent) ? g.parent : null;
+    if (!sgChildren.has(p)) sgChildren.set(p, []);
+    sgChildren.get(p).push(g);
+  }
+  const sgSubtree = new Map();
+  const sgSubtreeOf = (group) => {
+    let all = sgSubtree.get(group.id);
+    if (!all) {
+      all = [...(sgBuckets.get(group.id) || []), ...(sgChildren.get(group.id) || []).flatMap(sgSubtreeOf)];
+      sgSubtree.set(group.id, all);
+    }
+    return all;
+  };
+
+  // flat = the "All sessions" view, which has no project sub-blocks.
+  const sgSectionHtml = (flat) => {
+    if (sessionGroups.length === 0) return '';
+    let out = '';
+    for (const group of sgChildren.get(null) || []) out += sgGroupHtml(group, flat);
+    if (!out) return '';
+    return sectionHtml(SECTION_GROUPS, 'Groups', false, out);
+  };
+
+  const sgGroupHtml = (group, flat) => {
+    const bucket = sgBuckets.get(group.id) || [];
+    const subtree = sgSubtreeOf(group);
+    if (subtree.length === 0 && sgFiltering) return '';
+    if (!groupPinned) bucket.sort(pinSort);
+    const collapsed = collapsedProjectGroups.has(sgKey(group.id));
+    // Placed sessions follow the order the user dragged them into; a session that is here through
+    // its project takes the project's slot.
+    const slot = new Map(group.members.map((m, i) => [`${m.type}:${m.ref}`, i]));
+    const slotOf = (s) => slot.get(`session:${s.id}`) ?? slot.get(`project:${sessionProjectKey(s)}`) ?? 0;
+    const byMemberOrder = (a, b) => (groupPinned ? 0 : pinSort(a, b)) || slotOf(a) - slotOf(b);
+    let body = '';
+    if (flat) {
+      body = nestChildren([...bucket].sort(byMemberOrder))
+        .map(renderSessionCard)
+        .join('');
+    } else {
+      const loose = [];
+      const byProject = new Map();
+      for (const s of bucket) {
+        const host = sgHostOf(group, s);
+        if (host) {
+          if (!byProject.has(host)) byProject.set(host, []);
+          byProject.get(host).push(s);
+        } else {
+          loose.push(s);
+        }
+      }
+      // Project members first (in the user's member order), then the individually placed
+      // sessions — one Pinned sub-section per group instead of one per interleaved run.
+      for (const m of group.members) {
+        if (m.type !== 'project') continue;
+        const arr = byProject.get(m.ref);
+        // A member project with nothing left in it still renders: it shows the membership, and
+        // it is the drop target for putting a session back under it.
+        if (arr?.length || !sgFiltering) body += projectBlock(m.ref, arr || [], true);
+      }
+      if (loose.length) {
+        loose.sort(byMemberOrder);
+        // Label them, else a card sitting under the project blocks reads as stranded.
+        if (body) body += '<div class="sg-sub-label">Sessions</div>';
+        body += renderGroupSessions(loose, `__pinned_group_${group.id}__`);
+      }
+    }
+    let childHtml = '';
+    for (const child of sgChildren.get(group.id) || []) childHtml += sgGroupHtml(child, flat);
+    if (!body && !childHtml) body = '<div class="sg-empty">Drop a session or a project here</div>';
+    return `${sgHeaderHtml(group, countHtml(subtree))}<div class="session-group-sessions${collapsed ? ' collapsed' : ''}" data-group-id="${escapeHtml(group.id)}">${body}${childHtml}</div>`;
+  };
+
+  let html = '';
+  if (!groupPinned && pinnedSessionIds.size > 0 && filteredSessions.some((s) => pinnedSessionIds.has(s.id))) {
+    html += `<div class="pinned-regroup-banner">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><path d="M5 10l7-7 7 7"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
+          Group pinned sessions
+        </div>`;
+  }
+
+  if (zenGroup) {
+    sessionsList.innerHTML = sgGroupHtml(sgGroupById(zenGroup), sessionFilter !== 'active');
+  } else if (sessionFilter === 'active') {
+    // Group active sessions by project
+    // Auto-expand a collapsed section when newly-active work lands in it (live refresh).
+    expandActiveGroups({ onlyNew: true });
+    html += sgSectionHtml(false);
+
     const groups = new Map();
     const ungrouped = [];
-    for (const session of filteredSessions) {
-      if (session.project) {
-        if (!groups.has(session.project)) groups.set(session.project, []);
-        groups.get(session.project).push(session);
+    for (const session of sgRest) {
+      const key = sessionProjectKey(session);
+      if (key) {
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(session);
       } else {
         ungrouped.push(session);
       }
     }
-    const groupPinned = localStorage.getItem('groupPinnedSessions') !== 'false';
-    const renderGroupSessions = (sessions, pinKey) => {
-      if (!groupPinned || pinnedSessionIds.size === 0) return sessions.map(renderSessionCard).join('');
-      const gPinned = sessions.filter((s) => isPlacedPinned(s.id) && !isPlacedSticky(s.id));
-      if (gPinned.length === 0) return sessions.map(renderSessionCard).join('');
-      const gIdlePinned = gPinned.filter((s) => !isSessionActive(s));
-      const gUnpinned = sessions.filter((s) => !isPlacedPinned(s.id) || isSessionActive(s) || isPlacedSticky(s.id));
-      const pinCollapsed = collapsedProjectGroups.has(pinKey);
-      if (gIdlePinned.length === 0 && !pinCollapsed) return gUnpinned.map(renderSessionCard).join('');
-      return (
-        '<div class="pinned-sub-section">' +
-        '<div class="pinned-sub-header' +
-        (pinCollapsed ? ' collapsed' : '') +
-        '" data-group-path="' +
-        escapeHtml(pinKey) +
-        '">' +
-        '<svg class="group-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>' +
-        '<span class="pinned-sub-label">Pinned</span>' +
-        '<span class="group-count">' +
-        gIdlePinned.length +
-        '</span>' +
-        '<span class="pinned-ungroup-btn" title="Ungroup pinned sessions">&times;</span>' +
-        '</div>' +
-        '<div class="pinned-sub-items' +
-        (pinCollapsed ? ' collapsed' : '') +
-        '">' +
-        gIdlePinned.map(renderSessionCard).join('') +
-        '</div>' +
-        '</div>' +
-        gUnpinned.map(renderSessionCard).join('')
-      );
-    };
     if (!groupPinned && (pinnedSessionIds.size > 0 || stickySessionIds.size > 0)) {
-      const pinWeight = (s) => (isPlacedSticky(s.id) ? 2 : isPlacedPinned(s.id) && !isSessionActive(s) ? 1 : 0);
-      const pinSort = (a, b) => pinWeight(b) - pinWeight(a);
       for (const [, arr] of groups) arr.sort(pinSort);
       ungrouped.sort(pinSort);
     }
 
-    // Stable group order: preserve existing order, append new groups sorted by recency
-    const currentPaths = new Set(groups.keys());
-    const knownPaths = new Set(stableGroupOrder);
-    const keptOrder = stableGroupOrder.filter((p) => currentPaths.has(p));
-    const newPaths = [...currentPaths].filter((p) => !knownPaths.has(p));
-    if (newPaths.length > 1) {
-      const maxTime = new Map(
-        newPaths.map((p) => [p, Math.max(...groups.get(p).map((s) => new Date(s.modifiedAt).getTime()))]),
-      );
-      newPaths.sort((a, b) => maxTime.get(b) - maxTime.get(a));
+    // Stable group order: preserve existing order, put new groups first, sorted by recency.
+    // Grouped projects stay in the array (they are just not rendered here), so dragging one
+    // back out restores its old slot instead of jumping to the top.
+    const latestByPath = new Map();
+    for (const s of filteredSessions) {
+      const key = sessionProjectKey(s);
+      if (!key) continue;
+      const t = new Date(s.modifiedAt).getTime();
+      latestByPath.set(key, Math.max(latestByPath.get(key) ?? -Infinity, t));
     }
-    stableGroupOrder = [...keptOrder, ...newPaths];
-    const sortedGroups = stableGroupOrder.map((p) => [p, groups.get(p)]);
+    const byRecency = [...latestByPath.keys()].sort((a, b) => latestByPath.get(b) - latestByPath.get(a));
+    const loadedPaths = new Set(sessions.map(sessionProjectKey));
+    stableGroupOrder = mergeOrder(PROJECT_ORDER_KEY, stableGroupOrder, loadedPaths, byRecency);
+    const sortedGroups = stableGroupOrder.filter((p) => groups.has(p)).map((p) => [p, groups.get(p)]);
 
-    let html = '';
-    if (!groupPinned && pinnedSessionIds.size > 0) {
-      const hasPinnedInView = filteredSessions.some((s) => pinnedSessionIds.has(s.id));
-      if (hasPinnedInView) {
-        html += `<div class="pinned-regroup-banner">
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><path d="M5 10l7-7 7 7"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
-          Group pinned sessions
-        </div>`;
+    // The section header is rendered even when nothing is left under it: it is the drop target
+    // for ungrouping. Its body is skipped while collapsed — nothing would be visible, and this is
+    // the whole project list, re-parsed on every live refresh.
+    const sectioned = sessionGroups.length > 0;
+    let projectsHtml = '';
+    if (!sectioned || !collapsedProjectGroups.has(SECTION_PROJECTS)) {
+      for (const [projectPath, projectSessions] of sortedGroups) {
+        projectsHtml += projectBlock(projectPath, projectSessions, false);
+      }
+
+      if (ungrouped.length > 0 && sortedGroups.length > 0) {
+        const isCollapsed = collapsedProjectGroups.has('__ungrouped__');
+        projectsHtml += `
+            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}" data-group-path="__ungrouped__">
+              ${groupChevronSvg()}
+              <span class="group-name">Ungrouped</span>
+              ${countHtml(ungrouped)}
+            </div>
+            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}">
+              ${renderGroupSessions(ungrouped, pinKey('__ungrouped__'))}
+            </div>
+          `;
+      } else {
+        projectsHtml += ungrouped.map(renderSessionCard).join('');
       }
     }
-    for (const [projectPath, projectSessions] of sortedGroups) {
-      const folderName = projectPath.split(/[/\\]/).pop();
-      const isCollapsed = collapsedProjectGroups.has(projectPath);
-      const escapedPath = escapeHtml(projectPath);
-      const breadcrumbParts = projectPath
-        .replace(/^\/home\/[^/]+/, '~')
-        .split(/[/\\]/)
-        .filter(Boolean);
-      const breadcrumbHtml = breadcrumbParts
-        .map((p, i) => (i < breadcrumbParts.length - 1 ? `${escapeHtml(p)}<span class="sep">/</span>` : escapeHtml(p)))
-        .join('');
 
-      html += `
-            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}" data-group-path="${escapedPath}">
-              <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              <span class="group-name">${escapeHtml(folderName)}</span>
-              <span class="group-count">${projectSessions.length}</span>
-              <span class="project-view-btn" data-project-path="${escapedPath}" title="Open project view — combined tasks from all sessions">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-              </span>
-            </div>
-            <div class="project-group-breadcrumb" data-full-path="${escapedPath}" title="Click to copy path">${breadcrumbHtml}</div>
-            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}">
-              ${renderGroupSessions(projectSessions, `__pinned_${projectPath}__`)}
-            </div>
-          `;
-    }
+    const noProjects = sortedGroups.length === 0 && ungrouped.length === 0;
+    html += sectioned ? sectionHtml(SECTION_PROJECTS, 'Projects', true, projectsHtml, noProjects) : projectsHtml;
 
-    if (ungrouped.length > 0 && sortedGroups.length > 0) {
-      const isCollapsed = collapsedProjectGroups.has('__ungrouped__');
-      html += `
-            <div class="project-group-header${isCollapsed ? ' collapsed' : ''}" data-group-path="__ungrouped__">
-              <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              <span class="group-name">Ungrouped</span>
-              <span class="group-count">${ungrouped.length}</span>
-            </div>
-            <div class="project-group-sessions${isCollapsed ? ' collapsed' : ''}">
-              ${renderGroupSessions(ungrouped, '__pinned___ungrouped__')}
-            </div>
-          `;
-    } else {
-      html += ungrouped.map(renderSessionCard).join('');
-    }
-
-    sessionsList.innerHTML = html;
+    sessionsList.innerHTML = html + outsideHtml;
   } else {
-    sessionsList.innerHTML = filteredSessions.map(renderSessionCard).join('');
+    const sectioned = sessionGroups.length > 0;
+    const restHtml =
+      sectioned && collapsedProjectGroups.has(SECTION_SESSIONS) ? '' : sgRest.map(renderSessionCard).join('');
+    const tail = sectioned ? sectionHtml(SECTION_SESSIONS, 'Sessions', true, restHtml, sgRest.length === 0) : restHtml;
+    sessionsList.innerHTML = html + sgSectionHtml(true) + tail + outsideHtml;
   }
+  restoreSessionCursor();
+}
 
+function restoreSessionCursor() {
   const navItems = getNavigableItems();
   const allSessions = getSessionItems();
   const activeIdx = allSessions.findIndex((el) => el.classList.contains('active'));
@@ -2675,14 +4420,18 @@ function renderSession() {
   const session = sessions.find((s) => s.id === currentSessionId);
   if (!session) return;
 
-  const displayName =
-    session.customTitle || session.name || session.gitBranch || session.description || currentSessionId;
+  // Opening the session, not opening a linked-docs surface: the card badge is the
+  // first place a pad shows up, and it would otherwise stay at zero until the user
+  // happened to open the info modal or zen panel.
+  loadSessionPads(currentSessionId);
+
+  const displayName = session.name || session.description || currentSessionId;
 
   sessionTitle.textContent = displayName;
 
   // Build meta text with project path and description
-  const projectName = session.project ? session.project.split('/').pop() : null;
-  const metaParts = [`${currentTasks.filter(isLiveTask).length} tasks`];
+  const projectName = session.project ? pathBasename(session.project) : null;
+  const metaParts = [`${currentTasks.length} tasks`];
   if (projectName) {
     metaParts.push(projectName);
   }
@@ -2692,15 +4441,15 @@ function renderSession() {
   metaParts.push(formatDate(session.modifiedAt));
   sessionMeta.textContent = metaParts.join(' · ');
 
-  const liveTasks = currentTasks.filter(isLiveTask);
-  const completed = liveTasks.filter((t) => t.status === 'completed').length;
-  const percent = liveTasks.length > 0 ? Math.round((completed / liveTasks.length) * 100) : 0;
+  const completed = currentTasks.filter((t) => t.status === 'completed').length;
+  const percent = currentTasks.length > 0 ? Math.round((completed / currentTasks.length) * 100) : 0;
 
   progressPercent.textContent = `${percent}%`;
   progressBar.style.width = `${percent}%`;
-  const hasInProgress = liveTasks.some((t) => t.status === 'in_progress');
+  const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
+  updateOwnerFilter();
   renderKanban();
   renderSessions();
 }
@@ -2712,61 +4461,96 @@ function renderProjectView() {
   const folderName = currentProjectPath ? currentProjectPath.split(/[/\\]/).pop() : 'Project';
   sessionTitle.textContent = folderName;
 
-  const liveTasks = currentTasks.filter(isLiveTask);
-  const metaParts = [`${currentProjectSessionIds.length} sessions`, `${liveTasks.length} tasks`];
+  const metaParts = [`${currentProjectSessionIds.length} sessions`, `${currentTasks.length} tasks`];
   if (currentProjectPath) metaParts.push(currentProjectPath);
   sessionMeta.textContent = metaParts.join(' · ');
 
-  const completed = liveTasks.filter((t) => t.status === 'completed').length;
-  const percent = liveTasks.length > 0 ? Math.round((completed / liveTasks.length) * 100) : 0;
+  const completed = currentTasks.filter((t) => t.status === 'completed').length;
+  const percent = currentTasks.length > 0 ? Math.round((completed / currentTasks.length) * 100) : 0;
 
   progressPercent.textContent = `${percent}%`;
   progressBar.style.width = `${percent}%`;
-  const hasInProgress = liveTasks.some((t) => t.status === 'in_progress');
+  const hasInProgress = currentTasks.some((t) => t.status === 'in_progress');
   progressBar.classList.toggle('shimmer', hasInProgress && percent < 100);
 
+  updateOwnerFilter();
   renderKanban();
   renderSessions();
 }
 
+// Claude Code keeps a blocker's id in blockedBy after the blocker completes.
+function findSiblingTask(task, id) {
+  const list = (t) => t.sessionId || t._taskDir;
+  return currentTasks.find((t) => t.id === id && list(t) === list(task));
+}
+
+function openBlockers(task) {
+  return (task.blockedBy || []).filter((id) => findSiblingTask(task, id)?.status !== 'completed');
+}
+
+function renderOwnerBadge(task) {
+  const c = getOwnerColor(task.owner);
+  const style = `background:${c.bg};color:${c.color}`;
+  const target = task.ownerSessionId;
+  if (!target) return `<span class="task-owner-badge" style="${style}">${escapeHtml(task.owner)}</span>`;
+  return `<button type="button" class="task-owner-badge task-owner-link" style="${style}" title="Open dispatched session" onclick="event.stopPropagation(); revealSession('${escAttrJs(target)}')">${ICON_DISPATCHED}${escapeHtml(task.owner)}</button>`;
+}
+
+// Card chips that a tool writing the task file adds: metadata.chips = [{label, title?, tone?}], tone one of
+// muted, warn, accent. The writer is outside cck, so the list is capped and every field is checked.
+function taskChips(task) {
+  const chips = task.metadata?.chips;
+  if (!Array.isArray(chips)) return [];
+  return chips
+    .filter((c) => typeof c?.label === 'string' && c.label.trim())
+    .slice(0, 4)
+    .map((c) => ({
+      label: c.label.trim().slice(0, 24),
+      title: typeof c.title === 'string' ? c.title.slice(0, 200) : '',
+      tone: ['muted', 'warn', 'accent'].includes(c.tone) ? c.tone : 'muted',
+    }));
+}
+
+function renderTaskChips(chips) {
+  return chips
+    .map(
+      (c) =>
+        `<span class="task-chip task-chip-${escapeHtml(c.tone)}"${c.title ? ` title="${escapeHtml(c.title)}"` : ''}>${escapeHtml(c.label)}</span>`,
+    )
+    .join('');
+}
+
 function renderTaskCard(task) {
-  const isBlocked = task.blockedBy && task.blockedBy.length > 0;
-  const useSlug = viewMode === 'all' || viewMode === 'project';
+  const blockers = openBlockers(task);
+  const isBlocked = blockers.length > 0;
+  const useSlug = viewMode === 'project';
   const taskId = useSlug ? `${(task._taskDir || task.sessionId || '')?.slice(0, 4)}-${task.id}` : task.id;
-  const sessionLabel = viewMode === 'all' && task.sessionName ? task.sessionName : null;
   const statusClass = task.status.replace('_', '-');
   const actualSessionId = task._taskDir || task.sessionId || currentSessionId || '';
+  const isDim = task.metadata?.dim === true;
+  const chips = taskChips(task);
+  const state = [task.status.replace('_', ' '), ...chips.map((c) => c.label)].join(', ');
 
   return `
         <div
           role="listitem"
           tabindex="0"
-          data-task-id="${task.id}"
-          data-session-id="${actualSessionId}"
-          onclick="showTaskDetail('${task.id}', '${actualSessionId}')"
-          class="task-card ${statusClass} ${isBlocked ? 'blocked' : ''}"
-          aria-label="${escapeHtml(task.subject)} — ${task.status.replace('_', ' ')}">
-          <div class="task-actions">
-            <button class="task-action-btn task-action-delete" title="Delete task" onclick="event.stopPropagation();deleteTaskById('${actualSessionId}','${task.id}')">×</button>
-          </div>
+          data-task-id="${escapeHtml(task.id)}"
+          data-session-id="${escapeHtml(actualSessionId)}"
+          onclick="showTaskDetail('${escAttrJs(task.id)}', '${escAttrJs(actualSessionId)}')"
+          draggable="true"
+          ondragstart="onCardDragStart(event)"
+          ondragend="onCardDragEnd(event)"
+          class="task-card ${statusClass} ${isBlocked ? 'blocked' : ''} ${isDim ? 'dim' : ''}"
+          aria-label="${escapeHtml(task.subject)} — ${escapeHtml(state)}">
           <div class="task-id">
             <span>#${taskId}</span>
-            ${isBlocked ? '<span class="task-badge blocked">Blocked</span>' : ''}
-            ${
-              task.owner
-                ? (
-                    () => {
-                      const c = getOwnerColor(task.owner);
-                      return `<span class="task-owner-badge" style="background:${c.bg};color:${c.color}">${escapeHtml(task.owner)}</span>`;
-                    }
-                  )()
-                : ''
-            }
+            ${renderTaskChips(chips)}
+            ${isBlocked ? `<span class="task-blocked" title="Blocked">waiting on ${blockers.map((id) => `#${escapeHtml(id)}`).join(' ')}</span>` : ''}
+            ${task.owner ? renderOwnerBadge(task) : ''}
           </div>
           <div class="task-title">${escapeHtml(task.subject)}</div>
-          ${sessionLabel ? `<div class="task-session">${escapeHtml(sessionLabel)}</div>` : ''}
           ${task.status === 'in_progress' && task.activeForm ? `<div class="task-active">${escapeHtml(task.activeForm)}</div>` : ''}
-          ${isBlocked ? `<div class="task-blocked">Waiting on ${task.blockedBy.map((id) => `#${id}`).join(', ')}</div>` : ''}
           ${task.description ? `<div class="task-desc">${escapeHtml(task.description.split('\n')[0])}</div>` : ''}
         </div>
       `;
@@ -2775,8 +4559,64 @@ function renderTaskCard(task) {
 //#endregion
 
 //#region KANBAN
+// FLIP pass around renderKanban's innerHTML rebuild (#41): the rebuild lands cards at
+// their final spot instantly, so a status change reads as a full-board reload. Recording
+// where each card was and animating from there makes a move glide instead.
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+function cardFlipKey(el) {
+  return `${el.dataset.sessionId}|${el.dataset.taskId}`;
+}
+
+function captureCardRects() {
+  const rects = new Map();
+  for (const el of document.querySelectorAll('.column-tasks .task-card')) {
+    rects.set(cardFlipKey(el), el.getBoundingClientRect());
+  }
+  return rects;
+}
+
+function playCardFlip(before) {
+  // An empty board before the render means a view switch, not a move — nothing to glide.
+  if (reducedMotion.matches || before.size === 0) return;
+  for (const el of document.querySelectorAll('.column-tasks .task-card')) {
+    const prev = before.get(cardFlipKey(el));
+    if (!prev) {
+      el.animate(
+        [
+          { opacity: 0, transform: 'scale(0.97)' },
+          { opacity: 1, transform: 'none' },
+        ],
+        { duration: 150, easing: 'ease-out' },
+      );
+      continue;
+    }
+    const now = el.getBoundingClientRect();
+    const dx = prev.left - now.left;
+    const dy = prev.top - now.top;
+    if (dx || dy) {
+      el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], {
+        duration: 220,
+        easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)',
+      });
+    }
+  }
+}
+
+// Rewrite a column only when its markup actually changed: SSE ticks fire on any task-file
+// write (updatedAt bumps, agent refreshes), and an unconditional innerHTML rebuild makes
+// the whole board blink for updates with nothing visible in them (#41).
+function setColumnHtml(el, html) {
+  if (el._lastHtml === html) return;
+  el._lastHtml = html;
+  el.innerHTML = html;
+}
+
 function renderKanban() {
-  const filtered = currentTasks.filter((t) => !isInternalTask(t));
+  let filtered = currentTasks.filter((t) => !isInternalTask(t));
+  if (ownerFilter) {
+    filtered = filtered.filter((t) => t.owner === ownerFilter);
+  }
   const pending = filtered.filter((t) => t.status === 'pending');
   const inProgress = filtered.filter((t) => t.status === 'in_progress');
   const completed = filtered.filter((t) => t.status === 'completed');
@@ -2786,28 +4626,51 @@ function renderKanban() {
   completedCount.textContent = completed.length;
 
   const emptyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>`;
+  const plusIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>`;
 
-  pendingTasks.innerHTML =
-    pending.length > 0
-      ? pending.map(renderTaskCard).join('')
-      : `<div class="column-empty">${emptyIcon}<div>No pending tasks</div></div>`;
+  const writes = [];
+  // Adding is a live text input inside the column, so a background refresh would blow it
+  // away mid-typing -- leave the column alone until the input is gone.
+  if (!addingTask) {
+    const addTile = canAddTask()
+      ? `<button type="button" class="column-add${pending.length ? '' : ' empty'}" onclick="startAddTask(this)" title="You can also ask the agent to add tasks with its TaskCreate tool. Make sure CLAUDE_CODE_ENABLE_TASKS is set in its environment.">${plusIcon}<span>Add task</span></button>`
+      : '';
+    writes.push([
+      pendingTasks,
+      pending.length > 0
+        ? pending.map(renderTaskCard).join('') + addTile
+        : addTile || `<div class="column-empty">${emptyIcon}<div>No pending tasks</div></div>`,
+    ]);
+  }
 
-  inProgressTasks.innerHTML =
+  writes.push([
+    inProgressTasks,
     inProgress.length > 0
       ? inProgress.map(renderTaskCard).join('')
-      : `<div class="column-empty">${emptyIcon}<div>No active tasks</div></div>`;
+      : `<div class="column-empty">${emptyIcon}<div>No active tasks</div></div>`,
+  ]);
 
-  completedTasks.innerHTML =
+  writes.push([
+    completedTasks,
     completed.length > 0
       ? completed.map(renderTaskCard).join('')
-      : `<div class="column-empty">${emptyIcon}<div>No completed tasks</div></div>`;
+      : `<div class="column-empty">${emptyIcon}<div>No completed tasks</div></div>`,
+  ]);
+
+  // Capture rects (a forced layout read per card) only when a column will
+  // actually be rewritten — most SSE ticks change nothing and skip the FLIP.
+  const willChange = writes.some(([el, html]) => el._lastHtml !== html);
+  const flipRects = willChange ? captureCardRects() : null;
+  for (const [el, html] of writes) setColumnHtml(el, html);
+  if (flipRects) playCardFlip(flipRects);
 
   if (selectedTaskId) {
     const card =
-      document.querySelector(`.task-card[data-task-id="${selectedTaskId}"][data-session-id="${selectedSessionId}"]`) ||
-      document.querySelector(`.task-card[data-task-id="${selectedTaskId}"]`);
+      document.querySelector(
+        `.task-card[data-task-id="${escSel(selectedTaskId)}"][data-session-id="${escSel(selectedSessionId)}"]`,
+      ) || document.querySelector(`.task-card[data-task-id="${escSel(selectedTaskId)}"]`);
     if (card) {
-      if (focusZone === 'board') card.classList.add('selected');
+      if (focusZone === 'board' && !taskHighlightDimmed) card.classList.add('selected');
     } else {
       selectedTaskId = null;
       selectedSessionId = null;
@@ -2818,6 +4681,77 @@ function renderKanban() {
   }
 }
 
+//#endregion
+
+//#region ADD_TASK
+let addingTask = false;
+
+// A task the user types is theirs to place, and the only session it can belong to is the
+// one on screen -- the project and all-sessions views span many task dirs, so there is no
+// single target to write into.
+function canAddTask() {
+  return viewMode === 'session' && !!currentSessionId;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function startAddTask(tile) {
+  if (addingTask) return;
+  addingTask = true;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'form-input column-add-input';
+  input.placeholder = 'Task subject, Enter to add';
+  // The input mutates the column outside setColumnHtml — drop the cache so the
+  // next render rebuilds instead of skipping on a stale match.
+  pendingTasks._lastHtml = null;
+  tile.replaceWith(input);
+  input.focus();
+
+  const reset = () => {
+    addingTask = false;
+    renderKanban();
+  };
+
+  const save = async () => {
+    // Enter and blur both submit, and Enter's own save disables the input -- which blurs
+    // it. Dropping both handlers first is what keeps that from posting the subject twice.
+    input.onkeydown = null;
+    input.onblur = null;
+
+    const subject = input.value.trim();
+    if (!subject) return reset();
+    input.disabled = true;
+    const sessionId = currentSessionId;
+    try {
+      const res = await api(apiPath`/api/tasks/${sessionId}`, { method: 'POST', body: { subject } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // The response carries the finished task, and the watcher will resend it within the
+      // SSE debounce anyway -- so show it now rather than paying a session refetch for it.
+      const { task } = await res.json();
+      currentTasks.push({ ...task, sessionId });
+      addingTask = false;
+      renderKanban();
+    } catch (error) {
+      console.error('Failed to create task:', error);
+      showToast('Failed to create task', 'error');
+      reset();
+    }
+  };
+
+  input.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      save();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      input.onblur = null;
+      reset();
+    }
+  };
+  input.onblur = () => save();
+}
 //#endregion
 
 //#region DRAG_DROP
@@ -2846,6 +4780,9 @@ function onCardDragEnd(e) {
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function onColumnDragOver(e) {
+  // A sidebar session/project drag has nothing to do with task status — don't offer the board
+  // as a drop target for it.
+  if (sgDrag) return;
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
   e.currentTarget.classList.add('drag-over');
@@ -2859,23 +4796,928 @@ function onColumnDragLeave(e) {
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function onColumnDrop(e) {
+async function onColumnDrop(e) {
+  if (sgDrag) return;
   e.preventDefault();
   e.currentTarget.classList.remove('drag-over');
+  const newStatus = e.currentTarget.dataset.status;
+  let data;
+  try {
+    data = JSON.parse(e.dataTransfer.getData('text/plain'));
+  } catch (_) {
+    return;
+  }
+  const { taskId, sessionId } = data;
+  const task = currentTasks.find(
+    (t) => t.id === taskId && (t._taskDir === sessionId || (t.sessionId || currentSessionId) === sessionId),
+  );
+  if (!task || task.status === newStatus) return;
+  const oldStatus = task.status;
+  task.status = newStatus;
+  renderKanban();
+  try {
+    const res = await api(apiPath`/api/tasks/${sessionId}/${taskId}`, { method: 'PUT', body: { status: newStatus } });
+    if (res.ok) return;
+  } catch (_) {}
+  if (task.status === newStatus) {
+    task.status = oldStatus;
+    renderKanban();
+  }
 }
 
 //#endregion
 
+//#region SESSION_GROUPS
+// User-named groups that hold whole projects and individual sessions, dragged in from the
+// sidebar. They render above the project groups. Membership is a workspace preference kept on
+// the server; an id missing from `sessions` is NOT proof the session is gone (sessionLimit
+// windows the list), so membership is never garbage-collected on load. Transient groups go only
+// on a full Active list (sgSweepTransient).
+const SESSION_GROUPS_KEY = 'sessionGroups';
+const SG_ACTION_SELECTOR =
+  '.session-pin-btn, .team-info-btn, .plan-indicator, .scratchpad-badge, .bookmarks-badge, .linked-docs-badge, .project-view-btn, .project-new-btn, .header-pad-btn, .group-path-toggle, .pinned-ungroup-btn, .sg-action';
+
+// Collapse state shares the existing `collapsedGroups` key; this namespace keeps it from
+// colliding with a project path or the __ungrouped__ / __pinned_* sentinels.
+function groupChevronSvg(size = 12) {
+  return `<svg class="group-chevron" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`;
+}
+
+function sgKey(id) {
+  return `__group_${id}__`;
+}
+
+// Collapse key of a project's pinned sub-section. The ungrouped spelling predates this helper
+// and is kept so saved collapse state still matches.
+function pinKey(projectPath) {
+  return projectPath === '__ungrouped__' ? '__pinned___ungrouped__' : `__pinned_${projectPath}__`;
+}
+
+// The server keeps the groups (`/api/groups`, lib/user-groups.js). `sessionGroups` in localStorage
+// is the copy from before that: the board imports it once and never writes it, so it stays as a
+// backup.
+const GROUPS_MIGRATED_AT = 'groupsMigratedAt';
+let sgRev = null;
+let sgSaving = null;
+let sgDirty = false;
+let sgUnsent = false;
+let sgSeenRev = 0;
+
+// Until it succeeds the board shows no groups, and it tries again on the next load or SSE reconnect.
+async function syncSessionGroups() {
+  const migrated = !!store.getItem(GROUPS_MIGRATED_AT);
+  const local = migrated ? null : store.readJson(SESSION_GROUPS_KEY);
+  const hasLocal = local?.groups?.length > 0;
+  try {
+    const res = hasLocal
+      ? await api('/api/groups/import', { method: 'POST', body: { groups: local.groups } })
+      : await api('/api/groups');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    sgTakeServer(await res.json());
+    if (!migrated) store.setItem(GROUPS_MIGRATED_AT, new Date().toISOString());
+    if (sgSeenRev > sgRev) sgRefresh(sgSeenRev);
+  } catch (e) {
+    console.warn('[groups] server sync failed:', e.message);
+  }
+}
+
+// The SSE event for this board's own write often arrives before the write's response.
+async function sgRefresh(rev = Infinity) {
+  await sgSaving;
+  if (sgRev !== null && sgRev >= rev) return;
+  const data = await getJson('/api/groups');
+  if (data) sgTakeServer(data);
+}
+
+function sgTakeServer(data, force = false) {
+  if (!Number.isInteger(data?.rev) || (!force && sgRev !== null && data.rev <= sgRev)) return;
+  sgRev = data.rev;
+  sgApplyState(data);
+  renderSessions();
+}
+
+// An event during the first sync is kept, because the sync's read may be older than it.
+function onGroupChanged(data) {
+  if (!Number.isInteger(data?.rev)) return;
+  sgSeenRev = Math.max(sgSeenRev, data.rev);
+  if (sgRev !== null && data.rev > sgRev) sgRefresh(data.rev);
+}
+
+function sgApplyState(saved) {
+  const list = saved?.groups;
+  sessionGroups = (Array.isArray(list) ? list : [])
+    .filter((g) => g && typeof g.id === 'string')
+    .map((g) => ({
+      id: g.id,
+      name: typeof g.name === 'string' && g.name.trim() ? g.name : 'Group',
+      parent: typeof g.parent === 'string' ? g.parent : null,
+      ...(g.transient === true ? { transient: true } : {}),
+      members: (Array.isArray(g.members) ? g.members : [])
+        .filter((m) => m && (m.type === 'project' || m.type === 'session') && typeof m.ref === 'string')
+        .map((m) => {
+          const out = { type: m.type, ref: m.ref };
+          if (typeof m.under === 'string' && m.under) out.under = m.under;
+          if (m.loose === true) out.loose = true;
+          if (typeof m.parent === 'string' && m.parent) out.parent = m.parent;
+          return out;
+        }),
+    }));
+}
+
+function persistSessionGroups() {
+  if (sgRev === null) {
+    showToast('Groups are not loaded from the server; this change is not saved', 'error');
+    return;
+  }
+  sgDirty = true;
+  sgSaving ??= sgFlush().finally(() => {
+    sgSaving = null;
+  });
+}
+
+// Writes run one at a time; edits made meanwhile go out in the next write. A 409 means another
+// board wrote first: its state wins and this board's unsent edit is dropped. A write that does not
+// reach the server is sent again on SSE reconnect.
+async function sgFlush() {
+  while (sgDirty) {
+    sgDirty = false;
+    let res;
+    try {
+      res = await api('/api/groups', {
+        method: 'PUT',
+        body: { rev: sgRev, groups: sessionGroups },
+      });
+    } catch (e) {
+      console.warn('[groups] save failed:', e.message);
+      sgUnsent = true;
+      showToast('Groups not saved: the server is unreachable. Retrying when it is back', 'error');
+      return;
+    }
+    sgUnsent = false;
+    const data = await res.json().catch(() => null);
+    if (res.ok && Number.isInteger(data?.rev)) {
+      sgRev = data.rev;
+      if (!sgDirty) sgTakeCleaned(data);
+      continue;
+    }
+    showToast(
+      res.status === 409
+        ? 'Groups changed in another window; showing the latest'
+        : `Groups not saved (${data?.error || res.status})`,
+      res.status === 409 ? undefined : 'error',
+    );
+    sgDirty = false;
+    const fresh = res.status === 409 ? data : await getJson('/api/groups');
+    if (fresh) sgTakeServer(fresh, true);
+  }
+}
+
+// The server drops what breaks its rules (a member in two groups, a group past the limit) and
+// trims long names; the board shows what was saved.
+function sgTakeCleaned(data) {
+  if (JSON.stringify(data.groups) === JSON.stringify(sessionGroups)) return;
+  sgApplyState(data);
+  renderSessions();
+}
+
+function sgGroupById(id) {
+  return sessionGroups.find((g) => g.id === id) || null;
+}
+
+// Matches MAX_DEPTH in lib/user-groups.js.
+const SG_MAX_DEPTH = 8;
+
+function sgSubtreeIds(rootId) {
+  const ids = new Set([rootId]);
+  for (const id of ids) for (const g of sessionGroups) if (g.parent === id) ids.add(g.id);
+  return ids;
+}
+
+function sgPathOf(group) {
+  const names = [];
+  for (let g = group; g && names.length < SG_MAX_DEPTH; g = sgGroupById(g.parent)) names.unshift(g.name);
+  return names.join('/');
+}
+
+function sgGroupOf(type, ref) {
+  return sessionGroups.find((g) => g.members.some((m) => m.type === type && m.ref === ref)) || null;
+}
+
+const sgMemberOf = (group, type, ref) => group?.members.find((m) => m.type === type && m.ref === ref);
+
+function sgSessionParent(id) {
+  return sgMemberOf(sgGroupOf('session', id), 'session', id)?.parent || null;
+}
+
+// An individually placed session wins over the placement of its project.
+function sgGroupForSession(session) {
+  const project = sessionProjectKey(session);
+  return sgGroupOf('session', session.id) || (project ? sgGroupOf('project', project) : null);
+}
+
+function sgListFiltered() {
+  return !!searchQuery || activityFilter.size > 0 || (!!filterProject && filterProject !== '__recent__');
+}
+
+// A transient group (`dispatch start --group` made it) goes once the Active view shows none of its
+// sessions: they ended or were dismissed. A session still starting has no card yet, so its
+// terminal or placeholder counts. Only the full Active list can tell, so other views keep them.
+function sgSweepTransient() {
+  if (sgRev === null || !sessionGroups.some((g) => g.transient)) return;
+  if (zenGroup || zenMode || sessionFilter !== 'active' || sessionsHasMore || sgListFiltered()) return;
+  const shown = new Set(getFilteredSessions().map((s) => s.id));
+  const starting = (id) => !dismissedSessionIds.has(id) && (runningTerminals.has(id) || dispatchSpecs.has(id));
+  const present = (m) => m.type !== 'session' || shown.has(m.ref) || starting(m.ref);
+  const gone = groupTree.cascade(sessionGroups, (g) => !!g.transient && !g.members.some(present));
+  if (!gone.size) return;
+  let collapsed = false;
+  for (const g of gone) collapsed = collapsedProjectGroups.delete(sgKey(g.id)) || collapsed;
+  if (collapsed) persistCollapsedGroups();
+  sessionGroups = sessionGroups.filter((g) => !gone.has(g));
+  persistSessionGroups();
+}
+
+const childDepthClass = (depth) => (depth ? ` sg-child sg-depth-${depth}` : '');
+
+function dispatchedTitle({ parent }) {
+  const starter = parent && sessions.find((s) => s.id === parent);
+  const by = starter ? sessionDisplayName(starter) : 'another session';
+  return `Started by ${by}${parent ? ' — click to reveal it' : ''}`;
+}
+
+// A group the user edits is theirs: Keep, a rename or a placement clears the flag.
+function sgKeep(group) {
+  delete group.transient;
+}
+
+function sgDetach(type, ref) {
+  for (const g of sessionGroups) {
+    g.members = g.members.filter((m) => !(m.type === type && m.ref === ref));
+  }
+}
+
+// Where a session renders inside a group: the project block it was moved under, its own
+// project's block, or - when the user lifted it out - the group's own loose list.
+function sgHostOf(group, session) {
+  if (!group || !session) return null;
+  const m = group.members.find((x) => x.type === 'session' && x.ref === session.id);
+  const isMemberProject = (path) => !!path && group.members.some((x) => x.type === 'project' && x.ref === path);
+  if (m?.under && isMemberProject(m.under)) return m.under;
+  const own = sessionProjectKey(session);
+  if (!m?.loose && isMemberProject(own)) return own;
+  return null;
+}
+// `opts.under` places the session under another project block of the group; `opts.loose` lifts it
+// out of its project block onto the group's own level. `opts.parent` follows the server's place():
+// left out, a move inside the group keeps it; null clears it.
+function sgAssign(groupId, type, ref, opts = {}) {
+  const group = sgGroupById(groupId);
+  if (!group) return;
+  sgKeep(group);
+  const parent = opts.parent !== undefined ? opts.parent : sgMemberOf(group, type, ref)?.parent;
+  sgDetach(type, ref);
+  // Pulling a whole project in supersedes the individual placements of its sessions.
+  if (type === 'project') {
+    for (const s of sessions) if (sessionProjectKey(s) === ref) sgDetach('session', s.id);
+  }
+  const own = type === 'session' ? sessionProjectKey(sessions.find((s) => s.id === ref)) : null;
+  // Under its own project block is simply the natural placement - no override needed.
+  const under = opts.under && opts.under !== own ? opts.under : null;
+  const loose = !under && !!opts.loose;
+  const covered =
+    type === 'session' && !under && !loose && group.members.some((m) => m.type === 'project' && m.ref === own);
+  // The group already holds the session's project — a separate placement would only strand
+  // the card at the bottom of the group, away from its project block.
+  if (!covered || parent) {
+    const member = { type, ref };
+    if (under) member.under = under;
+    if (loose) member.loose = true;
+    if (parent) member.parent = parent;
+    group.members.push(member);
+  }
+  persistSessionGroups();
+}
+
+function sgCreateGroup(name) {
+  const group = {
+    id: `g_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    name: (name || '').trim() || `Group ${sessionGroups.length + 1}`,
+    parent: null,
+    members: [],
+  };
+  sessionGroups.push(group);
+  persistSessionGroups();
+  return group;
+}
+
+function sgDeleteGroup(id) {
+  const parent = sgGroupById(id)?.parent ?? null;
+  sessionGroups = sessionGroups.filter((g) => g.id !== id);
+  for (const g of sessionGroups) if (g.parent === id) g.parent = parent;
+  if (collapsedProjectGroups.delete(sgKey(id))) persistCollapsedGroups();
+  persistSessionGroups();
+}
+
+async function sgConfirmDelete(group) {
+  const ok = await confirmModal({
+    title: 'Delete this group?',
+    message: 'Its sessions and projects go back to Projects.',
+    chip: group.name,
+    okLabel: 'Delete group',
+  });
+  if (ok) {
+    sgDeleteGroup(group.id);
+    renderSessions();
+  }
+  return ok;
+}
+
+// Move one member of a group in front of another — the user's own order inside the group.
+function sgReorderMember(groupId, drag, target) {
+  const group = sgGroupById(groupId);
+  if (!group) return;
+  const from = group.members.findIndex((m) => m.type === drag.kind && m.ref === drag.ref);
+  const to = group.members.findIndex((m) => m.type === target.type && m.ref === target.ref);
+  if (from < 0 || to < 0 || from === to) return;
+  const [member] = group.members.splice(from, 1);
+  group.members.splice(to, 0, member);
+  persistSessionGroups();
+}
+
+function sgReorderGroup(dragId, targetId) {
+  const from = sessionGroups.findIndex((g) => g.id === dragId);
+  const to = sessionGroups.findIndex((g) => g.id === targetId);
+  if (from < 0 || to < 0 || from === to) return;
+  const [g] = sessionGroups.splice(from, 1);
+  sessionGroups.splice(to, 0, g);
+  persistSessionGroups();
+}
+
+// Typing a group name should surface the sessions inside it and inside its child groups.
+function sgSearchMatchIds(query) {
+  const ids = new Set();
+  if (!query) return ids;
+  const hits = new Set(sessionGroups.filter((g) => fuzzyMatch(g.name, query)).map((g) => g.id));
+  if (hits.size === 0) return ids;
+  const underHit = (g) => {
+    for (let p = g, n = 0; p && n < SG_MAX_DEPTH; p = sgGroupById(p.parent), n++) if (hits.has(p.id)) return true;
+    return false;
+  };
+  const hitIds = new Set(sessionGroups.filter(underHit).map((g) => g.id));
+  for (const s of sessions) {
+    const group = sgGroupForSession(s);
+    if (group && hitIds.has(group.id)) ids.add(s.id);
+  }
+  return ids;
+}
+
+const PAD_SVG =
+  '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>';
+
+function headerPadBtnHtml(key, label) {
+  const has = _hasScratchpad(key);
+  return `<span class="header-pad-btn${has ? ' has-pad' : ''}" onclick="event.stopPropagation(); showScratchpad('${escAttrJs(key)}')" title="${has ? 'Open' : 'New'} scratchpad for ${escapeHtml(label)} (N)">${PAD_SVG}</span>`;
+}
+
+function sgHeaderHtml(group, countHtml) {
+  const collapsed = collapsedProjectGroups.has(sgKey(group.id));
+  const editing = sgEditingId === group.id;
+  const nameHtml = editing
+    ? `<input class="sg-name-input" type="text" value="${escapeHtml(group.name)}" aria-label="Group name" spellcheck="false">`
+    : `<span class="group-name">${escapeHtml(group.name)}</span>`;
+  const hint = group.transient ? 'goes when its sessions leave the Active view' : 'drop sessions or projects here';
+  const attrs = `class="session-group-header${group.transient ? ' sg-transient' : ''}${collapsed ? ' collapsed' : ''}${group.id === zenGroup ? ' sg-zen' : ''}" draggable="${editing ? 'false' : 'true'}" data-group-id="${escapeHtml(group.id)}" title="${escapeHtml(group.name)} — ${hint}"`;
+  const actions = `${group.transient ? '<span class="sg-action sg-keep" title="Keep this group after its sessions end">Keep</span>' : ''}
+          <span class="sg-action sg-rename" title="Rename group"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
+          <span class="sg-action sg-delete" title="Delete group (members return to Projects)">&times;</span>
+          ${headerPadBtnHtml(_groupScratchpadKey(group.id), group.name)}`;
+  return `
+        <div ${attrs} data-group-path="${escapeHtml(sgKey(group.id))}">
+          ${groupChevronSvg()}
+          ${nameHtml}
+          ${actions}
+          ${countHtml}
+        </div>`;
+}
+
+//#region SESSION_GROUPS_RENAME
+// The name is edited in place. While the field is live, renderSessions() defers (an SSE
+// refresh would otherwise replace the input mid-keystroke) — see the guard in renderSessions.
+let sgEditingId = null;
+
+function sgIsEditing() {
+  return !!sgEditingId && !!sessionsList.querySelector('.sg-name-input');
+}
+
+function sgBeginRename(id) {
+  sgEditingId = id;
+  renderSessions();
+  const input = sessionsList.querySelector('.sg-name-input');
+  if (input) input.select();
+  else sgEditingId = null;
+}
+
+function sgCommitRename(input, save) {
+  const group = sgGroupById(sgEditingId);
+  const value = input.value.trim();
+  sgEditingId = null;
+  if (save && group && value && value !== group.name) {
+    group.name = value;
+    sgKeep(group);
+    persistSessionGroups();
+  }
+  renderSessions();
+}
+//#endregion
+
+//#region SESSION_GROUPS_DND
+// At most one zone is lit, so the reference is enough - dragover fires many times a second.
+let sgLitZone = null;
+let sgDragEl = null;
+const SG_LIT_CLASSES = ['sg-drop-over', 'sg-insert-before', 'sg-insert-after', 'sg-insert-parent'];
+const SG_LIT_SELECTOR = SG_LIT_CLASSES.map((c) => `.${c}`).join(', ');
+
+function sgClearDropTargets() {
+  sgLitZone?.classList.remove(...SG_LIT_CLASSES);
+  sgLitZone = null;
+}
+
+function sgLightDropTarget(zone, cls = 'sg-drop-over') {
+  if (sgLitZone === zone && zone.classList.contains(cls)) return;
+  sgClearDropTargets();
+  zone.classList.add(cls);
+  sgLitZone = zone;
+}
+
+// A session dropped on the edge of a card in its own list moves next to it. `share` is the part
+// of the card's height on each edge that means insert; the middle keeps its group gesture.
+function sgInsertHit(card, e, share) {
+  const rect = card.getBoundingClientRect();
+  const y = e.clientY - rect.top;
+  const after = y > rect.height * (1 - share);
+  if (!after && y >= rect.height * share) return null;
+  return { zone: card, cls: after ? 'sg-insert-after' : 'sg-insert-before', insert: { card, after } };
+}
+
+// Outside the Active filter the sidebar sorts ungrouped cards itself, so only a group's members,
+// which keep their own order, take an insert there.
+function sgSiblingCard(target) {
+  if (sgDrag?.kind !== 'session' || !sgDragEl) return null;
+  const card = target.closest('.session-item');
+  if (!card || card === sgDragEl || card.parentElement !== sgDragEl.parentElement) return null;
+  if (sessionFilter === 'active') return card;
+  const group = sgGroupOf('session', sgDrag.ref);
+  return group && sgGroupOf('session', card.dataset.sessionId) === group ? card : null;
+}
+
+function sgDescendsFrom(id, ancestor) {
+  for (let p = sgSessionParent(id), n = 0; p && n < SG_MAX_DEPTH; p = sgSessionParent(p), n++) {
+    if (p === ancestor) return true;
+  }
+  return false;
+}
+
+// A child group's header drops into its parent group on its top edge, and wherever its own group
+// would refuse the drop. Without it a session in the child group has no way up when the parent's
+// header is off screen: the gap above is a few pixels.
+// A child group renders inside its parent's body, so that body is the parent's drop zone.
+function sgParentEdgeHit(target, e, hit) {
+  const header = sgDrag?.kind === 'group' ? null : target.closest('.session-group-header[data-group-id]');
+  const parentBody = header?.parentElement.closest('.session-group-sessions[data-group-id]');
+  if (!parentBody) return null;
+  const rect = header.getBoundingClientRect();
+  if (e.clientY - rect.top > rect.height * 0.4 && hit) return null;
+  const up = sgGroupDropZone(parentBody);
+  return up ? { ...up, zone: header, cls: 'sg-insert-parent' } : null;
+}
+
+function sgDropZone(target, e) {
+  const hit = sgGroupDropZone(target);
+  const edge = sgParentEdgeHit(target, e, hit);
+  if (edge) return edge;
+  const sibling = sgSiblingCard(target);
+  // Where the middle of a card does nothing, the whole card is an insert target.
+  return (sibling && sgInsertHit(sibling, e, hit ? 0.25 : 0.5)) || hit;
+}
+
+function sgInsertSession(dragId, { card, after }) {
+  const ref = card.dataset.sessionId;
+  const group = card.closest('.project-group-sessions') ? null : sgGroupOf('session', ref);
+  if (group && sgGroupOf('session', dragId)?.id === group.id) {
+    // Loose sessions in a named group follow the group's member order, not the sidebar order.
+    // A card set next to another becomes its sibling: it takes that card's parent.
+    const { parent: _old, ...moved } = sgMemberOf(group, 'session', dragId);
+    const parent = sgMemberOf(group, 'session', ref)?.parent;
+    if (parent && parent !== dragId && !sgDescendsFrom(parent, dragId)) moved.parent = parent;
+    const members = insertNear(
+      group.members.filter((m) => !(m.type === 'session' && m.ref === dragId)),
+      (m) => m.type === 'session' && m.ref === ref,
+      moved,
+      after,
+    );
+    if (!members) return;
+    group.members = members;
+    persistSessionGroups();
+    return;
+  }
+  const order = insertNear(
+    sessionOrder.filter((id) => id !== dragId),
+    (id) => id === ref,
+    dragId,
+    after,
+  );
+  if (order) sessionOrder = saveOrder(SESSION_ORDER_KEY, sessionOrder, order);
+}
+
+function sgDragPayload(el) {
+  if (el.classList.contains('session-group-header')) return { kind: 'group', ref: el.dataset.groupId };
+  // data-project-path is on real project headers only, so the sentinels drop out by themselves.
+  if (el.classList.contains('project-group-header')) {
+    return el.dataset.projectPath ? { kind: 'project', ref: el.dataset.projectPath } : null;
+  }
+  if (el.classList.contains('session-item')) return { kind: 'session', ref: el.dataset.sessionId };
+  return null;
+}
+
+// Resolve the element under the pointer to a legal drop zone for the in-flight drag.
+// Returns {zone} to ungroup, {zone, groupId} to assign, or {zone, pairWith}/{zone, pairSession}
+// to stack two ungrouped items into a brand-new group.
+function sgGroupDropZone(target) {
+  if (!sgDrag) return null;
+  const base =
+    '.sg-ungroup-zone, .session-group-header, .session-group-sessions, .project-group-header, .project-group-sessions';
+  // A dragged project pairs with the project block it lands in, not with the card under the
+  // pointer; a dragged session can stack onto another session.
+  const zone = target.closest(sgDrag.kind === 'session' ? `.session-item, ${base}` : base);
+  if (!zone) return null;
+  const dragGroup = sgGroupOf(sgDrag.kind, sgDrag.ref);
+  if (sgDrag.kind === 'group') {
+    // A group only reorders against another group header.
+    return zone.classList.contains('session-group-header') && zone.dataset.groupId !== sgDrag.ref
+      ? { zone, groupId: zone.dataset.groupId }
+      : null;
+  }
+  const dragSession = sgDrag.kind === 'session' ? sessions.find((x) => x.id === sgDrag.ref) : null;
+  if (zone.classList.contains('sg-ungroup-zone')) return dragGroup ? { zone } : null;
+  const fromGroup = dragSession ? sgGroupForSession(dragSession) : dragGroup;
+  const fromGroupId = fromGroup?.id || null;
+  // A drop that lands on the host the session already has changes nothing, and highlighting it
+  // promises a move that never happens.
+  const fromHost = dragSession ? sgHostOf(fromGroup, dragSession) : null;
+  const groupId = zone.dataset.groupId;
+  if (groupId) {
+    if (!dragSession) return dragGroup?.id === groupId ? null : { zone, groupId };
+    if (fromGroupId !== groupId) return { zone, groupId };
+    // Already in this group: its own level is a move only out of a project block or from under
+    // a parent session.
+    return fromHost || sgSessionParent(dragSession.id) ? { zone, groupId, loose: true, parent: null } : null;
+  }
+  const targetSessionId = zone.dataset.sessionId;
+  if (targetSessionId) {
+    if (targetSessionId === sgDrag.ref) return null;
+    const targetSession = sessions.find((s) => s.id === targetSessionId);
+    const targetGroup = targetSession ? sgGroupForSession(targetSession) : null;
+    const targetGroupId = targetGroup?.id || null;
+    if (targetGroup) {
+      // Stacking onto a card nests the dragged session under it, in that card's placement, project
+      // block included.
+      if (sgSessionParent(sgDrag.ref) === targetSessionId && fromGroupId === targetGroupId) return null;
+      if (sgDescendsFrom(targetSessionId, sgDrag.ref)) return null;
+      const targetHost = sgHostOf(targetGroup, targetSession);
+      return {
+        zone,
+        groupId: targetGroupId,
+        ...(targetHost ? { under: targetHost } : { loose: true }),
+        parent: targetSessionId,
+      };
+    }
+    return { zone, pairSession: targetSessionId };
+  }
+  const path = zone.dataset.projectPath;
+  if (!path || path === sgDrag.ref) return null;
+  // Dropping onto a project that already sits in a group means "join that group".
+  const pathGroup = sgGroupOf('project', path);
+  if (pathGroup) {
+    if (!dragSession) {
+      return dragGroup?.id === pathGroup.id
+        ? { zone, groupId: pathGroup.id, reorder: { type: 'project', ref: path } }
+        : { zone, groupId: pathGroup.id };
+    }
+    return fromHost === path && fromGroupId === pathGroup.id ? null : { zone, groupId: pathGroup.id, under: path };
+  }
+  // Stacking a session onto its own project block would only fold it back where it sits today.
+  if (dragSession && sessionProjectKey(dragSession) === path) return releasable ? { zone } : null;
+  return { zone, pairWith: path };
+}
+
+function sgOnDragStart(e) {
+  const el = e.target.closest('.session-group-header, .project-group-header, .session-item');
+  if (!el || e.target.closest(SG_ACTION_SELECTOR)) {
+    e.preventDefault();
+    return;
+  }
+  const payload = sgDragPayload(el);
+  if (!payload?.ref) {
+    e.preventDefault();
+    return;
+  }
+  sgDrag = payload;
+  sgDragEl = el;
+  el.classList.add('sg-dragging');
+  sessionsList.classList.add('sg-dragging-active');
+  e.dataTransfer.effectAllowed = 'move';
+  try {
+    e.dataTransfer.setData('text/plain', JSON.stringify(payload));
+  } catch (_) {}
+}
+
+function sgOnDragOver(e) {
+  const hit = sgDropZone(e.target, e);
+  // Moving onto a spot that refuses the drop has to put the previous highlight out, or two zones
+  // stay lit and the one under the pointer is not the one that would receive the drop.
+  if (!hit) {
+    sgClearDropTargets();
+    return;
+  }
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  sgLightDropTarget(hit.zone, hit.cls);
+}
+
+function sgOnDrop(e) {
+  const hit = sgDropZone(e.target, e);
+  if (!hit) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const drag = sgDrag;
+  if (hit.insert) {
+    sgInsertSession(drag.ref, hit.insert);
+    sgFinishDrag();
+    return;
+  }
+  if (hit.pairWith || hit.pairSession) {
+    // Stacked onto an ungrouped item: seed a group, then let the user name it in place.
+    const target = hit.pairWith
+      ? { type: 'project', ref: hit.pairWith, path: hit.pairWith }
+      : {
+          type: 'session',
+          ref: hit.pairSession,
+          path: sessionProjectKey(sessions.find((s) => s.id === hit.pairSession)),
+        };
+    const group = sgCreateGroup(target.path ? target.path.split(/[/\\]/).pop() : '');
+    sgAssign(group.id, target.type, target.ref);
+    sgAssign(group.id, drag.kind, drag.ref);
+    sgFinishDrag();
+    sgBeginRename(group.id);
+    return;
+  }
+  if (hit.groupId) {
+    if (hit.reorder) sgReorderMember(hit.groupId, drag, hit.reorder);
+    else if (drag.kind === 'group') sgReorderGroup(drag.ref, hit.groupId);
+    else {
+      sgAssign(hit.groupId, drag.kind, drag.ref, {
+        under: hit.under,
+        loose: hit.loose,
+        parent: hit.parent,
+      });
+      // A drop shows where the card landed; a move from the context menu leaves the group as it was.
+      if (collapsedProjectGroups.delete(sgKey(hit.groupId))) persistCollapsedGroups();
+    }
+  } else {
+    sgDetach(drag.kind, drag.ref);
+    persistSessionGroups();
+  }
+  sgFinishDrag();
+}
+
+function sgFinishDrag() {
+  sgDrag = null;
+  sgDragEl = null;
+  sgClearDropTargets();
+  sessionsList.classList.remove('sg-dragging-active');
+  // biome-ignore lint/suspicious/useIterableCallbackReturn: forEach side-effect
+  document.querySelectorAll('.sg-dragging').forEach((el) => el.classList.remove('sg-dragging'));
+  renderSessions();
+}
+
+function sgOnDragEnd() {
+  if (!sgDrag) {
+    sgClearDropTargets();
+    sessionsList.classList.remove('sg-dragging-active');
+    return;
+  }
+  sgFinishDrag();
+}
+
+function initSessionGroupsDnd() {
+  sessionsList.addEventListener('dragstart', sgOnDragStart);
+  sessionsList.addEventListener('dragover', sgOnDragOver);
+  sessionsList.addEventListener('dragleave', (e) => {
+    const zone = e.target.closest?.(SG_LIT_SELECTOR);
+    if (zone && !zone.contains(e.relatedTarget)) sgClearDropTargets();
+  });
+  sessionsList.addEventListener('drop', sgOnDrop);
+  sessionsList.addEventListener('dragend', sgOnDragEnd);
+  sessionsList.addEventListener('contextmenu', sgOnContextMenu);
+  // The Menu key fires contextmenu at the focused element, which by then is our menu.
+  document.addEventListener('contextmenu', (e) => {
+    if (e.target.closest?.('.sg-menu, .pane-menu')) e.preventDefault();
+  });
+  sessionsList.addEventListener('keydown', (e) => {
+    const input = e.target.closest?.('.sg-name-input');
+    if (!input) return;
+    // Keep the sidebar's own single-key shortcuts out of the field.
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sgCommitRename(input, true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      sgCommitRename(input, false);
+    }
+  });
+  sessionsList.addEventListener('focusout', (e) => {
+    const input = e.target.closest?.('.sg-name-input');
+    if (input && sgEditingId) sgCommitRename(input, true);
+  });
+  // HTML5 drag-and-drop never fires on touch, and cck ships as a PWA.
+  sessionsList.addEventListener('touchstart', sgOnTouchStart, { passive: true });
+  sessionsList.addEventListener('touchend', sgCancelLongPress);
+  sessionsList.addEventListener('touchmove', sgCancelLongPress, { passive: true });
+}
+//#endregion
+
+//#region SESSION_GROUPS_MENU
+// Non-drag path: right-click or long-press a session / project header.
+let sgLongPressTimer = null;
+
+function sgCloseMenu(restore) {
+  document.removeEventListener('keydown', sgMenuKeydown, true);
+  const menu = document.getElementById('sg-menu');
+  if (menu) {
+    menu.remove();
+    takeMenuFocus(restore);
+  }
+}
+
+// Run in the capture phase: the global handler would otherwise read these keys as sidebar shortcuts.
+function menuKeydown(e, items, close) {
+  const i = items.indexOf(document.activeElement);
+  e.stopPropagation();
+  if (e.key === 'Enter' || e.key === ' ') return;
+  e.preventDefault();
+  let next = null;
+  if (matchKey(e, 'ArrowDown')) next = (i + 1) % items.length;
+  else if (matchKey(e, 'ArrowUp')) next = i < 0 ? items.length - 1 : (i - 1 + items.length) % items.length;
+  else if (e.key === 'Home') next = 0;
+  else if (e.key === 'End') next = items.length - 1;
+  else if (e.key === 'Escape' || e.key === 'Tab') close(true);
+  if (next !== null) items[next]?.focus();
+}
+
+let menuReturnFocus = null;
+
+// Only when nothing else has taken focus: it is on body, or still inside what is closing.
+function restoreFocusTo(el, closing) {
+  const now = document.activeElement;
+  if (el?.isConnected && (!now || now === document.body || closing?.contains(now))) el.focus();
+}
+
+function takeMenuFocus(restore) {
+  if (restore) restoreFocusTo(menuReturnFocus);
+  menuReturnFocus = null;
+}
+
+function placeMenu(menu, x, y) {
+  menuReturnFocus = document.activeElement;
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, window.innerWidth - rect.width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - rect.height - 8)}px`;
+}
+
+function sgMenuKeydown(e) {
+  const menu = document.getElementById('sg-menu');
+  if (!menu || e.ctrlKey || e.altKey || e.metaKey) return;
+  menuKeydown(e, [...menu.querySelectorAll('.sg-menu-item')], sgCloseMenu);
+}
+
+function sgOpenMenuForKbSelection() {
+  const el = sessionsList.querySelector('.kb-selected');
+  if (!el?.matches('.session-item, .project-group-header')) return false;
+  const payload = sgDragPayload(el);
+  if (!payload?.ref) return false;
+  const rect = el.getBoundingClientRect();
+  sgOpenMenu(rect.left + 16, rect.bottom, payload.kind, payload.ref);
+  return true;
+}
+
+function sgOpenMenu(x, y, kind, ref) {
+  sgCloseMenu();
+  closePaneMenu();
+  const current = sgGroupOf(kind, ref);
+  const label = kind === 'project' ? 'project' : 'session';
+  const rows = sessionGroups
+    .filter((g) => g.id !== current?.id)
+    .map(
+      (g) =>
+        `<button class="sg-menu-item" role="menuitem" data-sg-move="${escapeHtml(g.id)}">${escapeHtml(sgPathOf(g))}</button>`,
+    )
+    .join('');
+  const menu = document.createElement('div');
+  menu.id = 'sg-menu';
+  menu.className = 'sg-menu';
+  menu.setAttribute('role', 'menu');
+  const canFork = kind === 'session' && !!forkableSession(ref);
+  const canEnd = kind === 'session' && runningTerminals.has(ref);
+  const actions =
+    (canFork
+      ? '<button class="sg-menu-item" role="menuitem" data-sg-action="fork" title="claude --resume --fork-session">Fork</button>'
+      : '') +
+    (canEnd
+      ? '<button class="sg-menu-item" role="menuitem" data-sg-action="end" title="Alt+Shift+`">End terminal</button>'
+      : '');
+  menu.setAttribute('aria-label', actions ? 'Session actions' : `Move ${label} to group`);
+  menu.dataset.sgKind = kind;
+  menu.dataset.sgRef = ref;
+  menu.innerHTML = `
+        ${actions ? `<div class="sg-menu-label" aria-hidden="true">Session</div>${actions}` : ''}
+        <div class="sg-menu-label" aria-hidden="true">Move ${label} to group</div>
+        ${rows}
+        <button class="sg-menu-item" role="menuitem" data-sg-move="__new__">+ New group…</button>
+        ${current ? `<button class="sg-menu-item sg-menu-remove" role="menuitem" data-sg-move="__none__">Remove from “${escapeHtml(current.name)}”</button>` : ''}`;
+  placeMenu(menu, x, y);
+  document.addEventListener('keydown', sgMenuKeydown, true);
+  menu.querySelector('.sg-menu-item')?.focus();
+}
+
+function sgOnContextMenu(e) {
+  const el = e.target.closest('.session-item, .project-group-header');
+  if (!el) return;
+  const payload = sgDragPayload(el);
+  if (!payload?.ref) return;
+  e.preventDefault();
+  sgOpenMenu(e.clientX, e.clientY, payload.kind, payload.ref);
+}
+
+function sgCancelLongPress() {
+  if (sgLongPressTimer) clearTimeout(sgLongPressTimer);
+  sgLongPressTimer = null;
+}
+
+function sgOnTouchStart(e) {
+  const el = e.target.closest('.session-item, .project-group-header');
+  if (!el || e.target.closest(SG_ACTION_SELECTOR)) return;
+  const payload = sgDragPayload(el);
+  if (!payload?.ref) return;
+  const touch = e.touches[0];
+  sgCancelLongPress();
+  sgLongPressTimer = setTimeout(() => {
+    sgLongPressTimer = null;
+    sgOpenMenu(touch.clientX, touch.clientY, payload.kind, payload.ref);
+  }, 550);
+}
+
+document.addEventListener('click', (e) => {
+  const item = e.target.closest('.sg-menu-item');
+  if (!item) {
+    if (!e.target.closest('.sg-menu')) sgCloseMenu(true);
+    return;
+  }
+  e.stopPropagation();
+  const menu = item.closest('.sg-menu');
+  const { sgKind, sgRef } = menu.dataset;
+  const move = item.dataset.sgMove;
+  sgCloseMenu();
+  if (item.dataset.sgAction === 'fork') return forkSession(sgRef);
+  if (item.dataset.sgAction === 'end') return closeTerminalSession(sgRef);
+  if (move === '__none__') {
+    sgDetach(sgKind, sgRef);
+    persistSessionGroups();
+  } else if (move === '__new__') {
+    // Name it in place rather than through a modal prompt.
+    const group = sgCreateGroup(sgKind === 'project' ? sgRef.split(/[/\\]/).pop() : '');
+    sgAssign(group.id, sgKind, sgRef);
+    sgBeginRename(group.id);
+    return;
+  } else {
+    sgAssign(move, sgKind, sgRef);
+  }
+  renderSessions();
+});
+//#endregion
+//#endregion
+
 //#region KEYBOARD_NAV
 function selectTask(taskId, sessionId) {
-  const prev = document.querySelector('.task-card.selected');
-  if (prev) prev.classList.remove('selected');
+  clearTaskSelection();
   selectedTaskId = taskId;
   selectedSessionId = sessionId;
+  taskHighlightDimmed = false;
   if (!taskId) return;
   const card =
-    document.querySelector(`.task-card[data-task-id="${taskId}"][data-session-id="${sessionId}"]`) ||
-    document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+    document.querySelector(`.task-card[data-task-id="${escSel(taskId)}"][data-session-id="${escSel(sessionId)}"]`) ||
+    document.querySelector(`.task-card[data-task-id="${escSel(taskId)}"]`);
   if (card) {
     card.classList.add('selected');
     card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -2939,15 +5781,30 @@ function getKbId(el) {
   return el.dataset.sessionId || el.dataset.groupPath || null;
 }
 
+// Every collapsible header class and the body class it opens. Order matters only in that a
+// header carries exactly one of these.
+const COLLAPSIBLE_BODY_CLASS = {
+  'pinned-sub-header': 'pinned-sub-items',
+  'session-group-header': 'session-group-sessions',
+  'sg-section-toggle': 'sg-section-body',
+  'project-group-header': 'project-group-sessions',
+};
+const COLLAPSIBLE_HEADER_SELECTOR = Object.keys(COLLAPSIBLE_BODY_CLASS)
+  .map((c) => `.${c}`)
+  .join(', ');
+
 function getGroupSessionsContainer(header) {
-  const cls = header.classList.contains('pinned-sub-header') ? 'pinned-sub-items' : 'project-group-sessions';
+  const cls = Object.keys(COLLAPSIBLE_BODY_CLASS).find((c) => header.classList.contains(c));
+  if (!cls) return null;
   let el = header.nextElementSibling;
-  while (el && !el.classList.contains(cls)) el = el.nextElementSibling;
+  const bodyCls = COLLAPSIBLE_BODY_CLASS[cls];
+  while (el && !el.classList.contains(bodyCls)) el = el.nextElementSibling;
   return el;
 }
 
 function getNavigableItems() {
   const items = [];
+  // A named group nests project blocks inside its body, so the walk has to recurse.
   const walkGroupContainer = (container) => {
     if (!container) return;
     for (const child of container.children) {
@@ -2960,19 +5817,36 @@ function getNavigableItems() {
         }
       } else if (child.classList.contains('session-item')) {
         items.push(child);
+      } else if (child.classList.contains('project-group-header') || child.classList.contains('session-group-header')) {
+        items.push(child);
+        if (!collapsedProjectGroups.has(child.dataset.groupPath)) {
+          walkGroupContainer(getGroupSessionsContainer(child));
+        }
       }
     }
   };
-  for (const el of sessionsList.children) {
-    if (el.classList.contains('project-group-header')) {
-      items.push(el);
-      if (!collapsedProjectGroups.has(el.dataset.groupPath)) {
-        walkGroupContainer(getGroupSessionsContainer(el));
+  // A section label sits next to its body div rather than wrapping it, so the top level walks
+  // into the body to reach the blocks inside.
+  const walkTopLevel = (children) => {
+    for (const el of children) {
+      if (el.classList.contains('sg-section-empty')) continue;
+      if (
+        el.classList.contains('project-group-header') ||
+        el.classList.contains('session-group-header') ||
+        el.classList.contains('sg-section-toggle')
+      ) {
+        items.push(el);
+        if (!el.classList.contains('sg-section-toggle') && !collapsedProjectGroups.has(el.dataset.groupPath)) {
+          walkGroupContainer(getGroupSessionsContainer(el));
+        }
+      } else if (el.classList.contains('session-item')) {
+        items.push(el);
+      } else if (el.classList.contains('sg-section-body') && !el.classList.contains('collapsed')) {
+        walkTopLevel(el.children);
       }
-    } else if (el.classList.contains('session-item')) {
-      items.push(el);
     }
-  }
+  };
+  walkTopLevel(sessionsList.children);
   return items;
 }
 
@@ -2983,6 +5857,11 @@ function getSessionItems() {
 function clearKbSelection() {
   const prev = sessionsList.querySelector('.kb-selected');
   if (prev) prev.classList.remove('kb-selected');
+}
+
+function clearTaskSelection() {
+  const prev = document.querySelector('.task-card.selected');
+  if (prev) prev.classList.remove('selected');
 }
 
 function selectSessionByIndex(idx, items) {
@@ -3018,18 +5897,93 @@ function setGroupCollapsed(header, collapsed) {
   if (!header) return;
   const projectPath = header.dataset.groupPath;
   if (collapsed === collapsedProjectGroups.has(projectPath)) return;
+  if (collapsed && projectPath === pinPeekKey) {
+    pinPeekKey = null;
+    pinPeekClosedFor = currentSessionId;
+  }
   if (collapsed) collapsedProjectGroups.add(projectPath);
   else collapsedProjectGroups.delete(projectPath);
   header.classList.toggle('collapsed', collapsed);
   const container = getGroupSessionsContainer(header);
   if (container) container.classList.toggle('collapsed', collapsed);
-  try {
-    localStorage.setItem('collapsedGroups', JSON.stringify([...collapsedProjectGroups]));
-  } catch (_) {}
+  persistCollapsedGroups();
+}
+
+function persistCollapsedGroups() {
+  store.writeJson(COLLAPSED_GROUPS_KEY, [...collapsedProjectGroups, ...(pinPeekKey ? [pinPeekKey] : [])]);
+}
+
+let prevActiveSessionIds = null; // null until primed by the first onlyNew pass
+
+// Expand collapsed project sections that contain active sessions; leave the rest collapsed.
+// onlyNew: expand only for sessions that became active since the last call, so a section the
+// user manually collapsed stays collapsed until NEW active work lands in it (live refresh path).
+// The first onlyNew pass only primes the tracking set — it respects saved collapse state on load.
+// onlyNew=false force-expands every section with active work (explicit chip click).
+function expandActiveGroups({ onlyNew = false } = {}) {
+  const primed = prevActiveSessionIds !== null;
+  const activeIds = new Set();
+  let changed = false;
+  for (const s of sessions) {
+    if (!isSessionActive(s)) continue;
+    activeIds.add(s.id);
+    if (onlyNew && (!primed || prevActiveSessionIds.has(s.id))) continue;
+    try {
+      if (uncollapseFor(s)) changed = true;
+    } catch (err) {
+      console.error('uncollapseFor failed for session', s.id, err);
+    }
+  }
+  prevActiveSessionIds = activeIds;
+  if (changed) persistCollapsedGroups();
+  // renderSessions() re-renders headers/containers from the updated set
+}
+
+// Drops every collapse key that could hide this session: its project, a named group wrapping
+// the project or the session itself and the project block it renders under there, and the section header that holds it
+// (a collapsed Pinned sub-section opens only for the open session, see syncPinPeek):
+// Groups for a grouped session, else Projects or Sessions, which depends on the view. Returns
+// whether anything changed.
+function uncollapseFor(session) {
+  const group = sgGroupForSession(session);
+  const keys = [
+    ...(group
+      ? [sgKey(group.id), sgHostOf(group, session), SECTION_GROUPS]
+      : [sessionProjectKey(session) || '__ungrouped__', SECTION_PROJECTS, SECTION_SESSIONS]),
+  ];
+  let changed = false;
+  for (const key of keys) {
+    if (key && collapsedProjectGroups.delete(key)) changed = true;
+  }
+  return changed;
+}
+
+function pinnedCollapseKeys(session) {
+  if (!isInPinnedGroup(session)) return [];
+  const group = sgGroupForSession(session);
+  if (!group) return [pinKey(sessionProjectKey(session) || '__ungrouped__')];
+  const host = sgHostOf(group, session);
+  return [host ? pinKey(host) : `__pinned_group_${group.id}__`];
+}
+
+// A Pinned sub-section the user collapsed opens while the open session is in it and closes once
+// the user leaves that session. The peek is never saved: persistCollapsedGroups writes the key back.
+let pinPeekKey = null;
+let pinPeekClosedFor = null;
+
+function syncPinPeek() {
+  if (pinPeekClosedFor !== currentSessionId) pinPeekClosedFor = null;
+  const session = currentSessionId && !pinPeekClosedFor ? sessions.find((s) => s.id === currentSessionId) : null;
+  const key = session ? (pinnedCollapseKeys(session)[0] ?? null) : null;
+  const want = key && (key === pinPeekKey || collapsedProjectGroups.has(key)) ? key : null;
+  if (want === pinPeekKey) return;
+  if (pinPeekKey) collapsedProjectGroups.add(pinPeekKey);
+  if (want) collapsedProjectGroups.delete(want);
+  pinPeekKey = want;
 }
 
 function isGroupHeader(el) {
-  return el.classList.contains('project-group-header') || el.classList.contains('pinned-sub-header');
+  return el.matches(COLLAPSIBLE_HEADER_SELECTOR);
 }
 
 function findParentHeader(el) {
@@ -3037,10 +5991,10 @@ function findParentHeader(el) {
   if (subContainer?.previousElementSibling?.classList.contains('pinned-sub-header')) {
     return subContainer.previousElementSibling;
   }
-  const container = el.closest('.project-group-sessions');
+  const container = el.closest('.project-group-sessions, .session-group-sessions');
   if (!container) return null;
   let header = container.previousElementSibling;
-  while (header && !header.classList.contains('project-group-header')) header = header.previousElementSibling;
+  while (header && !isGroupHeader(header)) header = header.previousElementSibling;
   return header;
 }
 
@@ -3054,6 +6008,12 @@ function handleSidebarHorizontal(direction) {
     const isCollapsed = collapsedProjectGroups.has(el.dataset.groupPath);
     if (collapse) {
       if (!isCollapsed) setGroupCollapsed(el, true);
+      else {
+        // Already closed — step out to the named group that holds this block, if any.
+        const parent = findParentHeader(el);
+        const parentIdx = parent ? items.indexOf(parent) : -1;
+        if (parentIdx >= 0) selectSessionByIndex(parentIdx, items);
+      }
     } else if (isCollapsed) {
       setGroupCollapsed(el, false);
     } else {
@@ -3084,25 +6044,23 @@ function activateSelectedSession(items) {
   }
 }
 
-function setFocusZone(zone) {
-  const sidebar = document.querySelector('.sidebar');
-  // Clear all zone visuals
-  sidebar.classList.remove('sidebar-focused');
+function setFocusZone(zone, target) {
+  passTerminalZoneOn = false;
   clearKbSelection();
-  const selCard = document.querySelector('.task-card.selected');
-  if (selCard) selCard.classList.remove('selected');
+  clearTaskSelection();
 
   focusZone = zone;
   if (zone === 'sidebar') {
-    if (sidebar.classList.contains('collapsed')) {
-      sidebar.classList.remove('collapsed');
-      localStorage.setItem('sidebar-collapsed', false);
-    }
-    sidebar.classList.add('sidebar-focused');
+    const active = document.activeElement;
+    if (active && document.getElementById('main-content').contains(active)) active.blur();
+    expandSidebar();
     const items = getNavigableItems();
     if (items.length > 0) {
+      const targetIdx = target ? items.indexOf(target) : -1;
       const activeIdx = items.findIndex((el) => el.classList.contains('active'));
-      if (activeIdx >= 0) {
+      if (targetIdx >= 0) {
+        selectSessionByIndex(targetIdx, items);
+      } else if (activeIdx >= 0) {
         selectSessionByIndex(activeIdx);
       } else if (selectedSessionKbId) {
         const restoredIdx = items.findIndex((el) => getKbId(el) === selectedSessionKbId);
@@ -3112,6 +6070,8 @@ function setFocusZone(zone) {
       }
     }
   } else {
+    // Focusing the board is an explicit nav gesture — restore the highlight.
+    taskHighlightDimmed = false;
     // Session changed while in sidebar — reset stale selection
     if (selectedSessionId && selectedSessionId !== currentSessionId) {
       selectedTaskId = null;
@@ -3119,11 +6079,12 @@ function setFocusZone(zone) {
     }
     if (selectedTaskId) {
       const card = document.querySelector(
-        `.task-card[data-task-id="${selectedTaskId}"][data-session-id="${selectedSessionId}"]`,
+        `.task-card[data-task-id="${escSel(selectedTaskId)}"][data-session-id="${escSel(selectedSessionId)}"]`,
       );
       if (card) card.classList.add('selected');
     } else {
       navigateVertical(1);
+      if (!selectedTaskId) document.querySelector('.column-add')?.focus();
     }
     if (selectedTaskId && detailPanel.classList.contains('visible')) {
       showTaskDetail(selectedTaskId, selectedSessionId);
@@ -3131,41 +6092,17 @@ function setFocusZone(zone) {
   }
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function getAvailableTasksOptions(currentTaskId = null) {
-  const pending = currentTasks.filter((t) => t.status === 'pending' && t.id !== currentTaskId);
-  const inProgress = currentTasks.filter((t) => t.status === 'in_progress' && t.id !== currentTaskId);
-  const completed = currentTasks.filter((t) => t.status === 'completed' && t.id !== currentTaskId);
-
-  // Build options grouped by status
-  let options = '';
-
-  if (pending.length > 0) {
-    options += '<optgroup label="Pending">';
-    pending.forEach((t, _idx) => {
-      options += `<option value="${t.id}">#${t.id} - ${escapeHtml(t.subject)}</option>`;
-    });
-    options += '</optgroup>';
-  }
-
-  if (inProgress.length > 0) {
-    options += '<optgroup label="In Progress">';
-    inProgress.forEach((t, _idx) => {
-      options += `<option value="${t.id}">#${t.id} - ${escapeHtml(t.subject)}</option>`;
-    });
-    options += '</optgroup>';
-  }
-
-  if (completed.length > 0) {
-    options += '<optgroup label="Completed">';
-    completed.forEach((t, _idx) => {
-      options += `<option value="${t.id}">#${t.id} - ${escapeHtml(t.subject)}</option>`;
-    });
-    options += '</optgroup>';
-  }
-
-  return options;
-}
+// A pointer click puts the keyboard cursor on the row, unless a task card or the terminal holds it.
+// Enter's el.click() arrives with detail 0 and already has the cursor.
+sessionsList.addEventListener('click', (e) => {
+  if (e.detail === 0 || e.target.closest(SG_ACTION_SELECTOR)) return;
+  const el = e.target.closest(
+    '.session-item, .project-group-header, .session-group-header, .pinned-sub-header, .sg-section-toggle',
+  );
+  if (!el) return;
+  const taskInUse = selectedTaskId && selectedSessionId === (el.dataset.sessionId || currentSessionId);
+  if (focusZone === 'sidebar' || (!taskInUse && !terminalPaneFocused())) setFocusZone('sidebar', el);
+});
 
 //#endregion
 
@@ -3177,15 +6114,9 @@ async function showTaskDetail(taskId, sessionId = null) {
 
   // If task not found in currentTasks, fetch it from the session
   if (!task && sessionId && sessionId !== 'undefined') {
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}`);
-      const tasks = await res.json();
-      task = tasks.find((t) => t.id === taskId);
-      if (!task) return;
-    } catch (error) {
-      console.error('Failed to fetch task:', error);
-      return;
-    }
+    const tasks = await getJson(apiPath`/api/sessions/${sessionId}`, []);
+    task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
   }
 
   if (!task) return;
@@ -3200,24 +6131,36 @@ async function showTaskDetail(taskId, sessionId = null) {
     pending: '<span class="detail-status pending"><span class="dot"></span>Pending</span>',
   };
 
-  const isBlocked = task.blockedBy && task.blockedBy.length > 0;
+  const blockers = openBlockers(task);
+  const isBlocked = blockers.length > 0;
   const actualSessionId = task.sessionId || sessionId || currentSessionId;
-
+  const isProjectView = viewMode === 'project';
+  const pencil = isProjectView ? '' : DETAIL_EDIT_SVG;
+  const editable = isProjectView ? '' : ' editable';
+  const depChip = (id, kind) => {
+    const dep = findSiblingTask(task, id);
+    const label = dep ? `#${id} ${dep.subject}` : `#${id}`;
+    return `<button type="button" class="detail-dep ${escapeHtml(kind)}" data-dep-id="${escapeHtml(id)}" title="${escapeHtml(label)}"><span class="dot"></span><span class="detail-dep-text">${escapeHtml(label)}</span></button>`;
+  };
+  const deps = [
+    isBlocked ? ['wait', 'Waiting on', blockers] : null,
+    task.blocks?.length ? ['next', 'Unblocks', task.blocks] : null,
+  ].filter(Boolean);
+  detailContent.classList.toggle('blocked', isBlocked && task.status === 'pending');
   detailContent.innerHTML = `
         <div class="detail-section">
-          <div class="detail-label">Task #${task.id}</div>
-          <h2 class="detail-title">${escapeHtml(task.subject)}</h2>
+          <div class="detail-label">Task #${task.id}${pencil}</div>
+          <h2 class="detail-title${escapeHtml(editable)}">${escapeHtml(task.subject)}</h2>
         </div>
 
         <div class="detail-section" style="display: flex; gap: 12px; align-items: center;">
           <div>${statusLabels[task.status] || ''}</div>
-          ${task.owner ? `<div style="font-size: 13px; color: ${getOwnerColor(task.owner).color}; font-weight: 500;">${escapeHtml(task.owner)}</div>` : ''}
-          ${isBlocked && task.status !== 'in_progress' ? '<div style="font-size: 10px; color: var(--warning);">Blocked</div>' : ''}
+          ${task.owner ? renderOwnerBadge(task) : ''}
         </div>
 
         <div class="detail-section">
-          <div class="detail-label">Description</div>
-          <div class="detail-desc">${task.description ? renderMarkdown(task.description) : '<em style="color: var(--text-muted);">No description</em>'}</div>
+          <div class="detail-label">Description${pencil}</div>
+          <div class="detail-desc${escapeHtml(editable)}">${task.description ? renderMarkdown(task.description) : '<em style="color: var(--text-muted);">No description</em>'}</div>
         </div>
 
         ${
@@ -3233,98 +6176,565 @@ async function showTaskDetail(taskId, sessionId = null) {
         }
 
         ${
-          task.blockedBy && task.blockedBy.length > 0
+          deps.length
             ? `
         <div class="detail-section">
-          <div class="detail-label">Blocked By</div>
+          <div class="detail-label">Dependencies</div>
           <div class="detail-deps">
-            <div class="detail-box blocked"><strong>Blocked by:</strong> ${task.blockedBy.map((id) => `#${id}`).join(', ')}</div>
+            ${deps.map(([kind, label, ids]) => `<span class="detail-deps-label ${escapeHtml(kind)}">${label}</span><div class="detail-deps-list">${ids.map((id) => depChip(id, kind)).join('')}</div>`).join('')}
           </div>
         </div>`
             : ''
         }
-
-        ${
-          task.blocks && task.blocks.length > 0
-            ? `
-        <div class="detail-section">
-          <div class="detail-label">Blocks</div>
-          <div class="detail-deps">
-            <div class="detail-box blocks"><strong>Blocks:</strong> ${task.blocks.map((id) => `#${id}`).join(', ')}</div>
-          </div>
-        </div>`
-            : ''
-        }
-
       `;
 
-  // pi-kanban is read-only — pi owns the source of truth.
+  for (const chip of detailContent.querySelectorAll('.detail-dep')) {
+    chip.onclick = () => showTaskDetail(chip.dataset.depId, actualSessionId);
+  }
+
+  // Setup button handlers (read-only in project view)
   const deleteBtn = document.getElementById('delete-task-btn');
-  if (deleteBtn) deleteBtn.style.display = 'none';
+  deleteBtn.style.display = isProjectView ? 'none' : '';
+  if (!isProjectView) deleteBtn.onclick = () => deleteTask(task.id, actualSessionId);
+
+  if (!isProjectView) {
+    const titleEl = detailContent.querySelector('.detail-title');
+    if (titleEl) {
+      titleEl.onclick = () => editTitle(titleEl, task, actualSessionId);
+    }
+
+    const descEl = detailContent.querySelector('.detail-desc');
+    if (descEl) {
+      descEl.onclick = () => editDescription(descEl, task, actualSessionId);
+    }
+  }
+}
+
+function editTitle(titleEl, task, sessionId) {
+  if (titleEl.querySelector('input')) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'detail-title-input';
+  input.value = task.subject;
+
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const save = async () => {
+    const val = input.value.trim();
+    if (val && val !== task.subject) {
+      await saveTaskField(task.id, sessionId, 'subject', val);
+    } else {
+      await showTaskDetail(task.id, sessionId);
+    }
+  };
+
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      save();
+    }
+    if (e.key === 'Escape') showTaskDetail(task.id, sessionId);
+    // Saving re-renders the panel and drops the input, so native Tab would land on <body>.
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      input.onblur = null;
+      const shift = e.shiftKey;
+      save().then(() => {
+        const target = shift
+          ? document.getElementById('delete-task-btn')
+          : detailContent.querySelector('.detail-dep') || document.getElementById('close-detail');
+        target?.focus();
+      });
+    }
+  };
+  input.onblur = () => save();
+}
+
+function editDescription(descEl, task, sessionId) {
+  if (descEl.querySelector('textarea')) return;
+  const wrapper = document.createElement('div');
+  const textarea = document.createElement('textarea');
+  textarea.className = 'detail-desc-textarea';
+  textarea.value = task.description || '';
+  textarea.rows = Math.max(5, (task.description || '').split('\n').length + 2);
+
+  const actions = document.createElement('div');
+  actions.className = 'edit-actions';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'edit-save';
+  saveBtn.textContent = 'Save';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'edit-cancel';
+  cancelBtn.textContent = 'Cancel';
+
+  actions.append(cancelBtn, saveBtn);
+  wrapper.append(textarea, actions);
+  descEl.replaceWith(wrapper);
+  textarea.focus();
+
+  const save = async () => {
+    const val = textarea.value;
+    if (val !== (task.description || '')) {
+      await saveTaskField(task.id, sessionId, 'description', val);
+    } else {
+      showTaskDetail(task.id, sessionId);
+    }
+  };
+
+  saveBtn.onclick = save;
+  cancelBtn.onclick = () => showTaskDetail(task.id, sessionId);
+  wrapper.onkeydown = (e) => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    showTaskDetail(task.id, sessionId);
+  };
+}
+
+async function saveTaskField(taskId, sessionId, field, value) {
+  try {
+    const res = await api(apiPath`/api/tasks/${sessionId}/${taskId}`, { method: 'PUT', body: { [field]: value } });
+
+    if (res.ok) {
+      lastCurrentTasksHash = null;
+      await fetchTasks(sessionId);
+      await showTaskDetail(taskId, sessionId);
+    }
+  } catch (error) {
+    console.error('Failed to update task:', error);
+  }
+}
+
+const DETAIL_LAYOUT_KEY = 'cck-detail-layout';
+
+function setDetailExpanded(expanded) {
+  detailPanel.classList.toggle('expanded', expanded);
+  const btn = document.getElementById('expand-detail');
+  btn.innerHTML = showIcon(expanded ? 'restore' : 'expand');
+  btn.title = expanded ? 'Restore (E)' : 'Expand (E)';
+  btn.setAttribute('aria-label', expanded ? 'Restore' : 'Expand');
+  store.setItem(DETAIL_LAYOUT_KEY, expanded ? 'expanded' : '');
+}
+
+function initDetailLayout() {
+  document.getElementById('expand-detail').onclick = () =>
+    setDetailExpanded(!detailPanel.classList.contains('expanded'));
+  setDetailExpanded(store.getItem(DETAIL_LAYOUT_KEY) === 'expanded');
 }
 
 function closeDetailPanel() {
   detailPanel.classList.remove('visible');
+  document.getElementById('delete-task-btn').style.display = 'none';
+  // Keep the task selected AND highlighted after closing (no dim-off).
+  taskHighlightDimmed = false;
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function showBlockedTaskModal(task) {
-  const messageDiv = document.getElementById('blocked-task-message');
+//#endregion
 
-  const blockedByList = task.blockedBy
-    .map((id) => {
-      const blockingTask = currentTasks.find((t) => t.id === id);
-      if (blockingTask) {
-        return `<li><strong>#${blockingTask.id}</strong> - ${escapeHtml(blockingTask.subject)}</li>`;
-      }
-      return `<li><strong>#${id}</strong></li>`;
-    })
-    .join('');
+//#region DELETE_TASK
+// Set while #confirm-modal is open; settles the open confirmModal() promise.
+let closeConfirmModal = null;
 
-  messageDiv.innerHTML = `
-        <p style="margin-bottom: 12px;">Task <strong>#${task.id}</strong> - ${escapeHtml(task.subject)} is currently blocked by:</p>
-        <ul style="margin: 0 0 16px 20px; padding: 0;">${blockedByList}</ul>
-        <p style="margin: 0; color: var(--text-secondary); font-size: 13px;">
-          Please resolve these dependencies before moving this task to <strong>In Progress</strong>.
-        </p>
-      `;
-
-  const modal = document.getElementById('blocked-task-modal');
+// chip: the object named in one line. items: [{state, label, meta}] rows, state in busy|wait|idle (a dot) or
+// omitted (no dot); steps: plain strings shown as what will happen; warn: a line under the list.
+function confirmModal({ title, message, okLabel, chip, items, steps, warn }) {
+  const modal = document.getElementById('confirm-modal');
+  document.getElementById('confirm-modal-title').textContent = title;
+  document.getElementById('confirm-modal-message').textContent = message;
+  const chipEl = document.getElementById('confirm-modal-chip');
+  chipEl.hidden = !chip;
+  chipEl.textContent = chip || '';
+  const listEl = document.getElementById('confirm-modal-list');
+  const rows = [
+    ...(items || []).map(
+      (it) =>
+        `<div class="confirm-row">${it.state ? `<span class="confirm-dot ${escapeHtml(it.state)}"></span>` : ''}<span class="confirm-row-label">${escapeHtml(it.label)}</span><span class="confirm-row-meta">${escapeHtml(it.meta || '')}</span></div>`,
+    ),
+    ...(steps || []).map(
+      (s) => `<div class="confirm-row confirm-step"><span class="confirm-row-label">${escapeHtml(s)}</span></div>`,
+    ),
+  ];
+  listEl.hidden = !rows.length;
+  listEl.innerHTML = rows.join('');
+  const warnEl = document.getElementById('confirm-modal-warn');
+  warnEl.hidden = !warn;
+  warnEl.textContent = warn || '';
+  const buttons = [document.getElementById('confirm-cancel-btn'), document.getElementById('confirm-ok-btn')];
+  buttons[1].textContent = okLabel;
+  const returnFocus = document.activeElement;
   modal.classList.add('visible');
+  buttons[1].focus();
 
-  // Handle ESC key
-  const keyHandler = (e) => {
-    if (e.key === 'Escape') {
+  const onKey = (e) => {
+    if (matchKey(e, 'ArrowLeft', 'ArrowRight')) {
       e.preventDefault();
-      closeBlockedTaskModal();
-      document.removeEventListener('keydown', keyHandler);
+      buttons[e.key === 'ArrowLeft' ? 0 : 1].focus();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      (document.activeElement === buttons[0] ? buttons[0] : buttons[1]).click();
     }
   };
-  document.addEventListener('keydown', keyHandler);
+  document.addEventListener('keydown', onKey);
+  return new Promise((resolve) => {
+    closeConfirmModal = (ok) => {
+      modal.classList.remove('visible');
+      document.removeEventListener('keydown', onKey);
+      closeConfirmModal = null;
+      if (!ok) restoreFocusTo(returnFocus, modal);
+      resolve(ok);
+    };
+  });
 }
 
-function closeBlockedTaskModal() {
-  const modal = document.getElementById('blocked-task-modal');
-  modal.classList.remove('visible');
+async function deleteTask(taskId, sessionId) {
+  const task = currentTasks.find((t) => t.id === taskId);
+  if (!task) return;
+  const ok = await confirmModal({
+    title: 'Delete this task?',
+    message: 'It is removed from the board. This cannot be undone.',
+    chip: task.subject,
+    okLabel: 'Delete task',
+  });
+  if (!ok) return;
+  const info = taskId === selectedTaskId ? getSelectedCardInfo() : null;
+  const colCards = info ? Array.from(COLUMNS[info.colIndex].el.querySelectorAll('.task-card')) : [];
+  const next = colCards[info?.cardIndex + 1] || colCards[info?.cardIndex - 1];
+
+  try {
+    const res = await api(apiPath`/api/tasks/${sessionId}/${taskId}`, { method: 'DELETE' });
+
+    if (res.ok) {
+      closeDetailPanel();
+      await refreshCurrentView();
+      if (info && focusZone === 'board') {
+        if (next) {
+          selectTask(next.dataset.taskId, next.dataset.sessionId);
+        } else {
+          selectedTaskId = null;
+          navigateVertical(1);
+        }
+      }
+    } else {
+      const error = await res.json().catch(() => ({}));
+      showToast(`Failed to delete task: ${error.error || 'Unknown error'}`, 'error');
+    }
+  } catch (error) {
+    console.error('Failed to delete task:', error);
+    showToast('Failed to delete task', 'error');
+  }
 }
 
 //#endregion
 
 //#region HELP
-function showHelpModal() {
-  const modal = document.getElementById('help-modal');
-  modal.classList.add('visible');
+// Each tab shows its groups two to a row; a pair shares grid rows, so the two headings sit level and
+// the shorter group leaves empty rows. `combo` joins the keys with a plus (a chord) instead of
+// listing them as alternatives. The `hub` tab only works inside Claude Code Hub.
+const SHORTCUT_TABS = [
+  {
+    title: 'Board',
+    groups: [
+      {
+        title: 'Navigate',
+        rows: [
+          { keys: ['↓'], label: 'Next item' },
+          { keys: ['↑'], label: 'Previous item' },
+          { keys: ['←'], label: 'Left column / collapse group' },
+          { keys: ['→'], label: 'Right column / expand group' },
+          { keys: ['Tab'], label: 'Switch sidebar ↔ board' },
+          { keys: ['Enter', 'Space'], label: 'Open selected item' },
+        ],
+      },
+      {
+        title: 'Board',
+        rows: [
+          { keys: ['Enter'], label: 'Toggle task detail panel' },
+          { keys: ['D'], label: 'Delete selected task' },
+          { keys: ['E'], label: 'Expand / restore task detail panel' },
+          { keys: ['N'], label: 'Toggle scratchpad (in the sidebar: the item under the cursor)' },
+          { keys: ['Ctrl', 'E'], combo: true, label: 'Set the session scratchpad emoji (in the scratchpad)' },
+          { keys: ['R'], label: 'Refresh data' },
+          { keys: ['Esc'], label: 'Close panel / clear selection' },
+        ],
+      },
+      {
+        title: 'Tabs',
+        rows: [
+          { keys: ['[', ']'], label: 'Previous / next tab (a split counts as one)' },
+          {
+            keys: ['Ctrl', 'Alt', '1…9'],
+            combo: true,
+            yields: 'ctrl+alt+1',
+            label: 'Go to tab or group N (the board is 1)',
+          },
+          { keys: ['Alt', '[ / ]'], combo: true, label: 'Change the tab in the focused side of a split' },
+          { keys: ['|'], label: 'Split with the tab before it / unsplit (or drag a tab onto a side)' },
+          { keys: ['{', '}'], label: 'Focus left / right side of a split' },
+          { keys: ['Alt', 'W'], combo: true, label: 'Close the focused pane' },
+          { keys: ['Shift', 'F10'], combo: true, label: 'Focused tab menu (or Menu key)' },
+        ],
+      },
+      {
+        title: 'View',
+        rows: [
+          { keys: ['\\'], label: 'Toggle sidebar' },
+          { keys: ['T'], label: 'Toggle theme' },
+          { keys: ['Shift', 'S'], combo: true, label: 'Storage manager' },
+          { keys: ['←', '→'], label: 'Storage manager: switch tab' },
+          {
+            keys: ['Ctrl', 'Shift', 'Z'],
+            combo: true,
+            label: 'Zen mode (current session, or the group under the cursor)',
+          },
+          { keys: ['Ctrl', 'Shift', 'K'], combo: true, label: 'Show / hide Kanbot' },
+          { keys: ['Ctrl', '+'], combo: true, label: 'Larger modal text' },
+          { keys: ['Ctrl', '−'], combo: true, label: 'Smaller modal text' },
+          { keys: ['Ctrl', '0'], combo: true, label: 'Reset modal text size' },
+          { keys: ['?'], label: 'Show this help' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'Session',
+    groups: [
+      {
+        title: 'Session',
+        rows: [
+          { keys: ['P'], label: 'Open plan' },
+          { keys: ['Ctrl', 'Shift', 'P'], combo: true, label: 'Session picker' },
+          { keys: ['Shift', 'P'], combo: true, label: 'Project picker (this board)' },
+          { keys: ['I'], label: 'Session info' },
+          { keys: ['.'], label: 'Pin / unpin' },
+          { keys: ['>'], label: 'Toggle sticky' },
+          { keys: ['Ctrl', 'Shift', '.'], combo: true, label: 'Toggle sticky (from the terminal)' },
+          { keys: ['Shift', 'F10'], combo: true, label: 'Session menu: move to group, fork (or Menu key)' },
+          { keys: ['Ctrl', 'D'], combo: true, label: 'Dismiss session (pinned: to Pinned group)' },
+          { keys: ['Ctrl', 'Shift', 'L'], combo: true, label: 'Toggle session log' },
+          { keys: ['Ctrl', 'Shift', 'M'], combo: true, label: 'Open last message' },
+          { keys: ['↑', '↓'], label: 'Previous / next message in detail' },
+          { keys: ['Ctrl', 'Enter'], combo: true, label: 'Allow / approve the waiting prompt; send review comments' },
+        ],
+      },
+      {
+        title: 'Sessions',
+        rows: [
+          { keys: ['Ctrl', 'Alt', 'N'], combo: true, hubMod: true, label: 'New session' },
+          { keys: ['Ctrl', 'Alt', 'R'], combo: true, hubMod: true, label: 'Resume session (claude -r)' },
+          { keys: ['Ctrl', 'Alt', 'S'], combo: true, hubMod: true, label: 'Swap to previous session' },
+          { keys: ['Shift', 'C'], combo: true, label: 'Copy session id' },
+          { keys: ['Ctrl', 'Shift', 'C'], combo: true, label: 'Copy session name (SendMessage address)' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'Terminal',
+    groups: [
+      {
+        title: 'Terminal',
+        rows: [
+          { keys: ['Ctrl', '`'], combo: true, label: 'Show / hide terminal' },
+          { keys: ['Alt', '`'], combo: true, label: 'Focus terminal / page' },
+          { keys: ['Ctrl', 'Alt', '`'], combo: true, hubMod: true, label: 'Focus terminal / show card' },
+          { keys: ['Alt', 'Shift', '`'], combo: true, label: 'End terminal' },
+          { keys: ['Ctrl', 'Shift', '`'], combo: true, label: 'All terminals' },
+          { keys: ['Ctrl', '+/−/0'], combo: true, label: 'Terminal text size' },
+        ],
+      },
+      {
+        title: 'Show card (focused)',
+        rows: [
+          { keys: ['[', ']'], label: 'Previous / next post' },
+          { keys: ['Alt', 'Enter'], combo: true, label: 'Fill the terminal / back to the card' },
+          { keys: ['Esc'], label: 'Back to the card, else collapse to the header' },
+          { keys: ['Alt', 'W'], combo: true, label: 'Close until the next post' },
+          { keys: ['Ctrl', 'D'], combo: true, label: 'Remove the post' },
+          { keys: ['Ctrl', '+/−/0'], combo: true, label: 'Card text size' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'Hub',
+    hub: true,
+    groups: [
+      {
+        title: 'Hub',
+        rows: [
+          { keys: ['M'], opens: 'project.plugins', label: 'Jump to marketplace' },
+          { keys: ['$'], opens: 'session.cost', label: 'Jump to cost' },
+          { keys: ['Ctrl', 'M'], opens: 'project.memory', combo: true, label: 'Jump to memory' },
+          {
+            keys: ['Ctrl', 'Alt', '←/→'],
+            action: ['hub.prevApp', 'hub.nextApp'],
+            combo: true,
+            hubMod: true,
+            label: 'Previous / next hub app',
+          },
+          {
+            keys: ['Alt', '1…9'],
+            action: 'hub.appByNumber',
+            combo: true,
+            hubMod: true,
+            label: 'Jump to hub app by number',
+          },
+          {
+            keys: ['Ctrl', 'Alt', 'P'],
+            action: 'hub.projectPicker',
+            combo: true,
+            hubMod: true,
+            label: 'Project picker',
+          },
+          {
+            keys: ['Ctrl', 'Alt', 'W'],
+            action: 'hub.configDirPicker',
+            combo: true,
+            hubMod: true,
+            label: 'Config dir picker',
+          },
+          { keys: ['Ctrl', 'Alt', 'A'], action: 'hub.appLauncher', combo: true, hubMod: true, label: 'App launcher' },
+        ],
+      },
+    ],
+  },
+];
 
-  // Handle keyboard shortcuts
-  const keyHandler = (e) => {
-    if (e.key === 'Escape' || e.key === '?') {
-      e.preventDefault();
-      closeHelpModal();
-      document.removeEventListener('keydown', keyHandler);
-    }
-  };
-  document.addEventListener('keydown', keyHandler);
+// macOS names Control, Option and Shift by their symbols.
+const IS_MAC = /^Mac/i.test(navigator.userAgentData?.platform || navigator.platform || '');
+const MAC_KEYS = { Ctrl: '⌃', Alt: '⌥', Shift: '⇧' };
+if (IS_MAC) document.getElementById('new-session-btn')?.setAttribute('title', 'New session (⌃⌥N)');
+
+// Ctrl+Enter sends on macOS as Cmd+Enter too (the handlers accept metaKey), so the hints show ⌘ and ⌥ there.
+function sendKbd() {
+  return `<kbd>${IS_MAC ? '⌘' : 'Ctrl'}</kbd>+<kbd>Enter</kbd>`;
 }
+function termKbd() {
+  return `<kbd>${IS_MAC ? '⌥' : 'Alt'}</kbd>+<kbd>\`</kbd>`;
+}
+
+// The keys of a help row as they read on this system. The hub's modifier is Ctrl+Alt, and on
+// macOS Control+Option for the tab numbers too (Windows and Linux use bare Alt for those). A hub
+// row shows the keys the hub reports, which the user can change; row.keys until it answers.
+function helpKeys(row, mac = IS_MAC, keyLabel = hub.keyLabel) {
+  const live = row.action && keyLabel(row.action);
+  if (live) return live;
+  // `yields`: the row's key gives way when the hub binds that combo.
+  if (row.yields && hub.forwardCombos().includes(row.yields)) return [];
+  if (!mac) return row.keys;
+  if (row.hubMod) return ['⌃', '⌥', ...row.keys.filter((k) => k !== 'Ctrl' && k !== 'Alt')];
+  return row.keys.map((k) => MAC_KEYS[k] || k);
+}
+
+// Interleaves each pair's rows left-then-right so CSS grid auto-placement lands
+// them on shared row tracks (see .shortcuts in style.css).
+function buildHelpShortcuts(groups) {
+  const cells = [];
+  for (let pair = 0; pair < groups.length; pair += 2) {
+    const first = pair === 0 ? ' sc-first' : '';
+    const sides = [
+      [groups[pair], 'sc-l'],
+      [groups[pair + 1], 'sc-r'],
+    ].filter(([g]) => g);
+    for (const [g, side] of sides)
+      cells.push(`<div class="${escapeHtml(`sc-group ${side}${first}`)}">${escapeHtml(g.title)}</div>`);
+    for (let i = 0; i < Math.max(...sides.map(([g]) => g.rows.length)); i++) {
+      for (const [group, side] of sides) {
+        const row = group.rows[i];
+        const parts = row && helpKeys(row);
+        if (!parts?.length) continue;
+        const sep = row.combo ? '<span class="sc-plus">+</span>' : '<span class="sc-or">/</span>';
+        const keys = parts.map((k) => `<kbd>${escapeHtml(k)}</kbd>`).join(sep);
+        const label = escapeHtml(row.label);
+        cells.push(`<dt class="${escapeHtml(side)}">${keys}</dt><dd class="${escapeHtml(side)}">${label}</dd>`);
+      }
+    }
+  }
+  return cells.join('');
+}
+
+let helpTab = 0;
+const helpFilter = document.getElementById('help-filter');
+
+// Hub keys do nothing outside Claude Code Hub, except the app links that the --*-url flags set.
+const hubRowWorks = (r) => (r.opens ? hub.can(r.opens) : hub.inHub);
+const helpTabs = () =>
+  SHORTCUT_TABS.map((t) =>
+    t.hub
+      ? { ...t, groups: t.groups.map((g) => ({ ...g, rows: g.rows.filter(hubRowWorks) })).filter((g) => g.rows.length) }
+      : t,
+  ).filter((t) => t.groups.length);
+
+// The matching rows of every tab, in their groups.
+function filteredShortcutGroups(query) {
+  return helpTabs()
+    .flatMap((t) => t.groups)
+    .map((g) => ({
+      title: g.title,
+      rows: g.rows.filter((r) => fuzzyMatch(`${r.label} ${helpKeys(r).join(' ')}`.replaceAll('−', '-'), query)),
+    }))
+    .filter((g) => g.rows.length);
+}
+
+function renderHelp() {
+  const tabs = helpTabs();
+  helpTab = Math.min(helpTab, tabs.length - 1);
+  const query = helpFilter.value.trim();
+  document.getElementById('help-tabs').innerHTML = tabs
+    .map((t, i) => {
+      const on = !query && i === helpTab;
+      return `<button type="button" role="tab" class="help-tab${on ? ' active' : ''}" aria-selected="${escapeHtml(String(on))}" data-idx="${i}">${escapeHtml(t.title)}</button>`;
+    })
+    .join('');
+  const groups = query ? filteredShortcutGroups(query) : tabs[helpTab].groups;
+  document.getElementById('help-shortcuts').innerHTML = groups.length
+    ? buildHelpShortcuts(groups)
+    : `<div class="sc-empty">No shortcut matches "${escapeHtml(query)}"</div>`;
+}
+
+function clearHelpFilter() {
+  helpFilter.value = '';
+  renderHelp();
+}
+
+function selectHelpTab(idx) {
+  helpTab = idx;
+  clearHelpFilter();
+}
+
+function showHelpModal() {
+  clearHelpFilter();
+  document.getElementById('help-modal').classList.add('visible');
+  helpFilter.focus();
+}
+
+document.getElementById('help-tabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('[data-idx]');
+  if (!tab) return;
+  selectHelpTab(Number(tab.dataset.idx));
+  helpFilter.focus();
+});
+
+helpFilter.addEventListener('input', renderHelp);
+
+// The page's key handler skips text fields, so the filter handles its own Esc and tab keys.
+helpFilter.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    if (helpFilter.value) clearHelpFilter();
+    else closeHelpModal();
+    return;
+  }
+  const step = matchKey(e, 'ArrowLeft') ? -1 : matchKey(e, 'ArrowRight') ? 1 : 0;
+  if (!step || helpFilter.value) return;
+  e.preventDefault();
+  const n = helpTabs().length;
+  selectHelpTab((helpTab + step + n) % n);
+});
 
 function closeHelpModal() {
   const modal = document.getElementById('help-modal');
@@ -3332,9 +6742,7 @@ function closeHelpModal() {
 }
 
 async function refreshCurrentView() {
-  if (viewMode === 'all') {
-    await showAllTasks();
-  } else if (currentSessionId) {
+  if (currentSessionId) {
     await fetchTasks(currentSessionId);
   } else {
     await fetchSessions();
@@ -3353,10 +6761,186 @@ const _scratchpadCharcount = document.getElementById('scratchpad-charcount');
 
 let _scratchpadKeyOverride = null;
 
+const SESSION_PAD_PREFIX = 'scratchpad-';
+const PROJECT_PAD_PREFIX = `${SESSION_PAD_PREFIX}project:`;
+const GROUP_PAD_PREFIX = `${SESSION_PAD_PREFIX}group:`;
+
+function _sessionScratchpadKey(sessionId) {
+  return SESSION_PAD_PREFIX + sessionId;
+}
+
+function _projectScratchpadKey(projectPath) {
+  return PROJECT_PAD_PREFIX + projectPath;
+}
+
+function _groupScratchpadKey(groupId) {
+  return GROUP_PAD_PREFIX + groupId;
+}
+
+// Every kind shares the session prefix, so the longer prefixes are tested first.
+function _parsePadKey(key) {
+  for (const [kind, prefix] of [
+    ['group', GROUP_PAD_PREFIX],
+    ['project', PROJECT_PAD_PREFIX],
+    ['session', SESSION_PAD_PREFIX],
+  ]) {
+    if (key.startsWith(prefix)) return { kind, id: key.slice(prefix.length) };
+  }
+  return null;
+}
+
+function _hasScratchpad(key) {
+  return !!(store.getItem(key) || '').trim();
+}
+
+// Not under SESSION_PAD_PREFIX: _parsePadKey would read it as a session pad.
+const PAD_EMOJI_PREFIX = 'pad-emoji-';
+const PAD_EMOJIS = [
+  '🔥',
+  '🚧',
+  '🐛',
+  '✅',
+  '⭐',
+  '📌',
+  '💡',
+  '🧪',
+  '🚀',
+  '⚠️',
+  '🔒',
+  '🧹',
+  '📝',
+  '🎯',
+  '🧭',
+  '🛠️',
+  '🔍',
+  '📦',
+  '🎨',
+  '⏳',
+  '❓',
+  '💬',
+  '🧠',
+  '🏁',
+];
+const PAD_EMOJI_COLS = 8;
+const _scratchpadEmojiBtn = document.getElementById('scratchpad-emoji-btn');
+const _scratchpadEmojiPicker = document.getElementById('scratchpad-emoji-picker');
+const _scratchpadEmojiGrid = document.getElementById('scratchpad-emoji-grid');
+const _scratchpadEmojiInput = document.getElementById('scratchpad-emoji-input');
+_scratchpadEmojiGrid.style.gridTemplateColumns = `repeat(${PAD_EMOJI_COLS}, 1fr)`;
+let _scratchpadEmojiCursor = 0;
+
+function _padEmojiKey(sessionId) {
+  return PAD_EMOJI_PREFIX + sessionId;
+}
+
+function _scratchpadEmojiSessionId() {
+  const pad = _parsePadKey(_scratchpadKey() || '');
+  return pad?.kind === 'session' ? pad.id : null;
+}
+
+function _firstGrapheme(s) {
+  const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(s.trim());
+  return seg[Symbol.iterator]().next().value?.segment || '';
+}
+
+function _syncScratchpadEmojiBtn() {
+  const sid = _scratchpadEmojiSessionId();
+  _scratchpadEmojiBtn.hidden = !sid;
+  const emoji = sid ? store.getItem(_padEmojiKey(sid)) : null;
+  _scratchpadEmojiBtn.textContent = emoji || '+';
+  _scratchpadEmojiBtn.classList.toggle('set', !!emoji);
+  _scratchpadEmojiBtn.title = `${emoji ? 'Change' : 'Set'} scratchpad emoji (Ctrl+E)`;
+}
+
+function _markScratchpadEmojiCursor() {
+  _scratchpadEmojiGrid.querySelectorAll('button').forEach((b, i) => {
+    b.classList.toggle('kb', i === _scratchpadEmojiCursor);
+  });
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+function toggleScratchpadEmojiPicker() {
+  if (_scratchpadEmojiPicker.classList.contains('open')) _closeScratchpadEmojiPicker();
+  else _openScratchpadEmojiPicker();
+}
+
+function _openScratchpadEmojiPicker() {
+  const sid = _scratchpadEmojiSessionId();
+  if (!sid) return;
+  const cur = store.getItem(_padEmojiKey(sid));
+  _scratchpadEmojiCursor = Math.max(0, PAD_EMOJIS.indexOf(cur));
+  _scratchpadEmojiGrid.innerHTML = PAD_EMOJIS.map(
+    (e, i) => `<button type="button" data-i="${i}" class="${e === cur ? 'cur' : ''}">${e}</button>`,
+  ).join('');
+  _markScratchpadEmojiCursor();
+  _scratchpadEmojiInput.value = '';
+  _scratchpadEmojiPicker.classList.add('open');
+  _scratchpadEmojiPicker.focus();
+}
+
+function _closeScratchpadEmojiPicker(refocus = true) {
+  if (!_scratchpadEmojiPicker.classList.contains('open')) return;
+  _scratchpadEmojiPicker.classList.remove('open');
+  if (refocus) _scratchpadTextarea.focus();
+}
+
+function setScratchpadEmoji(value) {
+  const sid = _scratchpadEmojiSessionId();
+  if (!sid) return;
+  const emoji = _firstGrapheme(value || '');
+  if (emoji) store.setItem(_padEmojiKey(sid), emoji);
+  else store.removeItem(_padEmojiKey(sid));
+  _syncScratchpadEmojiBtn();
+  _closeScratchpadEmojiPicker();
+  renderSessions();
+}
+
+_scratchpadEmojiGrid.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-i]');
+  if (b) setScratchpadEmoji(PAD_EMOJIS[+b.dataset.i]);
+});
+
+// Stops propagation so the global handler does not read Escape as "close the scratchpad".
+_scratchpadEmojiPicker.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (matchKey(e, 'Escape')) {
+    e.preventDefault();
+    _closeScratchpadEmojiPicker();
+    return;
+  }
+  if (e.target === _scratchpadEmojiInput) {
+    if (matchKey(e, 'Enter') && _scratchpadEmojiInput.value.trim()) {
+      e.preventDefault();
+      setScratchpadEmoji(_scratchpadEmojiInput.value);
+    }
+    return;
+  }
+  const moves = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: PAD_EMOJI_COLS, ArrowUp: -PAD_EMOJI_COLS };
+  const move = matchKey(e, e.key) && moves[e.key];
+  if (move) {
+    e.preventDefault();
+    _scratchpadEmojiCursor = Math.min(PAD_EMOJIS.length - 1, Math.max(0, _scratchpadEmojiCursor + move));
+    _markScratchpadEmojiCursor();
+  } else if (matchKey(e, 'Enter')) {
+    e.preventDefault();
+    setScratchpadEmoji(PAD_EMOJIS[_scratchpadEmojiCursor]);
+  }
+});
+
 function _scratchpadKey() {
   if (_scratchpadKeyOverride) return _scratchpadKeyOverride;
-  if (currentSessionId) return `scratchpad-${currentSessionId}`;
-  if (currentProjectPath) return `scratchpad-project:${currentProjectPath}`;
+  if (currentSessionId) return _sessionScratchpadKey(currentSessionId);
+  if (currentProjectPath) return _projectScratchpadKey(currentProjectPath);
+  return null;
+}
+
+function _scratchpadKeyOf(el) {
+  if (!el) return null;
+  if (el.dataset.sessionId) return _sessionScratchpadKey(el.dataset.sessionId);
+  if (el.classList.contains('session-group-header')) return _groupScratchpadKey(el.dataset.groupId);
+  if (el.classList.contains('project-group-header') && el.dataset.projectPath) {
+    return _projectScratchpadKey(el.dataset.projectPath);
+  }
   return null;
 }
 
@@ -3368,12 +6952,19 @@ function toggleScratchpad() {
   }
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
+function openSessionScratchpad(sessionId) {
+  showScratchpad(_sessionScratchpadKey(sessionId));
+}
+
 function showScratchpad(keyOverride) {
   _scratchpadKeyOverride = keyOverride || null;
   const key = _scratchpadKey();
   if (!key) return;
-  _scratchpadTextarea.value = localStorage.getItem(key) || '';
+  _scratchpadTextarea.value = store.getItem(key) || '';
   _scratchpadCharcount.textContent = `${_scratchpadTextarea.value.length} chars`;
+  _syncScratchpadEmojiBtn();
+  _closeScratchpadEmojiPicker(false);
   _scratchpadModal.classList.add('visible');
   _scratchpadTextarea.focus();
 }
@@ -3384,6 +6975,7 @@ function closeScratchpad() {
     _scratchpadSaveTimer = null;
   }
   saveScratchpad();
+  _closeScratchpadEmojiPicker(false);
   _scratchpadKeyOverride = null;
   _scratchpadModal.classList.remove('visible');
 }
@@ -3392,10 +6984,15 @@ function saveScratchpad() {
   const key = _scratchpadKey();
   if (!key) return;
   const val = _scratchpadTextarea.value;
-  if (val.trim()) {
-    localStorage.setItem(key, val);
+  const had = _hasScratchpad(key);
+  const has = !!val.trim();
+  if (has) {
+    store.setItem(key, val);
   } else {
-    localStorage.removeItem(key);
+    store.removeItem(key);
+  }
+  if (had !== has) {
+    renderSessions();
   }
 }
 
@@ -3408,15 +7005,42 @@ _scratchpadTextarea.addEventListener('input', () => {
   }, 500);
 });
 
+// Bound on the textarea: the global handler returns early on TEXTAREA targets.
+_scratchpadTextarea.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeScratchpad();
+  else if (e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.code === 'KeyE' && _scratchpadEmojiSessionId()) {
+    e.preventDefault();
+    _openScratchpadEmojiPicker();
+  }
+});
+
+// Vimium eats Escape inside a text field and only blurs it, so the page never sees the key.
+// A blur that no click in the modal caused, while the window keeps focus, is that Escape.
+let _scratchpadPointerDown = false;
+_scratchpadModal.addEventListener('mousedown', () => {
+  _scratchpadPointerDown = true;
+});
+document.addEventListener('mouseup', () => {
+  _scratchpadPointerDown = false;
+});
+_scratchpadTextarea.addEventListener('blur', (e) => {
+  if (
+    !e.relatedTarget &&
+    !_scratchpadPointerDown &&
+    _scratchpadModal.classList.contains('visible') &&
+    document.hasFocus()
+  )
+    closeScratchpad();
+});
+
 //#endregion
 
 //#region STORAGE_MANAGER
 
 function _getStorageTotalSize() {
   let bytes = 0;
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    bytes += k.length + localStorage.getItem(k).length;
+  for (const k of store.keys()) {
+    bytes += k.length + store.getItem(k).length;
   }
   return bytes * 2; // UTF-16
 }
@@ -3426,8 +7050,21 @@ function _updateStorageTotal() {
   if (el) el.textContent = `${(_getStorageTotalSize() / 1024).toFixed(1)} KB`;
 }
 
-function _getKnownSessionIds() {
-  return new Set(sessions.map((s) => s.id));
+// From the server, because `sessions` is only the sidebar's loaded page (docs/session-scanning.md).
+// Loaded sessions are added for placeholders whose transcript does not exist yet.
+let _storageKnownSessions = null;
+
+async function _fetchKnownSessions() {
+  const res = await api('/api/sessions/known');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const known = new Map((await res.json()).map((s) => [s.id, s]));
+  for (const s of sessions) known.set(s.id, s);
+  _storageKnownSessions = known;
+  return known;
+}
+
+function _storageSessionMap() {
+  return _storageKnownSessions ?? new Map(sessions.map((s) => [s.id, s]));
 }
 
 function _sessionLabel(session, id) {
@@ -3435,7 +7072,7 @@ function _sessionLabel(session, id) {
 }
 
 function _groupByProject(sessionIds) {
-  const sessionMap = new Map(sessions.map((s) => [s.id, s]));
+  const sessionMap = _storageSessionMap();
   const groups = new Map();
   const orphans = [];
   for (const id of sessionIds) {
@@ -3453,12 +7090,7 @@ function _groupByProject(sessionIds) {
 
 function _projectLabel(project) {
   if (project === '(no project)') return '(no project)';
-  return project.split(/[/\\]/).pop() || project;
-}
-
-function _escapeForJsAttr(str) {
-  const jsEscaped = str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r');
-  return escapeHtml(jsEscaped);
+  return pathBasename(project);
 }
 
 function _renderProjectGroup(label, meta, innerHtml) {
@@ -3475,14 +7107,23 @@ function _renderOrphanGroup(count, innerHtml) {
   return _renderProjectGroup('Orphaned', `<span class="storage-item-badge orphan">${count}</span>`, innerHtml);
 }
 
-function showStorageManager() {
-  _updateStorageTotal();
-  _updateOrphanedCount();
+function _markStorageTab(tab) {
   document.querySelectorAll('.storage-tab').forEach((t) => {
-    t.classList.toggle('active', t.dataset.tab === 'sessions');
+    t.classList.toggle('active', t.dataset.tab === tab);
+    t.setAttribute('aria-selected', String(t.dataset.tab === tab));
   });
+}
+
+async function showStorageManager() {
+  _storageKnownSessions = null;
+  _updateStorageTotal();
+  _markStorageTab('sessions');
+  const modal = document.getElementById('storage-modal');
+  modal.classList.add('visible');
+  const known = await _fetchKnownSessions().catch(() => null);
+  if (!modal.classList.contains('visible')) return;
   _renderStorageTab();
-  document.getElementById('storage-modal').classList.add('visible');
+  if (known) _updateOrphanedCount(known);
 }
 
 function closeStorageManager() {
@@ -3491,32 +7132,41 @@ function closeStorageManager() {
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function switchStorageTab(tab) {
-  document.querySelectorAll('.storage-tab').forEach((t) => {
-    t.classList.toggle('active', t.dataset.tab === tab);
-  });
+  _markStorageTab(tab);
+  _renderStorageTab();
+}
+
+function stepStorageTab(step) {
+  const tabs = [...document.querySelectorAll('.storage-tab')];
+  const i = tabs.findIndex((t) => t.classList.contains('active'));
+  _markStorageTab(tabs[(i + step + tabs.length) % tabs.length].dataset.tab);
   _renderStorageTab();
 }
 
 function _renderStorageTab() {
+  const modal = document.getElementById('storage-modal');
+  if (!modal?.classList.contains('visible')) return;
   const body = document.getElementById('storage-modal-body');
   const tab = document.querySelector('.storage-tab.active')?.dataset.tab || 'sessions';
+  const groupsClean = document.getElementById('storage-groups-clean-btn');
+  groupsClean.style.display = tab === 'groups' ? '' : 'none';
+  groupsClean.disabled = true;
   if (tab === 'sessions') body.innerHTML = _renderStorageSessions();
+  else if (tab === 'dismissed') body.innerHTML = _renderStorageDismissed();
   else if (tab === 'scratchpads') body.innerHTML = _renderStorageScratchpads();
   else if (tab === 'linked-docs') body.innerHTML = _renderStorageLinkedDocs();
+  else if (tab === 'groups') _renderStorageGroups(body);
 }
 
 function _renderStorageSessions() {
   const pinnedIds = [...new Set([...pinnedSessionIds, ...stickySessionIds])];
 
   const msgMap = new Map();
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key.startsWith('pinned-messages-')) continue;
-    const sid = key.slice('pinned-messages-'.length);
-    try {
-      const pins = JSON.parse(localStorage.getItem(key)) || [];
-      if (pins.length) msgMap.set(sid, { pins, key });
-    } catch {}
+  for (const key of store.keys()) {
+    if (!key.startsWith(PINNED_MESSAGES_PREFIX)) continue;
+    const sid = key.slice(PINNED_MESSAGES_PREFIX.length);
+    const pins = loadPins(sid);
+    if (pins.length) msgMap.set(sid, { pins });
   }
 
   const allIds = [...new Set([...pinnedIds, ...msgMap.keys()])];
@@ -3526,7 +7176,7 @@ function _renderStorageSessions() {
   function renderMessageItems(id) {
     const g = msgMap.get(id);
     if (!g) return '';
-    const eid = escapeHtml(id);
+    const eid = escAttrJs(id);
     const header = `<div class="storage-group-header" style="padding-left:12px;">
       <span>${g.pins.length} pinned message${g.pins.length > 1 ? 's' : ''}</span>
       <div class="storage-item-actions">
@@ -3537,8 +7187,8 @@ function _renderStorageSessions() {
       .map((p) => {
         const type = escapeHtml(p.type || '?');
         const text = escapeHtml((p.text || p.tool || p.agentType || '').slice(0, 60));
-        const pinId = _escapeForJsAttr(p.id || '');
-        const sid = _escapeForJsAttr(id);
+        const pinId = escAttrJs(p.id || '');
+        const sid = escAttrJs(id);
         return `<div class="storage-item storage-item-clickable" style="padding-left:24px;" onclick="_storagePreviewPin('${sid}','${pinId}')">
         <span class="storage-item-badge">${type}</span>
         <span class="storage-item-id">${text}</span>
@@ -3555,7 +7205,7 @@ function _renderStorageSessions() {
 
   function renderSessionItem({ id, session }) {
     const isPinned = isAnyPinned(id);
-    const eid = escapeHtml(id);
+    const eid = escAttrJs(id);
     const actions = isPinned
       ? `<button onclick="_storageViewSession('${eid}')">View</button>
          <button class="danger" onclick="_storageUnpinSession('${eid}')">Unpin</button>`
@@ -3581,29 +7231,51 @@ function _renderStorageSessions() {
   return html;
 }
 
+function _renderStorageDismissed() {
+  const ids = [...dismissedSessionIds.keys()];
+  if (!ids.length) return '<div class="storage-empty">No dismissed sessions</div>';
+  const { groups, orphans } = _groupByProject(ids);
+  const renderItem = ({ id, session }) => `<div class="storage-item">
+      <span class="storage-item-id">${_sessionLabel(session, id)}</span>
+      <span class="storage-item-meta">dismissed ${formatDate(dismissedSessionIds.get(id))}</span>
+      <div class="storage-item-actions">
+        <button onclick="_storageViewSession('${escAttrJs(id)}')">View</button>
+        <button onclick="_storageRestoreSession('${escAttrJs(id)}')">Restore</button>
+      </div>
+    </div>`;
+  let html = '';
+  for (const [project, items] of groups) {
+    html += _renderProjectGroup(
+      escapeHtml(_projectLabel(project)),
+      `${items.length} session${items.length > 1 ? 's' : ''}`,
+      items.map(renderItem).join(''),
+    );
+  }
+  if (orphans.length) html += _renderOrphanGroup(orphans.length, orphans.map(renderItem).join(''));
+  return html;
+}
+
+function _storageRestoreSession(id) {
+  setSessionDismissed(id, false);
+  _renderStorageTab();
+}
+
 async function _storageViewSession(id) {
   closeStorageManager();
   revealedStorageSessionId = id;
-  if (!sessions.some((s) => s.id === id)) {
-    lastSessionsEtag = '';
-    await fetchSessions();
-  }
-  await fetchTasks(id);
-  const el = document.querySelector(`.session-item[data-session-id="${CSS.escape(id)}"]`);
-  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  await revealSession(id);
 }
 
 function _storageUnpinSession(id) {
-  pinnedSessionIds.delete(id);
-  stickySessionIds.delete(id);
-  savePinnedSessions();
+  clearSessionPin(id);
+  sendPinChange(id);
   renderSessions();
   _renderStorageTab();
   _updateStorageTotal();
 }
 
 function _storageClearSessionPins(sessionId) {
-  localStorage.removeItem(`pinned-messages-${sessionId}`);
+  store.removeItem(pinsKey(sessionId));
   if (currentSessionId === sessionId) {
     currentPins = [];
     const el = document.getElementById('message-panel-pinned');
@@ -3614,52 +7286,63 @@ function _storageClearSessionPins(sessionId) {
 }
 
 function _storageUnpinMessage(sessionId, pinId) {
-  const key = `pinned-messages-${sessionId}`;
-  try {
-    const pins = JSON.parse(localStorage.getItem(key)) || [];
-    const idx = pins.findIndex((p) => p.id === pinId);
-    if (idx < 0) return;
-    pins.splice(idx, 1);
-    if (pins.length) localStorage.setItem(key, JSON.stringify(pins));
-    else localStorage.removeItem(key);
-    if (currentSessionId === sessionId) {
-      currentPins = pins;
-      const el = document.getElementById('message-panel-pinned');
-      if (el) el.innerHTML = renderPinnedSection();
-    }
-  } catch {}
+  const pins = loadPins(sessionId);
+  const idx = pins.findIndex((p) => p.id === pinId);
+  if (idx < 0) return;
+  pins.splice(idx, 1);
+  savePins(sessionId, pins);
+  if (currentSessionId === sessionId) {
+    currentPins = pins;
+    const el = document.getElementById('message-panel-pinned');
+    if (el) el.innerHTML = renderPinnedSection();
+  }
   _renderStorageTab();
   _updateStorageTotal();
 }
 
 function _renderStorageScratchpads() {
-  const allItems = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key.startsWith('scratchpad-')) continue;
-    const val = localStorage.getItem(key) || '';
-    const isProject = key.startsWith('scratchpad-project:');
-    const id = isProject ? key.slice('scratchpad-project:'.length) : key.slice('scratchpad-'.length);
-    allItems.push({ key, id, isProject, chars: val.length });
+  const groupItems = [];
+  const projectItems = [];
+  const scratchBySession = new Map();
+  const sessionItem = (id) => {
+    if (!scratchBySession.has(id))
+      scratchBySession.set(id, { key: _sessionScratchpadKey(id), kind: 'session', id, chars: 0 });
+    return scratchBySession.get(id);
+  };
+  for (const key of store.keys()) {
+    if (key.startsWith(PAD_EMOJI_PREFIX)) {
+      sessionItem(key.slice(PAD_EMOJI_PREFIX.length)).emoji = store.getItem(key);
+      continue;
+    }
+    const parsed = _parsePadKey(key);
+    if (!parsed) continue;
+    const chars = (store.getItem(key) || '').length;
+    if (parsed.kind === 'session') sessionItem(parsed.id).chars = chars;
+    else (parsed.kind === 'group' ? groupItems : projectItems).push({ key, ...parsed, chars });
   }
-  if (!allItems.length) return '<div class="storage-empty">No scratchpads</div>';
+  if (!groupItems.length && !projectItems.length && !scratchBySession.size) {
+    return '<div class="storage-empty">No scratchpads</div>';
+  }
 
-  const projectItems = allItems.filter((i) => i.isProject);
-  const sessionItems = allItems.filter((i) => !i.isProject);
-  const sessionIds = sessionItems.map((i) => i.id);
-  const { groups: projectGroups, orphans } = _groupByProject(sessionIds);
-  const scratchBySession = new Map(sessionItems.map((i) => [i.id, i]));
+  const { groups: projectGroups, orphans } = _groupByProject(scratchBySession.keys());
+  const sessionMap = _storageSessionMap();
 
   function renderScratchItem(item) {
-    const session = !item.isProject ? sessions.find((s) => s.id === item.id) : null;
-    const typeBadge = item.isProject
-      ? '<span class="storage-item-badge">project</span>'
-      : '<span class="storage-item-badge">session</span>';
-    const jsKey = _escapeForJsAttr(item.key);
-    const label = item.isProject ? escapeHtml(_projectLabel(item.id)) : _sessionLabel(session, item.id);
+    const jsKey = escAttrJs(item.key);
+    let label;
+    switch (item.kind) {
+      case 'group':
+        label = escapeHtml(sgGroupById(item.id)?.name ?? `${item.id} (deleted)`);
+        break;
+      case 'project':
+        label = escapeHtml(_projectLabel(item.id));
+        break;
+      default:
+        label = _sessionLabel(sessionMap.get(item.id), item.id);
+    }
     return `<div class="storage-item">
-      <span class="storage-item-id" title="${escapeHtml(item.id)}">${label}</span>
-      ${typeBadge}
+      <span class="storage-item-id" title="${escapeHtml(item.id)}">${item.emoji ? `${escapeHtml(item.emoji)} ` : ''}${label}</span>
+      <span class="storage-item-badge">${item.kind}</span>
       <span class="storage-item-meta">${item.chars} chars</span>
       <div class="storage-item-actions">
         <button onclick="_storagePreviewScratchpad('${jsKey}')">View</button>
@@ -3669,6 +7352,14 @@ function _renderStorageScratchpads() {
   }
 
   let html = '';
+
+  if (groupItems.length) {
+    html += _renderProjectGroup(
+      'Group Scratchpads',
+      `${groupItems.length}`,
+      groupItems.map(renderScratchItem).join(''),
+    );
+  }
 
   if (projectItems.length) {
     html += _renderProjectGroup(
@@ -3704,38 +7395,33 @@ function _storagePreviewScratchpad(key) {
 
 function _storagePreviewPin(sessionId, pinId) {
   closeStorageManager();
-  const key = `pinned-messages-${sessionId}`;
-  try {
-    const pins = JSON.parse(localStorage.getItem(key)) || [];
-    const pin = pins.find((p) => p.id === pinId);
-    if (!pin) return;
-    document.getElementById('msg-detail-pin-btn').style.display = 'none';
-    currentMsgDetailIdx = null;
-    currentPinDetailId = null;
-    _renderPinToDetail(pin);
-    document.getElementById('msg-detail-modal').classList.add('visible');
-  } catch (e) {
-    console.error('_storagePreviewPin error:', e);
-  }
+  const pin = loadPins(sessionId).find((p) => p.id === pinId);
+  if (!pin) return;
+  document.getElementById('msg-detail-pin-btn').style.display = 'none';
+  currentMsgDetailIdx = null;
+  currentPinDetailId = null;
+  syncMsgDetailPaneBtn();
+  _renderPinToDetail(pin);
+  document.getElementById('msg-detail-modal').classList.add('visible');
 }
 
 function _storageDeleteScratchpad(key) {
-  localStorage.removeItem(key);
+  store.removeItem(key);
+  const pad = _parsePadKey(key);
+  if (pad?.kind === 'session' && store.getItem(_padEmojiKey(pad.id))) {
+    store.removeItem(_padEmojiKey(pad.id));
+    renderSessions();
+  }
   _renderStorageTab();
   _updateStorageTotal();
 }
 
 function _renderStorageLinkedDocs() {
   const entries = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
+  for (const key of store.keys()) {
     if (!key.startsWith(PREVIEW_STORAGE_PREFIX)) continue;
-    try {
-      const arr = JSON.parse(localStorage.getItem(key)) || [];
-      if (Array.isArray(arr) && arr.length) {
-        entries.push({ sessionId: key.slice(PREVIEW_STORAGE_PREFIX.length), paths: arr });
-      }
-    } catch {}
+    const paths = readStoredList(key);
+    if (paths.length) entries.push({ sessionId: key.slice(PREVIEW_STORAGE_PREFIX.length), paths });
   }
   if (!entries.length) return '<div class="storage-empty">No linked documents</div>';
 
@@ -3743,13 +7429,15 @@ function _renderStorageLinkedDocs() {
   const { groups, orphans } = _groupByProject(entries.map((e) => e.sessionId));
 
   function renderDocRow(sessionId, p) {
-    const name = p.split(/[\\/]/).pop();
-    const sid = _escapeForJsAttr(sessionId);
-    const jsPath = _escapeForJsAttr(p);
+    const name = linkedDocLabel(p);
+    const sid = escAttrJs(sessionId);
+    const jsPath = escAttrJs(p);
+    const what = LINKED_DOC_OPENERS[linkedDocOpener(p)].noun;
     return `<div class="storage-item" style="padding-left:24px;">
       <span class="storage-item-id" title="${escapeHtml(p)}">${escapeHtml(name)}</span>
       <div class="storage-item-actions">
         <button onclick="_storagePreviewLinkedDoc('${jsPath}')">View</button>
+        <button onclick="copyWithFeedback('${jsPath}', this)" title="Copy ${escapeHtml(what)}" aria-label="Copy ${escapeHtml(what)}">${ICON_COPY}</button>
         <button class="danger" onclick="_storageUnlinkDoc('${sid}','${jsPath}')">Unlink</button>
       </div>
     </div>`;
@@ -3758,7 +7446,7 @@ function _renderStorageLinkedDocs() {
   function renderSessionItem({ id, session }) {
     const entry = byId.get(id);
     if (!entry) return '';
-    const eid = escapeHtml(id);
+    const eid = escAttrJs(id);
     const count = entry.paths.length;
     const header = `<div class="storage-group-header">
       <span>${_sessionLabel(session, id)} <span class="storage-item-badge">${count} doc${count > 1 ? 's' : ''}</span></span>
@@ -3786,78 +7474,155 @@ function _renderStorageLinkedDocs() {
 }
 
 function _storagePreviewLinkedDoc(path) {
-  openPreviewByPath(path);
+  openLinkedDoc(path);
 }
 
 function _storageUnlinkDoc(sessionId, path) {
-  removeSessionPreviewPath(sessionId, path);
-  if (sessionId === _infoModalSessionId) refreshInfoModalLinkedDocs();
-  renderSessions();
-  _renderStorageTab();
-  _updateStorageTotal();
+  setSessionDocLink(sessionId, path, true);
+  forgetServerLinkedDoc(sessionId, path);
 }
 
 function _storageClearLinkedDocs(sessionId) {
-  localStorage.removeItem(PREVIEW_STORAGE_PREFIX + sessionId);
-  if (sessionId === _infoModalSessionId) refreshInfoModalLinkedDocs();
-  renderSessions();
-  _renderStorageTab();
-  _updateStorageTotal();
+  store.removeItem(PREVIEW_STORAGE_PREFIX + sessionId);
+  forgetServerLinkedDoc(sessionId);
+  // The auto-link record deliberately survives: clearing is unlinking every row at
+  // once, and an unlinked pad must not come back on the next read of the transcript.
+  afterLinkedDocsChanged(sessionId);
 }
 
-function _findOrphanedKeys() {
-  const known = _getKnownSessionIds();
+async function _storageGroupsClean(group, dryRun) {
+  const shown = await getJson('/api/sessions', null, { query: { filter: 'active', limit: 'all', lite: '1' } });
+  if (!Array.isArray(shown)) throw new Error('could not list sessions');
+  const res = await api('/api/groups/clean', {
+    method: 'POST',
+    body: { group, dryRun, keep: shown.map((s) => s.id), hide: [...dismissedSessionIds.keys()] },
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+  return res.json();
+}
+
+async function _renderStorageGroups(body) {
+  body.innerHTML = '<div class="storage-empty">Loading groups…</div>';
+  let out;
+  try {
+    out = await _storageGroupsClean(null, true);
+  } catch (e) {
+    out = { error: e.message };
+  }
+  _showStorageGroups(body, out);
+}
+
+function _showStorageGroups(body, out) {
+  if (document.querySelector('.storage-tab.active')?.dataset.tab !== 'groups') return;
+  document.getElementById('storage-groups-clean-btn').disabled = !out.groups?.some((g) => g.hidden);
+  if (out.error) {
+    body.innerHTML = `<div class="storage-empty">Could not load groups: ${escapeHtml(out.error)}</div>`;
+    return;
+  }
+  if (!out.groups.length) {
+    body.innerHTML = '<div class="storage-empty">No groups</div>';
+    return;
+  }
+  const rows = out.groups
+    .map((g) => {
+      const badge = g.hidden ? ` <span class="storage-item-badge">${g.hidden} hidden</span>` : '';
+      return `<div class="storage-group-header storage-group-row">
+      <span>${escapeHtml(g.path)}${badge}</span>
+      <div class="storage-item-actions">
+        <span class="storage-item-meta">${g.members} member${g.members === 1 ? '' : 's'}</span>
+        <button class="danger" title="Take out the hidden sessions, here and in the groups under it" onclick="_storageCleanGroup('${escAttrJs(g.id)}')">Clean</button>
+        <button class="danger" onclick="_storageDeleteGroup('${escAttrJs(g.id)}')">Delete</button>
+      </div>
+    </div>`;
+    })
+    .join('');
+  const hidden = out.groups.reduce((n, g) => n + g.hidden, 0);
+  body.innerHTML = _renderProjectGroup('Groups', `${hidden} hidden`, rows);
+}
+
+async function _storageCleanGroup(group) {
+  let out;
+  try {
+    out = await _storageGroupsClean(group, false);
+  } catch (e) {
+    showToast(`Clean failed: ${e.message}`, 'error');
+    return;
+  }
+  const n = out.dropped;
+  showToast(n ? `Took ${n} hidden session${n === 1 ? '' : 's'} out of the groups` : 'No hidden sessions');
+  _showStorageGroups(document.getElementById('storage-modal-body'), out);
+}
+
+async function _storageDeleteGroup(id) {
+  const group = sgGroupById(id);
+  if (!group || !(await sgConfirmDelete(group))) return;
+  await sgSaving;
+  _renderStorageTab();
+}
+
+function _findOrphanedKeys(known) {
   if (!known.size) return [];
   const orphaned = [];
   for (const id of pinnedSessionIds) if (!known.has(id)) orphaned.push(`__pinned__${id}`);
   for (const id of stickySessionIds) if (!known.has(id)) orphaned.push(`__sticky__${id}`);
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key.startsWith('pinned-messages-')) {
-      if (!known.has(key.slice('pinned-messages-'.length))) orphaned.push(key);
-    } else if (key.startsWith('scratchpad-') && !key.startsWith('scratchpad-project:')) {
-      if (!known.has(key.slice('scratchpad-'.length))) orphaned.push(key);
-    } else if (key.startsWith(PREVIEW_STORAGE_PREFIX)) {
-      if (!known.has(key.slice(PREVIEW_STORAGE_PREFIX.length))) orphaned.push(key);
+  const sessionKeyPrefixes = [
+    PINNED_MESSAGES_PREFIX,
+    PAD_EMOJI_PREFIX,
+    PREVIEW_STORAGE_PREFIX,
+    PAD_LINKED_PREFIX,
+    DROPPED_ARTIFACTS_PREFIX,
+  ];
+  for (const key of store.keys()) {
+    const pad = _parsePadKey(key);
+    if (pad?.kind === 'group') {
+      if (sgRev !== null && !sgGroupById(pad.id)) orphaned.push(key);
+      continue;
     }
+    const prefix = pad ? null : sessionKeyPrefixes.find((p) => key.startsWith(p));
+    const id = pad?.kind === 'session' ? pad.id : prefix && key.slice(prefix.length);
+    if (id && !known.has(id)) orphaned.push(key);
   }
   return orphaned;
 }
 
-function _updateOrphanedCount() {
+function _updateOrphanedCount(known) {
   const btn = document.getElementById('storage-cleanup-btn');
   if (!btn) return;
-  const count = _findOrphanedKeys().length;
+  const count = _findOrphanedKeys(known).length;
   btn.textContent = count ? `Clean Orphaned (${count})` : 'Clean Orphaned';
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
-function cleanupOrphanedStorage() {
-  if (!sessions.length) {
-    showToast('Sessions not loaded yet — try again after they appear');
+async function cleanupOrphanedStorage() {
+  let known;
+  try {
+    known = await _fetchKnownSessions();
+  } catch {
+    showToast('Failed to list sessions — nothing was cleaned', 'error');
     return;
   }
-  const orphaned = _findOrphanedKeys();
-  let pinsChanged = false;
+  const orphaned = _findOrphanedKeys(known);
+  const unpinned = new Set();
   for (const key of orphaned) {
-    if (key.startsWith('__pinned__')) {
-      pinnedSessionIds.delete(key.slice('__pinned__'.length));
-      pinsChanged = true;
-    } else if (key.startsWith('__sticky__')) {
-      stickySessionIds.delete(key.slice('__sticky__'.length));
-      pinsChanged = true;
+    const pin = /^__(pinned|sticky)__/.exec(key);
+    if (pin) {
+      const id = key.slice(pin[0].length);
+      clearSessionPin(id);
+      unpinned.add(id);
     } else {
-      localStorage.removeItem(key);
+      store.removeItem(key);
+      // The server copy would bring the links back on the next merge.
+      if (key.startsWith(PREVIEW_STORAGE_PREFIX)) forgetServerLinkedDoc(key.slice(PREVIEW_STORAGE_PREFIX.length));
     }
   }
-  if (pinsChanged) savePinnedSessions();
+  if (unpinned.size) postPins({ ids: [...unpinned], state: 'none' });
   const removed = orphaned.length;
 
   showToast(removed ? `Cleaned ${removed} orphaned item${removed > 1 ? 's' : ''}` : 'No orphaned items found');
   renderSessions();
   _renderStorageTab();
   _updateStorageTotal();
-  _updateOrphanedCount();
+  _updateOrphanedCount(known);
 }
 //#endregion
 
@@ -3867,36 +7632,180 @@ function matchKey(e, ...keys) {
   return keys.some((k) => e.key === k || e.code === k);
 }
 
-const MODAL_ESC_PRIORITY = ['preview-modal', 'msg-detail-modal', 'plan-modal'];
+function shiftOnly(e, code) {
+  return e.code === code && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+}
+
+// xterm runs in another process, so blur() in the board leaves it focused and the modal's arrow keys go
+// to it. Focusing a board element takes the focus.
+function toggleLastMessage() {
+  if (document.getElementById('msg-detail-modal').classList.contains('visible')) {
+    closeMsgDetailModal();
+    return;
+  }
+  if (!isWaitingFresh() && !currentMessages.length) return;
+  msgDetailFromTerminal = terminalPaneFocused();
+  msgDetailFollowLatest = true;
+  if (isWaitingFresh()) showWaitingDetail();
+  else showMsgDetail(currentMessages.length - 1);
+  if (msgDetailFromTerminal) document.querySelector('#msg-detail-modal .msg-detail-dialog').focus();
+}
+
+function dismissSessionFromList(sid) {
+  const prevIdx = selectedSessionIdx;
+  if (!setSessionDismissed(sid, true)) return;
+  const newItems = getNavigableItems();
+  if (isAnyPinned(sid)) {
+    const pinnedIdx = newItems.findIndex((el) => el.dataset?.sessionId === sid);
+    if (pinnedIdx >= 0) selectSessionByIndex(pinnedIdx, newItems);
+    return;
+  }
+  // Ctrl+Alt+S would reveal the dismissed session, and revealing restores it.
+  const fallback = currentSessionId === sid && swapHistory[0] === sid ? swapHistory[1] : null;
+  forgetSwapHistory(sid);
+  const targetIdx = newItems.length > 0 ? Math.max(0, prevIdx - 1) : -1;
+  // If the dismissed session is currently open, navigate to the previous one
+  if (currentSessionId === sid || selectedSessionId === sid) {
+    selectedSessionId = null;
+    if (fallback && !dismissedSessionIds.has(fallback) && sessions.some((s) => s.id === fallback)) {
+      revealSession(fallback).then(() => {
+        const items = getNavigableItems();
+        const idx = items.findIndex((el) => el.dataset?.sessionId === fallback);
+        if (idx >= 0) selectSessionByIndex(idx, items);
+      });
+    } else if (targetIdx >= 0) {
+      const targetSid = newItems[targetIdx]?.dataset?.sessionId;
+      if (targetSid) {
+        fetchTasks(targetSid).then(() => selectSessionByIndex(targetIdx, getNavigableItems()));
+      } else {
+        showNoSession();
+        selectSessionByIndex(targetIdx, getNavigableItems());
+      }
+    } else {
+      showNoSession();
+    }
+  } else if (targetIdx >= 0) {
+    selectSessionByIndex(targetIdx, newItems);
+  }
+}
+
+async function confirmDismissBlockers(sid) {
+  const pinState = getSessionPinState(sid);
+  const pinned = pinState !== 'none';
+  const terminal = runningTerminals.has(sid);
+  if (!pinned && !terminal) return true;
+  const session = sessions.find((s) => s.id === sid);
+  const name = session ? sessionDisplayName(session) : sid.slice(0, 8);
+  const pinLabel = pinState === 'sticky' ? 'sticky pin' : 'pin';
+  const has = [pinned && `a ${pinLabel}`, terminal && 'a running terminal'].filter(Boolean).join(' and ');
+  const okLabel = pinned && terminal ? 'Unpin, end and dismiss' : pinned ? 'Unpin and dismiss' : 'End and dismiss';
+  const steps = [
+    pinned && `Remove the ${pinLabel}`,
+    terminal && 'End the terminal',
+    'Hide the session from the sidebar',
+  ].filter(Boolean);
+  const ok = await confirmModal({
+    title: `Dismiss “${name}”?`,
+    message: `The session has ${has}.`,
+    steps,
+    okLabel,
+  });
+  if (!ok) return false;
+  if (isAnyPinned(sid)) unpinSession(sid);
+  if (terminal) closeTerminalSession(sid);
+  return true;
+}
+
+async function dismissSession(sid) {
+  if (await confirmDismissBlockers(sid)) dismissSessionFromList(sid);
+}
+
+function contextSessionId() {
+  if (terminalPaneFocused()) return termState.sessionId || currentSessionId;
+  if (focusZone !== 'sidebar') return selectedSessionId || currentSessionId;
+  return sessionsList.querySelector('.kb-selected')?.dataset.sessionId || currentSessionId;
+}
+
+function dismissContextSession() {
+  const sid = contextSessionId();
+  if (sid) dismissSession(sid);
+}
+
+const MODAL_ESC_PRIORITY = [
+  'preview-modal',
+  'msg-detail-modal',
+  'tool-stats-modal',
+  'plan-modal',
+  'loop-modal',
+  'workflow-modal',
+];
 const MODAL_CLOSERS = {
   'preview-modal': () => closePreviewModal(),
   'msg-detail-modal': () => {
     closeMsgDetailModal();
     msgDetailFollowLatest = false;
   },
+  'tool-stats-modal': () => closeToolStatsModal(),
   'plan-modal': () => closePlanModal(),
-  'session-info-modal': () => closeSessionInfoModal(),
+  'loop-modal': () => closeLoopModal(),
+  'workflow-modal': () => closeWorkflowModal(),
+  'team-modal': () => closeTeamModal(),
   'agent-modal': () => closeAgentModal(),
   'help-modal': () => closeHelpModal(),
+  'session-picker-modal': () => closeSessionPicker(),
+  'project-picker-modal': () => closeProjectPicker(),
+  'terminal-manager-modal': () => closeTerminalManager(),
+  'new-session-modal': () => closeNewSession(),
+  'confirm-modal': () => closeConfirmModal?.(false),
+  'pane-pop': () => closePanePop(),
 };
 
 document.addEventListener('keydown', (e) => {
+  // Scale the open modal's reading surface, or the file pane's, instead of letting the browser zoom
+  // the whole page. Sits above the text-field guard so it still works with the
+  // caret in a field inside the modal.
+  const zoom = zoomDelta(e);
+  if (zoom !== undefined && isZoomableOnScreen()) {
+    e.preventDefault();
+    adjustModalZoom(zoom);
+    return;
+  }
+  if (isShowCardFocused() && !isAnyModalOpen() && showCardKey(e)) {
+    e.preventDefault();
+    return;
+  }
+
+  // Above the text-field guard: xterm's input is a textarea, and the toggle must work from it.
+  const terminalPrompt = document.getElementById('terminal-prompt');
+  if (terminalPrompt.contains(e.target)) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      toggleTerminal();
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ' ') return;
+    const step = matchKey(e, 'ArrowLeft', 'ArrowUp') ? -1 : matchKey(e, 'ArrowRight', 'ArrowDown') ? 1 : 0;
+    if (step) {
+      e.preventDefault();
+      const buttons = [...terminalPrompt.querySelectorAll('button')];
+      const i = buttons.indexOf(e.target);
+      buttons[(i + step + buttons.length) % buttons.length]?.focus();
+      return;
+    }
+  }
+  const terminalAction = terminalShortcut(e);
+  if (terminalAction) {
+    e.preventDefault();
+    terminalAction();
+    return;
+  }
+
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
     return;
   }
 
-  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.code === 'KeyD' || e.key === 'd' || e.key === 'D')) {
-    if (!currentSessionId) return;
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    const sid = currentSessionId;
-    dismissAndAdvance(sid);
-    if (_infoModalSessionId === sid) closeSessionInfoModal();
-    return;
-  }
-
-  // Modal guard — only Escape, Shift+M, and msg-detail J/K navigation pass through
-  if (document.querySelector('.modal-overlay.visible')) {
+  // Modal guard — only Escape, Shift+M, and msg-detail arrow navigation pass through
+  if (isAnyModalOpen()) {
     if (e.key === 'Escape') {
       if (_scratchpadModal.classList.contains('visible')) {
         closeScratchpad();
@@ -3909,26 +7818,62 @@ document.addEventListener('keydown', (e) => {
       if (close) close();
       else document.getElementById(topId).classList.remove('visible');
       e.stopImmediatePropagation();
+    } else if (e.key === '?' && document.getElementById('help-modal').classList.contains('visible')) {
+      e.preventDefault();
+      closeHelpModal();
     } else if (
-      e.code === 'KeyM' &&
-      e.shiftKey &&
-      document.getElementById('msg-detail-modal').classList.contains('visible')
+      matchKey(e, 'ArrowLeft', 'ArrowRight') &&
+      [...document.querySelectorAll('.modal-overlay.visible')].at(-1)?.id === 'storage-modal'
     ) {
+      e.preventDefault();
+      stepStorageTab(matchKey(e, 'ArrowLeft') ? -1 : 1);
+    } else if (shiftOnly(e, 'KeyM') && document.getElementById('msg-detail-modal').classList.contains('visible')) {
       e.preventDefault();
       closeMsgDetailModal();
     } else if (document.getElementById('msg-detail-modal').classList.contains('visible')) {
-      if (matchKey(e, 'ArrowDown', 'KeyJ')) {
+      const askOpen = currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX && isWaitingAnswerable();
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && askOpen && currentWaiting.kind !== 'question') {
         e.preventDefault();
-        if (currentMsgDetailIdx < currentMessages.length - 1) {
+        respondWaiting({ behavior: 'allow' });
+      } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && askOpen) {
+        e.preventDefault();
+        submitWaitingAnswers();
+      } else if (
+        askOpen &&
+        currentWaiting.kind === 'question' &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        /^[1-9]$/.test(e.key)
+      ) {
+        e.preventDefault();
+        pickWaitingOptionByNumber(Number(e.key) - 1);
+      } else if (askOpen && currentWaiting.kind === 'question' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault();
+        setWaitingTab(waitingTab + (e.key === 'ArrowRight' ? 1 : -1));
+      } else if (matchKey(e, 'ArrowDown')) {
+        e.preventDefault();
+        if (currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX) {
+          msgDetailFollowLatest = true;
+          showWaitingDetail();
+        } else if (currentMsgDetailIdx === currentMessages.length - 1 && isWaitingFresh()) {
+          msgDetailFollowLatest = false;
+          showWaitingDetail();
+        } else if (currentMsgDetailIdx < currentMessages.length - 1) {
           msgDetailFollowLatest = false;
           showMsgDetail(currentMsgDetailIdx + 1);
         } else if (currentMsgDetailIdx === currentMessages.length - 1) {
           msgDetailFollowLatest = true;
           showMsgDetail(currentMsgDetailIdx);
         }
-      } else if (matchKey(e, 'ArrowUp', 'KeyK')) {
+      } else if (matchKey(e, 'ArrowUp')) {
         e.preventDefault();
-        if (currentMsgDetailIdx > 0) {
+        if (currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX) {
+          if (currentMessages.length) {
+            msgDetailFollowLatest = false;
+            showMsgDetail(currentMessages.length - 1);
+          }
+        } else if (currentMsgDetailIdx > 0) {
           msgDetailFollowLatest = false;
           showMsgDetail(currentMsgDetailIdx - 1);
         }
@@ -3937,31 +7882,101 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
+  if (
+    e.key === 'Enter' &&
+    (e.ctrlKey || e.metaKey) &&
+    !e.altKey &&
+    !e.shiftKey &&
+    isWaitingFresh() &&
+    isWaitingAnswerable() &&
+    currentWaiting.kind !== 'question'
+  ) {
+    e.preventDefault();
+    respondWaiting({ behavior: 'allow' });
+    return;
+  }
+
   // Global shortcuts
-  if (e.key === '[') {
+  if (matchKey(e, '\\')) {
     e.preventDefault();
     toggleSidebar();
     return;
   }
-  if (e.code === 'KeyL' && e.shiftKey) {
+  if (matchKey(e, '[', ']') && cyclePaneStrip(e.key === ']' ? 1 : -1)) {
+    e.preventDefault();
+    focusActivePane();
+    return;
+  }
+  const altOnly = e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+  if (altOnly && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+    if (cyclePane(e.code === 'BracketRight' ? 1 : -1)) {
+      e.preventDefault();
+      focusActivePane();
+    }
+    return;
+  }
+  // The hub binds Ctrl+Alt+digit on macOS for its app keys.
+  if (hubModDown(e) && /^Digit[1-9]$/.test(e.code) && !hub.forwards(e) && selectPaneByNumber(Number(e.code.slice(5)))) {
+    e.preventDefault();
+    focusActivePane();
+    return;
+  }
+  if (altOnly && e.code === 'KeyW' && closeFocusedPane()) {
+    e.preventDefault();
+    return;
+  }
+  if (isMenuKey(e) && ((focusZone === 'sidebar' && sgOpenMenuForKbSelection()) || openFocusedPaneMenu())) {
+    e.preventDefault();
+    return;
+  }
+  const plainShift = !e.ctrlKey && !e.altKey && !e.metaKey;
+  if (plainShift && e.key === '|' && togglePaneSplit()) {
+    e.preventDefault();
+    return;
+  }
+  if (plainShift && (e.key === '{' || e.key === '}') && focusPaneSide(e.key === '{' ? 'l' : 'r')) {
+    e.preventDefault();
+    focusActivePane();
+    return;
+  }
+  if (shiftOnly(e, 'KeyL')) {
     e.preventDefault();
     toggleMessagePanel();
     return;
   }
-  if (e.code === 'KeyM' && e.shiftKey) {
+  if (shiftOnly(e, 'KeyP')) {
     e.preventDefault();
-    const msgDetailModal = document.getElementById('msg-detail-modal');
-    if (msgDetailModal.classList.contains('visible')) {
-      closeMsgDetailModal();
-    } else if (currentMessages.length) {
-      msgDetailFollowLatest = true;
-      showMsgDetail(currentMessages.length - 1);
-    }
+    openProjectPicker();
     return;
   }
-  if (e.code === 'KeyS' && e.shiftKey) {
+  if (shiftOnly(e, 'KeyM')) {
+    e.preventDefault();
+    toggleLastMessage();
+    return;
+  }
+  if (shiftOnly(e, 'KeyS')) {
     e.preventDefault();
     showStorageManager();
+    return;
+  }
+  if (shiftOnly(e, 'KeyZ')) {
+    e.preventDefault();
+    toggleZenMode();
+    return;
+  }
+  if (e.key === '$' && plainShift) {
+    e.preventDefault();
+    openCost(contextSessionId());
+    return;
+  }
+  if (matchKey(e, 'KeyM')) {
+    e.preventDefault();
+    openMarketplace(contextSessionId());
+    return;
+  }
+  if (ClaudeHub.comboOf(e) === 'ctrl+m') {
+    e.preventDefault();
+    openMemory(contextSessionId());
     return;
   }
   if (e.key === '.' || e.key === '>') {
@@ -3974,34 +7989,42 @@ document.addEventListener('keydown', (e) => {
   }
 
   // Tab toggles focus zone
+  if (e.key === 'Tab' && detailPanel.contains(e.target)) return;
+  // A focused pane document keeps the arrow, page and space keys for scrolling.
+  const inPane = paneViews.contains(e.target);
+  if (inPane && e.key !== 'Tab' && e.key !== 'Escape') return;
   if (e.key === 'Tab') {
     e.preventDefault();
-    if (focusZone === 'sidebar') {
-      const hasCards = document.querySelector('.task-card');
-      if (!hasCards) return;
+    if (inPane) e.target.blur();
+    // The terminal replaces the board, so it takes the board's place in the Tab cycle.
+    if (wantsTerminal()) {
+      if (focusZone === 'sidebar') focusTerminalPane();
+      else leaveTerminalPane();
+      return;
     }
+    if (focusZone === 'sidebar' && !document.querySelector('.task-card, .column-add')) return;
     setFocusZone(focusZone === 'board' ? 'sidebar' : 'board');
     return;
   }
 
   // Sidebar navigation
   if (focusZone === 'sidebar') {
-    if (matchKey(e, 'ArrowDown', 'KeyJ')) {
+    if (matchKey(e, 'ArrowDown')) {
       e.preventDefault();
       navigateSession(1);
       return;
     }
-    if (matchKey(e, 'ArrowUp', 'KeyK')) {
+    if (matchKey(e, 'ArrowUp')) {
       e.preventDefault();
       navigateSession(-1);
       return;
     }
-    if (matchKey(e, 'ArrowLeft', 'KeyH')) {
+    if (matchKey(e, 'ArrowLeft')) {
       e.preventDefault();
       handleSidebarHorizontal(-1);
       return;
     }
-    if (matchKey(e, 'ArrowRight', 'KeyL')) {
+    if (matchKey(e, 'ArrowRight')) {
       e.preventDefault();
       handleSidebarHorizontal(1);
       return;
@@ -4011,24 +8034,20 @@ document.addEventListener('keydown', (e) => {
       activateSelectedSession();
       return;
     }
-    if (e.key === 'Escape') {
-      setFocusZone('board');
-      return;
-    }
   }
 
   // Board navigation
   if (focusZone === 'board') {
-    if (matchKey(e, 'ArrowDown', 'KeyJ', 'ArrowUp', 'KeyK', 'ArrowLeft', 'KeyH', 'ArrowRight', 'KeyL')) {
+    if (matchKey(e, 'ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight')) {
       e.preventDefault();
       if (!selectedTaskId && !document.querySelector('.task-card.selected')) {
         setFocusZone('sidebar');
         return;
       }
-      if (matchKey(e, 'ArrowDown', 'KeyJ')) navigateVertical(1);
-      else if (matchKey(e, 'ArrowUp', 'KeyK')) navigateVertical(-1);
-      else if (matchKey(e, 'ArrowLeft', 'KeyH')) navigateHorizontal(-1);
-      else if (matchKey(e, 'ArrowRight', 'KeyL')) navigateHorizontal(1);
+      if (matchKey(e, 'ArrowDown')) navigateVertical(1);
+      else if (matchKey(e, 'ArrowUp')) navigateVertical(-1);
+      else if (matchKey(e, 'ArrowLeft')) navigateHorizontal(-1);
+      else if (matchKey(e, 'ArrowRight')) navigateHorizontal(1);
 
       if (selectedTaskId && detailPanel.classList.contains('visible')) {
         showTaskDetail(selectedTaskId, selectedSessionId);
@@ -4052,59 +8071,84 @@ document.addEventListener('keydown', (e) => {
       return;
     }
 
+    if (matchKey(e, 'KeyD') && selectedTaskId) {
+      e.preventDefault();
+      deleteTask(selectedTaskId, selectedSessionId || currentSessionId);
+      return;
+    }
+
+    if (matchKey(e, 'KeyE') && detailPanel.classList.contains('visible')) {
+      e.preventDefault();
+      setDetailExpanded(!detailPanel.classList.contains('expanded'));
+      return;
+    }
   }
 
   if (e.key === 'Escape') {
     if (detailPanel.classList.contains('visible')) closeDetailPanel();
     else if (agentLogMode) exitAgentLogMode();
     else if (messagePanelOpen) toggleMessagePanel();
+    else if (focusZone === 'sidebar') {
+      // Plain unfocus — drop the keyboard cursor without jumping into the board
+      clearKbSelection();
+      focusZone = 'board';
+    } else {
+      // Nothing open — plain unfocus: drop the task-card selection highlight
+      clearTaskSelection();
+      selectedTaskId = null;
+    }
     return;
   }
 
   // Shared actions — work in both sidebar and board
-  const contextSid =
-    focusZone === 'sidebar'
-      ? sessionsList.querySelector('.kb-selected')?.dataset.sessionId || currentSessionId
-      : selectedSessionId || currentSessionId;
-  if (matchKey(e, 'KeyP') && !e.shiftKey) {
+  const contextSid = contextSessionId();
+  if (matchKey(e, 'KeyP')) {
     e.preventDefault();
     if (contextSid) openPlanForSession(contextSid);
     return;
   }
-  if (matchKey(e, 'KeyI') && !e.shiftKey) {
+  if (matchKey(e, 'KeyI')) {
     e.preventDefault();
     if (contextSid) showSessionInfoModal(contextSid);
     return;
   }
-  if (matchKey(e, 'KeyN') && !e.shiftKey) {
+  if (matchKey(e, 'KeyN')) {
     e.preventDefault();
-    toggleScratchpad();
+    const cursorKey = _scratchpadKeyOf(focusZone === 'sidebar' ? sessionsList.querySelector('.kb-selected') : null);
+    if (cursorKey) showScratchpad(cursorKey);
+    else toggleScratchpad();
     return;
   }
-  if (e.code === 'KeyC' && e.shiftKey) {
+  if (ClaudeHub.comboOf(e) === 'ctrl+d') {
+    e.preventDefault();
+    dismissContextSession();
+    return;
+  }
+  if (e.code === 'KeyC' && e.shiftKey && !e.altKey && !e.metaKey) {
     e.preventDefault();
     if (!contextSid) {
       showToast('No session selected');
       return;
     }
-    navigator.clipboard
-      .writeText(contextSid)
-      .then(() => showToast(`Copied session id: ${contextSid.slice(0, 8)}`, 'success'))
-      .catch(() => showToast('Failed to copy session id'));
+    const peerName = e.ctrlKey ? sessions.find((s) => s.id === contextSid)?.peerName : null;
+    const [text, label] = e.ctrlKey
+      ? [peerName && sendMessageAddress(peerName), 'session name']
+      : [contextSid, 'session id'];
+    if (!text) {
+      showToast('No live session name: the session is not running');
+      return;
+    }
+    copyText(text, label, `Copied ${label}: ${e.ctrlKey ? text : text.slice(0, 8)}`);
     return;
   }
   if (matchKey(e, 'KeyR')) {
     e.preventDefault();
     if (_manualRefreshing) return;
     _manualRefreshing = true;
-    lastSessionsEtag = '';
-    lastTasksEtag = '';
-    lastMessagesHash = '';
+    lastSessionsHash = '';
+    lastTasksHash = '';
     const refreshes = [fetchSessions()];
     if (currentSessionId) refreshes.push(fetchTasks(currentSessionId));
-    if (currentSessionId && messagePanelOpen && !agentLogMode) {
-      refreshes.push(fetchMessages(currentSessionId));
-    }
     refreshRateLimits();
     Promise.all(refreshes)
       .then(() => showToast('Data refreshed', 'success'))
@@ -4126,33 +8170,1015 @@ document.addEventListener('keydown', (e) => {
 
 //#endregion
 
+//#region REVIEW
+// Comments on rendered content, sent to a session as one batch. Drafts outlive the view in
+// this tab, keyed by session and source, so closing a preview loses nothing. Highlights use
+// the CSS Custom Highlight API, which marks ranges without touching the DOM the renderer
+// built; a draft restored on reopen has no mark and shows in the panel only.
+//
+// An HTML preview is an iframe on an opaque origin, so its selection is out of reach from
+// here. `reviewBridge` runs inside the frame and reports each selection over postMessage;
+// the frame keeps its own ranges and marks them by id. A page whose CSP forbids inline
+// scripts gets no comments.
+const reviewDrafts = new Map();
+// Text typed but not added, kept across a teardown the user did not ask for (the content
+// refreshed, a modal opened on top) until its review is unmounted.
+const reviewUnsent = new Map();
+const reviewHighlight = typeof Highlight === 'function' && CSS.highlights ? new Highlight() : null;
+const reviewHotHighlight = reviewHighlight ? new Highlight() : null;
+const reviewPendingHighlight = reviewHighlight ? new Highlight() : null;
+if (reviewHighlight) {
+  CSS.highlights.set('review', reviewHighlight);
+  CSS.highlights.set('review-hot', reviewHotHighlight);
+  CSS.highlights.set('review-pending', reviewPendingHighlight);
+}
+const REVIEW_MSG = 'cck-review:';
+let activeReview = null;
+let reviewMarkSeq = 0;
+let reviewPopMode = null;
+let reviewHoverAt = null;
+let reviewHoverFrame = 0;
+
+function reviewKey(sessionId, source) {
+  return `${sessionId}|${source.kind}|${source.path ? canonicalPath(source.path) : source.id || source.label}`;
+}
+
+function reviewItems() {
+  return (activeReview && reviewDrafts.get(activeReview.key)) || [];
+}
+
+// Only one review is live. Each modal mounts on top of the stack, keyed by its panel, and
+// closing it brings back the review beneath. `reviewBase` (the pane on screen) is live only
+// when the stack is empty.
+const reviewStack = [];
+let reviewBase = null;
+
+// `context(range)` adds view-specific citation fields to a comment on the host DOM;
+// `onComment()` runs after a comment is added; `onSent()` runs after a batch is delivered.
+function mountReview(opts) {
+  dropReviewEntry(opts.panelEl);
+  reviewStack.push({ sessionId: currentSessionId, ...opts });
+  showTopReview();
+}
+
+// Unmounts only the review that panel holds, so a modal under another one keeps it.
+function unmountReview(panelEl) {
+  dropReviewEntry(panelEl);
+  showTopReview();
+}
+
+function setBaseReview(opts) {
+  if (reviewBase === opts) return;
+  reviewBase = opts;
+  showTopReview();
+}
+
+function dropReviewEntry(panelEl) {
+  const i = reviewStack.findIndex((o) => o.panelEl === panelEl);
+  if (i >= 0) reviewStack.splice(i, 1);
+}
+
+function showTopReview() {
+  const opts = reviewStack.at(-1) || reviewBase;
+  if (!activeReview || activeReview.opts !== opts) {
+    stopReview();
+    if (opts) startReview(opts);
+  }
+  if (!reviewUnsent.size) return;
+  const mounted = new Set([...reviewStack, reviewBase].filter(Boolean).map((o) => reviewKey(o.sessionId, o.source)));
+  for (const key of reviewUnsent.keys()) if (!mounted.has(key)) reviewUnsent.delete(key);
+}
+
+function startReview(opts) {
+  const { contentEl, panelEl, hostEl, source, frame, context, onComment, onSent, sessionId } = opts;
+  if (!sessionId) return;
+  const ctl = new AbortController();
+  const { signal } = ctl;
+  const key = reviewKey(sessionId, source);
+  activeReview = {
+    opts,
+    contentEl,
+    panelEl,
+    hostEl,
+    source,
+    frame,
+    context,
+    onComment,
+    onSent,
+    sessionId,
+    key,
+    ctl,
+    hot: null,
+  };
+  if (!frame) {
+    contentEl.addEventListener('mouseup', () => setTimeout(offerReviewComment, 0), { signal });
+    contentEl.addEventListener('mousemove', (e) => queueReviewHover(e.clientX, e.clientY), { signal });
+  }
+  window.addEventListener('message', onReviewFrameMessage, { signal });
+  document.addEventListener('mousedown', closeReviewPop, { signal });
+  document.addEventListener('keydown', onReviewOfferKey, { capture: true, signal });
+  document.addEventListener('scroll', closeReviewOffer, { capture: true, signal });
+  panelEl.addEventListener('click', onReviewPanelClick, { signal });
+  panelEl.addEventListener('mouseover', onReviewPanelHover, { signal });
+  panelEl.addEventListener('dblclick', onReviewPanelDblClick, { signal });
+  panelEl.addEventListener('keydown', onReviewPanelKey, { signal });
+  panelEl.addEventListener('input', onReviewPanelInput, { signal });
+  panelEl.addEventListener('mouseleave', () => setReviewHot(null), { signal });
+  if (!frame) anchorReviewItems(contentEl);
+  renderReviewPanel();
+  restoreUnsentReview();
+}
+
+function stopReview() {
+  if (activeReview) keepUnsentReview();
+  closeReviewPop();
+  if (!activeReview) return;
+  const { ctl, panelEl, hostEl } = activeReview;
+  ctl.abort();
+  for (const c of reviewItems()) {
+    c.range = null;
+    c.frameId = 0;
+  }
+  panelEl.replaceChildren();
+  panelEl.hidden = true;
+  hostEl?.classList.remove('has-review');
+  activeReview = null;
+  reviewHighlight?.clear();
+  reviewHotHighlight?.clear();
+  syncReviewSendClaims();
+}
+
+// The three helpers below are also handed to `reviewBridge` as source text, so each must use
+// only its arguments and the globals of whichever document it runs in.
+function reviewTextBefore(root, container, offset) {
+  const before = root.ownerDocument.createRange();
+  before.setStart(root, 0);
+  before.setEnd(container, offset);
+  return before.toString();
+}
+
+function reviewHeadingBefore(root, node) {
+  let found = null;
+  for (const h of root.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+    if (h.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING || h.contains(node)) found = h;
+    else break;
+  }
+  return found?.textContent.trim().slice(0, 200) || undefined;
+}
+
+function reviewRangeAt(x, y, entries) {
+  const at = document.caretPositionFromPoint?.(x, y);
+  if (!at?.offsetNode) return null;
+  for (const [key, range] of entries) if (range?.isPointInRange(at.offsetNode, at.offset)) return key;
+  return null;
+}
+
+function queueReviewHover(x, y) {
+  reviewHoverAt = [x, y];
+  if (reviewHoverFrame) return;
+  reviewHoverFrame = requestAnimationFrame(() => {
+    reviewHoverFrame = 0;
+    const marked = reviewItems().filter((c) => c.range);
+    if (!marked.length) return;
+    const [hx, hy] = reviewHoverAt;
+    setReviewHot(
+      reviewRangeAt(
+        hx,
+        hy,
+        marked.map((c) => [c, c.range]),
+      ),
+      true,
+    );
+  });
+}
+
+function setReviewHot(c, fromText) {
+  if (!activeReview || activeReview.hot === c) return;
+  activeReview.hot = c;
+  reviewHotHighlight?.clear();
+  if (c?.range) reviewHotHighlight?.add(c.range);
+  if (activeReview.frame) postToReviewFrame('hot', c?.frameId || 0);
+  const { panelEl } = activeReview;
+  panelEl.querySelector('.review-card.hot')?.classList.remove('hot');
+  const i = reviewItems().indexOf(c);
+  const card = i >= 0 ? panelEl.querySelector(`.review-card[data-i="${i}"]`) : null;
+  card?.classList.add('hot');
+  if (fromText) card?.scrollIntoView({ block: 'nearest' });
+}
+
+function reviewSelection() {
+  const sel = window.getSelection();
+  if (!activeReview || !sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  if (!activeReview.contentEl.contains(range.commonAncestorContainer)) return null;
+  const quote = sel.toString().trim();
+  if (!quote) return null;
+  return { quote, range: range.cloneRange(), rect: range.getBoundingClientRect() };
+}
+
+// A re-render replaces the nodes a range points at, so a comment keeps its text and the
+// 32 chars around it, and is found again after a refresh. Port of scratchpad's cmtFindAnchor.
+function reviewAnchorOf(root, range) {
+  const before = reviewTextBefore(root, range.startContainer, range.startOffset);
+  const after = root.ownerDocument.createRange();
+  after.selectNodeContents(root);
+  after.setStart(range.endContainer, range.endOffset);
+  return {
+    exact: range.toString(),
+    pos: before.length,
+    prefix: before.slice(-32),
+    suffix: after.toString().slice(0, 32),
+  };
+}
+
+// The best match scores the most prefix and suffix chars that match outward from the quote;
+// a tie goes to the one nearest the old offset. -1 when the quote is gone.
+function reviewQuoteAt(text, { exact, pos, prefix, suffix }) {
+  let best = -1;
+  let bestScore = -1;
+  if (!exact) return best;
+  for (let at = text.indexOf(exact); at !== -1; at = text.indexOf(exact, at + 1)) {
+    let score = 0;
+    for (let k = 1; k <= prefix.length && text[at - k] === prefix[prefix.length - k]; k++) score++;
+    for (let k = 0; k < suffix.length && text[at + exact.length + k] === suffix[k]; k++) score++;
+    if (score > bestScore || (score === bestScore && Math.abs(at - pos) < Math.abs(best - pos))) {
+      best = at;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function reviewTextIndex(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let text = '';
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    nodes.push({ n, start: text.length });
+    text += n.nodeValue;
+  }
+  return { nodes, text };
+}
+
+function reviewFindAnchor({ nodes, text }, anchor) {
+  const at = reviewQuoteAt(text, anchor);
+  if (at < 0) return null;
+  const end = at + anchor.exact.length;
+  const first = nodes.findLast((x) => x.start <= at);
+  const last = nodes.find((x) => end <= x.start + x.n.nodeValue.length);
+  const range = document.createRange();
+  range.setStart(first.n, at - first.start);
+  range.setEnd(last.n, end - last.start);
+  return { range, at };
+}
+
+function anchorReviewItems(root) {
+  const items = reviewItems().filter((c) => c.anchor);
+  if (!items.length) return;
+  const index = reviewTextIndex(root);
+  for (const c of items) {
+    const found = reviewFindAnchor(index, c.anchor);
+    c.range = found?.range || null;
+    if (!found) continue;
+    c.pos = c.anchor.pos = found.at;
+    reviewHighlight?.add(c.range);
+  }
+}
+
+function keepUnsentReview() {
+  const { key, picked, editing } = activeReview;
+  const text = reviewPopMode === 'editor' ? reviewPopEl().querySelector('textarea').value : '';
+  if (text.trim()) reviewUnsent.set(key, { picked, text });
+  else if (editing) reviewUnsent.set(key, { editing });
+}
+
+function restoreUnsentReview() {
+  const u = reviewUnsent.get(activeReview.key);
+  if (!u) return;
+  reviewUnsent.delete(activeReview.key);
+  if (u.editing) {
+    if (reviewItems().includes(u.editing.c)) startReviewEdit(u.editing.c, u.editing.draft);
+    return;
+  }
+  const { anchor } = u.picked;
+  const range = anchor && reviewFindAnchor(reviewTextIndex(activeReview.contentEl), anchor)?.range;
+  if (range) return openReviewEditor({ ...u.picked, range, rect: range.getBoundingClientRect() }, u.text);
+  const why = anchor ? 'The text you commented on changed' : 'The page reloaded';
+  showToast(`${why}, so the comment was not added`, 'info', {
+    label: 'Copy',
+    onClick: () => copyText(u.text, 'the comment'),
+  });
+}
+
+function onReviewFrameMessage(e) {
+  const frameWin = activeReview?.frame?.contentWindow;
+  const type =
+    typeof e.data?.type === 'string' && e.data.type.startsWith(REVIEW_MSG) && e.data.type.slice(REVIEW_MSG.length);
+  if (!frameWin || e.source !== frameWin || !type) return;
+  if (type === 'clear') return closeReviewOffer();
+  if (type === 'hover') {
+    return setReviewHot((e.data.id && reviewItems().find((c) => c.frameId === e.data.id)) || null, true);
+  }
+  if (type !== 'select' || typeof e.data.quote !== 'string' || !e.data.quote.trim()) return;
+  const box = activeReview.frame.getBoundingClientRect();
+  const r = e.data.rect || {};
+  const rect = { left: box.left + (r.left || 0), top: box.top + (r.top || 0), bottom: box.top + (r.bottom || 0) };
+  const c = e.data.context || {};
+  const context = { heading: c.heading, element: c.element, selector: c.selector };
+  const pos = Number.isFinite(e.data.pos) ? e.data.pos : 0;
+  showReviewOffer({ quote: e.data.quote.trim(), context, pos, rect, inFrame: true });
+}
+
+function postToReviewFrame(type, id) {
+  activeReview?.frame?.contentWindow?.postMessage({ type: REVIEW_MSG + type, id }, '*');
+}
+
+// Runs inside the preview iframe as source text, so it must not close over anything outside
+// its own body and arguments.
+function reviewBridge(textBefore, headingBefore, rangeAt, comboOf, fieldSelector) {
+  const P = 'cck-review:';
+  const marks = new Map();
+  let pending = null;
+  let hotId = 0;
+  let hoverAt = null;
+  let hoverFrame = 0;
+  const hl = typeof Highlight === 'function' && CSS.highlights ? new Highlight() : null;
+  const hot = hl ? new Highlight() : null;
+  const pend = hl ? new Highlight() : null;
+  if (hl) {
+    CSS.highlights.set('cck-review', hl);
+    CSS.highlights.set('cck-review-hot', hot);
+    CSS.highlights.set('cck-review-pending', pend);
+    const style = document.createElement('style');
+    style.textContent =
+      '::highlight(cck-review){background-color:rgba(240,180,41,.35)}::highlight(cck-review-hot),::highlight(cck-review-pending){background-color:rgba(240,180,41,.7)}';
+    (document.head || document.documentElement).append(style);
+  }
+  const send = (msg) => parent.postMessage({ ...msg, type: P + msg.type }, '*');
+  const fields = (form, submitter) => {
+    const out = {};
+    for (const [k, v] of new FormData(form, submitter)) {
+      if (typeof v !== 'string') continue;
+      out[k] = k in out ? [].concat(out[k], v) : v;
+    }
+    return out;
+  };
+  const labelOf = (el, fallback) => (el?.textContent || el?.value || '').trim().slice(0, 200) || fallback;
+  addEventListener('click', (e) => {
+    const b = e.target.closest?.('[data-cck-action]');
+    if (!b || (b.form?.matches('[data-cck-submit]') && b.type === 'submit')) return;
+    e.preventDefault();
+    const action = b.dataset.cckAction;
+    send({ type: 'action', action, label: labelOf(b, action), data: b.form ? fields(b.form) : {} });
+  });
+  // The sandbox allows forms so validation runs. Every submit stops here, so a page still cannot
+  // navigate its frame with a form: a show card's form-action 'none' does not stop a GET to about:srcdoc.
+  addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = e.target.closest?.('form[data-cck-submit]');
+    if (!f) return;
+    const action = f.dataset.cckSubmit;
+    send({ type: 'action', action, label: labelOf(e.submitter, action), data: fields(f, e.submitter) });
+  });
+  const describe = (node) => {
+    const el = node.nodeType === 1 ? node : node.parentElement;
+    if (!el) return {};
+    const cls = [...el.classList].slice(0, 3);
+    const attrs = [el.tagName.toLowerCase()];
+    if (el.id) attrs.push(`id=${JSON.stringify(el.id)}`);
+    if (cls.length) attrs.push(`class=${JSON.stringify(cls.join(' '))}`);
+    const element = `<${attrs.join(' ')}>`;
+    const parts = [];
+    for (let n = el; n && n !== document.body && n.nodeType === 1; n = n.parentElement) {
+      if (n.id) {
+        parts.unshift(`#${n.id}`);
+        break;
+      }
+      const tag = n.tagName.toLowerCase();
+      const same = n.parentElement ? [...n.parentElement.children].filter((s) => s.tagName === n.tagName) : [];
+      parts.unshift(same.length > 1 ? `${tag}:nth-of-type(${same.indexOf(n) + 1})` : tag);
+    }
+    return { element, selector: parts.join(' > '), heading: headingBefore(document, el) };
+  };
+  document.addEventListener('mouseup', () =>
+    setTimeout(() => {
+      const sel = getSelection();
+      const quote = sel && !sel.isCollapsed && sel.rangeCount ? sel.toString().trim() : '';
+      if (!quote) {
+        pending = null;
+        return;
+      }
+      pending = sel.getRangeAt(0).cloneRange();
+      const r = pending.getBoundingClientRect();
+      send({
+        type: 'select',
+        quote,
+        pos: textBefore(document.body, pending.startContainer, pending.startOffset).length,
+        rect: { left: r.left, top: r.top, bottom: r.bottom },
+        context: describe(pending.commonAncestorContainer),
+      });
+    }, 0),
+  );
+  document.addEventListener('mousemove', (e) => {
+    if (!marks.size && !hotId) return;
+    hoverAt = [e.clientX, e.clientY];
+    if (hoverFrame) return;
+    hoverFrame = requestAnimationFrame(() => {
+      hoverFrame = 0;
+      const id = rangeAt(hoverAt[0], hoverAt[1], marks) || 0;
+      if (id !== hotId) {
+        hotId = id;
+        send({ type: 'hover', id });
+      }
+    });
+  });
+  const clear = () => {
+    if (pending) send({ type: 'clear' });
+  };
+  document.addEventListener('mousedown', clear);
+  document.addEventListener('scroll', clear, true);
+  // The sandbox has no allow-top-navigation and the board never sees events in here, so web links
+  // and the keys the board claims go up as messages. A srcdoc document resolves relative hrefs,
+  // `#id` too, against the board's URL, and loading that here ends on an error page because the
+  // board refuses framing; a hash goes to location.hash instead, which stays on about:srcdoc.
+  const openLink = (e) => {
+    if (e.defaultPrevented || (e.type === 'auxclick' && e.button !== 1)) return;
+    const a = e.target.closest?.('a[href]');
+    const href = a?.getAttribute('href');
+    if (!href) return;
+    if (/^https?:\/\//i.test(href)) {
+      e.preventDefault();
+      send({ type: 'link', href: a.href });
+      return;
+    }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+    e.preventDefault();
+    if (href.startsWith('#') && e.type === 'click') location.hash = href;
+  };
+  document.addEventListener('click', openLink);
+  document.addEventListener('auxclick', openLink);
+  // The terminal frame's claim format (terminal-frame.js keySigs).
+  const keySigs = (e) => {
+    const mods = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'meta']
+      .filter(Boolean)
+      .join('+');
+    return [
+      e.code && !e.getModifierState?.('AltGraph') && `${mods}|c:${e.code}`,
+      typeof e.key === 'string' && `${mods}|k:${e.key.toLowerCase()}`,
+    ].filter(Boolean);
+  };
+  let claims = new Set();
+  let forward = new Set();
+  document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.target.closest?.(fieldSelector)) return;
+    const sigs = keySigs(e);
+    const offerKey = pending && sigs.includes('|k:c');
+    if (!offerKey && !forward.has(comboOf(e)) && !sigs.some((s) => claims.has(s))) return;
+    e.preventDefault();
+    send({ type: 'key', key: e.key, code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
+  });
+  let scrollTimer = 0;
+  addEventListener('scroll', () => {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => send({ type: 'scroll', x: scrollX, y: scrollY }), 150);
+  });
+  addEventListener('message', (e) => {
+    if (e.source !== parent || typeof e.data?.type !== 'string' || !e.data.type.startsWith(P)) return;
+    const type = e.data.type.slice(P.length);
+    const range = marks.get(e.data.id);
+    if (type === 'claims') {
+      claims = new Set(e.data.keys.map((c) => keySigs(c)[0]));
+      forward = new Set(e.data.forward);
+    } else if (type === 'mark' && pending) {
+      marks.set(e.data.id, pending);
+      hl?.add(pending);
+      pending = null;
+      getSelection().removeAllRanges();
+    } else if (type === 'pend' && pending) {
+      pend?.add(pending);
+    } else if (type === 'unpend') {
+      pend?.clear();
+    } else if (type === 'hot') {
+      hot?.clear();
+      if (range) hot?.add(range);
+    } else if (type === 'unmark' && range) {
+      hl?.delete(range);
+      hot?.delete(range);
+      marks.delete(e.data.id);
+    } else if (type === 'reveal' && range) {
+      range.startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } else if (type === 'scrollTo') {
+      requestAnimationFrame(() => scrollTo(e.data.x, e.data.y));
+    }
+  });
+}
+
+const TEXT_FIELD_SELECTOR =
+  'input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=reset], [type=range], [type=color], [type=file], [type=image]), textarea, select, [contenteditable]';
+
+const REVIEW_BRIDGE_TAG = `<script>(${reviewBridge})(${reviewTextBefore}, ${reviewHeadingBefore}, ${reviewRangeAt}, ${ClaudeHub.comboOf}, ${JSON.stringify(TEXT_FIELD_SELECTOR)});</script>`;
+
+// Frames from createPreviewFrame, which carry the bridge. A URL pane is another site and must
+// not drive the board.
+const bridgedFrames = new WeakSet();
+const paneFrameScroll = new WeakMap();
+const hiddenPaneFrames = new WeakSet();
+
+// Chrome resets a frame's scroll to 0 while the frame is display:none and does not give it back.
+function restorePaneFrameScroll(view, shown) {
+  const frame = view.querySelector(':scope > iframe[srcdoc]');
+  if (!frame) return;
+  if (!shown) {
+    hiddenPaneFrames.add(frame);
+  } else if (hiddenPaneFrames.delete(frame)) {
+    const s = paneFrameScroll.get(frame);
+    if (s) postPaneScroll(frame, s);
+  }
+}
+
+function postPaneScroll(frame, { x, y }) {
+  frame.contentWindow?.postMessage({ type: `${REVIEW_MSG}scrollTo`, x: Number(x) || 0, y: Number(y) || 0 }, '*');
+}
+
+function bridgedFrameEls() {
+  return [...document.querySelectorAll('iframe[srcdoc]')].filter((f) => bridgedFrames.has(f));
+}
+
+// A previewed page always hands back the zoom keys, so Ctrl +/-/0 scales it like a markdown
+// preview instead of zooming the whole board. A bridged frame is on screen only in a zoomable view.
+const ZOOM_CLAIMS = ['ctrlKey', 'metaKey'].flatMap((mod) =>
+  [false, true].flatMap((shiftKey) =>
+    Object.keys(ZOOM_KEYS).map((k) =>
+      k.length === 1
+        ? { [mod]: true, shiftKey, key: k, code: '' }
+        : { [mod]: true, shiftKey, key: 'Unidentified', code: k },
+    ),
+  ),
+);
+
+// The board keys a pane gets before the board's inPane return, so they work while a previewed page
+// has focus; a new key there needs a row here. Matched by key where the board matches by key, so
+// they follow the keyboard layout, and by code where it matches by code. A page that handles one
+// first keeps it, and text fields keep every key.
+const PANE_CLAIMS = [
+  ...['\\', '[', ']', 'ContextMenu', 'Escape'].map((key) => ({ key, code: '' })),
+  ...['|', '{', '}', 'F10', '$'].map((key) => ({ shiftKey: true, key, code: '' })),
+  { key: 'Unidentified', code: 'KeyM' },
+  { ctrlKey: true, key: 'm', code: '' },
+  ...['BracketLeft', 'BracketRight', 'KeyW'].map((code) => ({ altKey: true, key: 'Unidentified', code })),
+  ...['KeyL', 'KeyM', 'KeyP', 'KeyS', 'KeyZ'].map((code) => ({ shiftKey: true, key: 'Unidentified', code })),
+  ...'123456789'.split('').map((n) => ({ ctrlKey: true, altKey: true, key: 'Unidentified', code: `Digit${n}` })),
+];
+
+// Ctrl+D and Alt+Enter act on the show card (showCardKey); other pages keep them. Alt+W and Esc are in PANE_CLAIMS.
+const SHOW_CLAIMS = [
+  ...['ctrlKey', 'metaKey'].map((mod) => ({ [mod]: true, key: 'd', code: '' })),
+  { altKey: true, key: 'Enter', code: '' },
+];
+
+// Claimed only while comments wait, so a previewed page keeps Ctrl+Enter otherwise.
+const REVIEW_SEND_CLAIMS = ['ctrlKey', 'metaKey'].map((mod) => ({ [mod]: true, key: 'Enter', code: '' }));
+
+function sendBridgeClaims(frames, claims) {
+  for (const f of frames) f.contentWindow?.postMessage({ type: `${REVIEW_MSG}claims`, ...claims }, '*');
+}
+
+window.addEventListener('message', (e) => {
+  const type =
+    typeof e.data?.type === 'string' && e.data.type.startsWith(REVIEW_MSG) && e.data.type.slice(REVIEW_MSG.length);
+  if (type !== 'link' && type !== 'key' && type !== 'scroll' && type !== 'action') return;
+  const frame = bridgedFrameEls().find((f) => f.contentWindow === e.source);
+  if (!frame) return;
+  if (type === 'action') sendPreviewAction(frame, e.data);
+  else if (type === 'scroll') paneFrameScroll.set(frame, { x: e.data.x, y: e.data.y });
+  else if (type === 'key') replayKey(e.data, frame);
+  else {
+    const url = linkUrl(e.data.href);
+    if (url) hub.openExternal(url);
+  }
+});
+
+function reviewPopEl() {
+  let el = document.getElementById('review-pop');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'review-pop';
+    el.addEventListener('mousedown', (e) => e.stopPropagation());
+    el.addEventListener('click', (e) => e.stopPropagation());
+    document.body.append(el);
+  }
+  return el;
+}
+
+function placeReviewPop(el, r) {
+  el.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - el.offsetWidth - 8))}px`;
+  const above = r.top - el.offsetHeight - 6;
+  el.style.top = `${above >= 8 ? above : r.bottom + 6}px`;
+}
+
+function closeReviewPop() {
+  if (!reviewPopMode) return;
+  if (reviewPopMode === 'editor') {
+    reviewPendingHighlight?.clear();
+    if (activeReview?.frame) postToReviewFrame('unpend');
+  }
+  reviewPopMode = null;
+  const el = reviewPopEl();
+  el.className = '';
+  el.replaceChildren();
+}
+
+function closeReviewOffer() {
+  if (reviewPopMode === 'offer') closeReviewPop();
+}
+
+function offerReviewComment() {
+  const picked = reviewSelection();
+  if (picked) showReviewOffer(picked);
+  else if (reviewPopMode !== 'editor') closeReviewPop();
+}
+
+function showReviewOffer(picked) {
+  const el = reviewPopEl();
+  reviewPopMode = 'offer';
+  el.className = 'visible offer';
+  el.innerHTML = `<button type="button" class="review-offer-btn" title="Comment (C)">${ICON_CHAT}Comment<kbd>C</kbd></button>`;
+  el.firstElementChild.addEventListener('click', () => openReviewEditor(picked));
+  placeReviewPop(el, picked.rect);
+}
+
+function onReviewOfferKey(e) {
+  if (isReviewSendKey(e)) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    sendReview();
+    return;
+  }
+  if (reviewPopMode !== 'offer' || !matchKey(e, 'c', 'C')) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  reviewPopEl().querySelector('.review-offer-btn').click();
+}
+
+function isReviewSendKey(e) {
+  if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return false;
+  if (reviewPopMode === 'editor' || !reviewItems().length) return false;
+  // A pane's review stays live under a modal, where Ctrl+Enter belongs to the modal.
+  if (activeReview.opts === reviewBase && document.querySelector('.modal-overlay.visible')) return false;
+  return !e.target.closest?.(TEXT_FIELD_SELECTOR);
+}
+
+function openReviewEditor(picked, text = '') {
+  const el = reviewPopEl();
+  reviewPopMode = 'editor';
+  el.className = 'visible editor';
+  if (picked.range) {
+    picked.anchor = reviewAnchorOf(activeReview.contentEl, picked.range);
+    reviewPendingHighlight?.add(picked.range);
+  } else if (picked.inFrame) postToReviewFrame('pend');
+  activeReview.picked = picked;
+  el.innerHTML = `<textarea rows="3" placeholder="Comment (Ctrl+Enter to add)"></textarea>
+    <div class="review-pop-actions"><button type="button" data-act="cancel">Cancel</button><button type="button" data-act="add" class="primary">Add</button></div>`;
+  const ta = el.querySelector('textarea');
+  ta.value = text;
+  const add = (comment) => addReviewComment(picked, comment);
+  ta.addEventListener('keydown', (e) => onReviewEditorKey(e, add, closeReviewPop));
+  el.querySelector('[data-act="cancel"]').addEventListener('click', closeReviewPop);
+  el.querySelector('[data-act="add"]').addEventListener('click', () => {
+    const comment = reviewEditorText(ta);
+    if (comment) add(comment);
+  });
+  placeReviewPop(el, picked.rect);
+  ta.focus();
+}
+
+function reviewEditorText(ta) {
+  const text = ta.value.trim();
+  if (!text) ta.focus();
+  return text;
+}
+
+function onReviewEditorKey(e, save, cancel) {
+  e.stopPropagation();
+  if (e.key === 'Escape') cancel();
+  else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    const text = reviewEditorText(e.target);
+    if (text) save(text);
+  }
+}
+
+function addReviewComment(picked, comment) {
+  if (!activeReview) return;
+  const { key, contentEl } = activeReview;
+  let item;
+  if (picked.inFrame) {
+    item = {
+      quote: picked.quote,
+      comment,
+      context: picked.context,
+      pos: picked.pos,
+      range: null,
+      frameId: ++reviewMarkSeq,
+    };
+    postToReviewFrame('mark', item.frameId);
+  } else {
+    const { range } = picked;
+    const context = {
+      heading: reviewHeadingBefore(contentEl, range.startContainer),
+      ...activeReview.context?.(range),
+    };
+    const { anchor } = picked;
+    item = { quote: picked.quote, comment, context, pos: anchor.pos, anchor, range, frameId: 0 };
+    reviewHighlight?.add(range);
+    window.getSelection()?.removeAllRanges();
+  }
+  if (!reviewDrafts.has(key)) reviewDrafts.set(key, []);
+  const items = reviewDrafts.get(key);
+  items.push(item);
+  items.sort((a, b) => a.pos - b.pos);
+  closeReviewPop();
+  renderReviewPanel();
+  activeReview.onComment?.();
+}
+
+function unmarkReviewItem(c) {
+  if (c.range) reviewHighlight?.delete(c.range);
+  else if (c.frameId) postToReviewFrame('unmark', c.frameId);
+}
+
+function revealReviewItem(c) {
+  if (c.range) c.range.startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  else if (c.frameId) postToReviewFrame('reveal', c.frameId);
+}
+
+function removeReviewComment(c) {
+  const items = reviewItems();
+  const i = items.indexOf(c);
+  if (i < 0) return;
+  items.splice(i, 1);
+  unmarkReviewItem(c);
+  if (activeReview.hot === c) setReviewHot(null);
+  if (activeReview.editing?.c === c) activeReview.editing = null;
+  if (!items.length) reviewDrafts.delete(activeReview.key);
+  renderReviewPanel();
+}
+
+function clearReviewDrafts(key = activeReview?.key) {
+  for (const c of reviewDrafts.get(key) || []) unmarkReviewItem(c);
+  reviewDrafts.delete(key);
+  if (activeReview) activeReview.editing = null;
+  setReviewHot(null);
+  renderReviewPanel();
+}
+
+function onReviewPanelClick(e) {
+  const act = e.target.closest('[data-act]')?.dataset.act;
+  if (act === 'send') return sendReview();
+  if (act === 'discard') return clearReviewDrafts();
+  const c = reviewCardItem(e.target);
+  if (!c || e.target.closest('.review-card-edit')) return;
+  if (e.target.closest('.review-remove')) removeReviewComment(c);
+  else if (e.target.closest('.review-edit')) startReviewEdit(c);
+  else revealReviewItem(c);
+}
+
+function reviewCardItem(el) {
+  const card = el.closest('.review-card');
+  return (card && reviewItems()[Number(card.dataset.i)]) || null;
+}
+
+function onReviewPanelDblClick(e) {
+  const c = reviewCardItem(e.target);
+  if (c && e.target.closest('.review-card-comment')) startReviewEdit(c);
+}
+
+// `draft` keeps the typed text when the panel renders again during the edit.
+function startReviewEdit(c, draft = c.comment) {
+  activeReview.editing = { c, draft };
+  renderReviewPanel();
+  const ta = activeReview.panelEl.querySelector('.review-card-edit');
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
+function endReviewEdit() {
+  activeReview.editing = null;
+  renderReviewPanel();
+}
+
+function saveReviewEdit(comment) {
+  activeReview.editing.c.comment = comment;
+  endReviewEdit();
+}
+
+function onReviewPanelKey(e) {
+  if (e.target.matches('.review-card-edit')) onReviewEditorKey(e, saveReviewEdit, endReviewEdit);
+}
+
+function onReviewPanelInput(e) {
+  if (e.target.matches('.review-card-edit')) activeReview.editing.draft = e.target.value;
+}
+
+function onReviewPanelHover(e) {
+  setReviewHot(reviewCardItem(e.target));
+}
+
+let reviewSendClaimed = false;
+
+function syncReviewSendClaims() {
+  const want = reviewItems().length > 0;
+  if (want === reviewSendClaimed) return;
+  reviewSendClaimed = want;
+  pushTerminalClaims();
+}
+
+function renderReviewPanel() {
+  syncReviewSendClaims();
+  if (!activeReview) return;
+  const { panelEl, hostEl } = activeReview;
+  const items = reviewItems();
+  panelEl.hidden = !items.length;
+  hostEl?.classList.toggle('has-review', items.length > 0);
+  if (!items.length) return panelEl.replaceChildren();
+  panelEl.innerHTML = `<div class="review-panel-head">
+      <span>${items.length} comment${items.length > 1 ? 's' : ''}</span>
+      <button type="button" data-act="discard" class="review-discard">Discard</button>
+      <button type="button" data-act="send" class="primary">Send</button>
+    </div>
+    <ol class="review-panel-list">${items
+      .map((c, i) => {
+        const body =
+          c === activeReview.editing?.c
+            ? `<textarea class="review-card-edit" rows="3" aria-label="Edit comment" placeholder="Ctrl+Enter to save, Esc to cancel">${escapeHtml(activeReview.editing.draft)}</textarea>`
+            : `<div class="review-card-comment" title="Double-click to edit">${escapeHtml(c.comment)}</div>`;
+        return `<li class="review-card${c === activeReview.hot ? ' hot' : ''}" data-i="${i}" title="Show in the document">
+        <button type="button" class="review-edit" title="Edit" aria-label="Edit">${DETAIL_EDIT_SVG}</button>
+        <button type="button" class="review-remove" title="Remove" aria-label="Remove">×</button>
+        <div class="review-card-quote">${c.anchor && !c.range ? '<span class="review-orphan" title="The file changed and this text is no longer in it">not found</span>' : ''}${escapeHtml(c.quote.slice(0, 300))}</div>
+        ${body}</li>`;
+      })
+      .join('')}</ol>`;
+}
+
+async function toastDelivery({ delivered, markdown }, noun) {
+  if (delivered === 'doorbell') return showToast('Queued for the session', 'success');
+  if (delivered === 'terminal') return showToast('Pasted into the terminal: press Enter there to send', 'info');
+  const copy = async () => {
+    const copied = await navigator.clipboard.writeText(markdown).then(
+      () => true,
+      () => false,
+    );
+    showToast(
+      copied ? `Copied the ${noun}. Paste it into the session.` : `Failed to copy the ${noun}`,
+      'info',
+      { label: 'Copy again', onClick: copy },
+      `Sessions get ${noun}s directly when the cck plugin runs there and board events are on.`,
+    );
+  };
+  await copy();
+}
+
+async function sendReview() {
+  if (!activeReview) return;
+  const { sessionId, source, key, onSent } = activeReview;
+  const items = reviewItems();
+  if (!items.length) return;
+  try {
+    const res = await terminalFetch(apiPath`/api/sessions/${sessionId}/review`, 'POST', {
+      source,
+      comments: items.map(({ quote, comment, context }) => ({ quote, comment, ...context })),
+    });
+    const data = await res.json();
+    if (!res.ok) return showToast(data.error || 'Review failed', 'error');
+    await toastDelivery(data, 'review');
+    clearReviewDrafts(key);
+    if (activeReview?.key === key) onSent?.();
+  } catch {
+    showToast('Failed to send the review', 'error');
+  }
+}
+
+// A page script can post an action without a click, so the board sends it only with transient
+// user activation, which a click in the frame gives to the board too.
+const ACTION_REPEAT_MS = 1000;
+let lastAction = null;
+
+function reviewOptsOfFrame(frame) {
+  return (
+    [...reviewStack, reviewBase, showState.review].find((o) => o?.frame === frame) ||
+    paneReviews.get(frame.parentElement) ||
+    null
+  );
+}
+
+async function sendPreviewAction(frame, msg) {
+  if (!navigator.userActivation?.isActive) return;
+  if (frame === askState.frame) return answerAsk({ action: msg.action, label: msg.label, fields: msg.data });
+  const opts = reviewOptsOfFrame(frame);
+  if (!opts?.sessionId) return;
+  const key = `${msg.action}\n${JSON.stringify(msg.data)}`;
+  const now = Date.now();
+  if (lastAction?.frame === frame && lastAction.key === key && now - lastAction.at < ACTION_REPEAT_MS) return;
+  lastAction = { frame, key, at: now };
+  try {
+    const res = await terminalFetch(apiPath`/api/sessions/${opts.sessionId}/action`, 'POST', {
+      source: opts.source,
+      action: msg.action,
+      label: msg.label,
+      data: msg.data,
+    });
+    const out = await res.json();
+    if (!res.ok) return showToast(out.error || 'Send failed', 'error');
+    await toastDelivery(out, 'answer');
+  } catch {
+    showToast('Failed to send the answer', 'error');
+  }
+}
+//#endregion
+
 //#region MARKDOWN_PREVIEW
 const PREVIEW_STORAGE_PREFIX = 'preview-paths-';
 let currentPreviewPath = null;
+// The session a CLI preview was sent for, which need not be the one on screen.
+let previewSessionId = null;
+let previewFromTerminal = false;
+
+function readStoredList(key) {
+  const arr = store.readJson(key);
+  return Array.isArray(arr) ? arr : [];
+}
 
 function getSessionPreviewPaths(sessionId) {
-  if (!sessionId) return [];
-  try {
-    const raw = localStorage.getItem(PREVIEW_STORAGE_PREFIX + sessionId);
-    const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
+  return sessionId ? readStoredList(PREVIEW_STORAGE_PREFIX + sessionId) : [];
+}
+
+// Windows reaches one file as both `C:\a\b` and `C:/a/b`, and the two sides of a link
+// disagree by construction: a pad path is built with `path.join`, a hand-typed one is
+// stored as it was typed. Rows are compared through here so the same file cannot be
+// listed twice — and lists written before this existed heal on the next link.
+function canonicalPath(filePath) {
+  const slashed = String(filePath).replace(/\\/g, '/');
+  return /^[A-Za-z]:/.test(slashed) ? slashed.toLowerCase() : slashed;
 }
 
 function addSessionPreviewPath(sessionId, filePath) {
   if (!sessionId || !filePath) return;
-  const paths = getSessionPreviewPaths(sessionId).filter((p) => p !== filePath);
+  const key = canonicalPath(filePath);
+  const paths = getSessionPreviewPaths(sessionId).filter((p) => canonicalPath(p) !== key);
   paths.unshift(filePath);
-  localStorage.setItem(PREVIEW_STORAGE_PREFIX + sessionId, JSON.stringify(paths.slice(0, 20)));
+  saveSessionPreviewPaths(sessionId, paths);
 }
 
 function removeSessionPreviewPath(sessionId, filePath) {
   if (!sessionId) return;
-  const paths = getSessionPreviewPaths(sessionId).filter((p) => p !== filePath);
-  if (paths.length) localStorage.setItem(PREVIEW_STORAGE_PREFIX + sessionId, JSON.stringify(paths));
-  else localStorage.removeItem(PREVIEW_STORAGE_PREFIX + sessionId);
+  const key = canonicalPath(filePath);
+  saveSessionPreviewPaths(
+    sessionId,
+    getSessionPreviewPaths(sessionId).filter((p) => canonicalPath(p) !== key),
+  );
+}
+
+function saveSessionPreviewPaths(sessionId, paths) {
+  if (paths.length) store.writeJson(PREVIEW_STORAGE_PREFIX + sessionId, paths.slice(0, MAX_LINKED_DOCS));
+  else store.removeItem(PREVIEW_STORAGE_PREFIX + sessionId);
+}
+
+// Every surface that shows linked docs — info modal, session card badge, preview
+// toolbar toggle, storage manager — refreshes from one place, so a new mutator
+// can never forget one of them.
+// The one mutator: link/unlink plus the refresh, so no caller can do half of it.
+function setSessionDocLink(sessionId, filePath, unlink) {
+  if (!sessionId || !filePath) return;
+  if (unlink) removeSessionPreviewPath(sessionId, filePath);
+  else addSessionPreviewPath(sessionId, filePath);
+  afterLinkedDocsChanged(sessionId);
+}
+
+// Links sent while no tab was open reach the browser only through the server copy.
+async function mergeServerLinkedDocs() {
+  const bySession = await getJson('/api/document/links', {});
+  for (const [sessionId, paths] of Object.entries(bySession || {})) {
+    const local = getSessionPreviewPaths(sessionId);
+    const known = new Set(local.map(canonicalPath));
+    const missing = (paths || []).filter((p) => !known.has(canonicalPath(p)));
+    if (!missing.length) continue;
+    saveSessionPreviewPaths(sessionId, [...missing, ...local]);
+    afterLinkedDocsChanged(sessionId);
+  }
+}
+
+function forgetServerLinkedDoc(sessionId, filePath) {
+  api(apiPath`/api/document/links/${sessionId}`, { method: 'DELETE', query: { path: filePath || null } }).catch(
+    () => {},
+  );
+}
+
+function afterLinkedDocsChanged(sessionId) {
+  if (_infoModalSessionId === sessionId) refreshInfoModalLinkedDocs();
+  renderSessions();
+  updatePreviewLinkBtn();
+  _renderStorageTab();
+  _updateStorageTotal();
 }
 
 function splitFrontmatter(text) {
@@ -4176,123 +9202,267 @@ function renderFrontmatterBlock(fm) {
   return `<details class="preview-fm" open><summary>frontmatter</summary><div class="fm-grid">${rows}</div></details>`;
 }
 
-function openPreviewModal(filePath, content) {
-  currentPreviewPath = filePath;
-  document.getElementById('preview-modal-title').textContent = filePath.split(/[\\/]/).pop();
-  const { fm, body } = /\.(md|markdown)$/i.test(filePath) ? splitFrontmatter(content) : { fm: null, body: content };
-  const bodyEl = document.getElementById('preview-modal-body');
-  bodyEl.innerHTML = (fm ? renderFrontmatterBlock(fm) : '') + renderMarkdown(body);
-  if (!bodyEl.dataset.relLinkBound) {
-    bodyEl.addEventListener('click', (e) => {
-      const a = e.target.closest('a[href]');
-      if (!a) return;
-      const href = a.getAttribute('href');
-      if (!href || href.startsWith('#')) return;
-      const isAbsoluteUrl = /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//');
-      const isAbsolutePath = href.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(href);
-      if (isAbsoluteUrl) return;
-      if (!/\.(md|markdown)(#.*)?$/i.test(href)) return;
-      e.preventDefault();
-      const cleanHref = href.replace(/#.*$/, '');
-      openPreviewByPath(cleanHref, isAbsolutePath ? undefined : currentPreviewPath);
-    });
-    bodyEl.dataset.relLinkBound = '1';
-  }
-  document.getElementById('preview-modal-meta').textContent = filePath;
-  document.getElementById('preview-modal').classList.add('visible');
-  updatePreviewLinkBtn();
+// Previewed HTML is rendered as authored, not sanitized: the sandbox without
+// allow-same-origin puts it on an opaque origin, so it cannot touch this app's
+// storage, DOM or API. srcdoc has no base URL, so the server has already embedded
+// the document's local assets (lib/inline-assets.js); remote refs load normally.
+function createPreviewFrame(className, srcdoc, sandbox = 'allow-scripts allow-popups allow-forms') {
+  const frame = document.createElement('iframe');
+  frame.className = className;
+  frame.setAttribute('sandbox', sandbox);
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  frame.srcdoc = srcdoc;
+  bridgedFrames.add(frame);
+  frame.addEventListener('load', () => sendBridgeClaimsAll([frame], bridgeClaims(keyClaims())));
+  return frame;
 }
 
-function isPreviewLinkedToCurrentSession() {
-  if (!currentPreviewPath || !currentSessionId) return false;
-  return getSessionPreviewPaths(currentSessionId).includes(currentPreviewPath);
+function renderHtmlPreview(bodyEl, content) {
+  bodyEl.innerHTML = '';
+  // After the document's end the parser still adds the script to <body>, and it runs after
+  // the page's own scripts.
+  bodyEl.appendChild(createPreviewFrame('preview-html-frame themed-frame', themedSrcdoc(content)));
+}
+
+function isAbsolutePath(p) {
+  return /^([a-zA-Z]:[\\/]|[\\/])/.test(p);
+}
+
+function isUrlRef(s) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(s) || s.startsWith('//');
+}
+
+function bindPreviewRelativeLinks(bodyEl, baseOf = () => currentPreviewPath) {
+  if (bodyEl.dataset.relLinkBound) return;
+  bodyEl.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href]');
+    if (!a) return;
+    const href = a.getAttribute('href');
+    if (!href || href.startsWith('#')) return;
+    if (isUrlRef(href)) return;
+    const cleanHref = href.replace(/#.*$/, '');
+    e.preventDefault();
+    openPreviewByPath(cleanHref, baseOf(a), openFileInEditor);
+  });
+  bodyEl.dataset.relLinkBound = '1';
+}
+
+// `kind` comes from the server, which is the only place that decides what is previewable.
+// hljs gets the extension as the language hint and `highlightAuto` is deliberately not
+// the fallback: on a config or data file it guesses wildly, and wrong colors read as a
+// broken file. Above the size cap it is skipped outright — it is O(size) with heavy
+// backtracking on the main thread, and .jsonl/.log files in a scratchpad reach megabytes.
+const HLJS_MAX_CHARS = 256 * 1024;
+
+function langOfPath(path) {
+  return typeof path === 'string' ? (path.split('.').pop() || '').toLowerCase() : '';
+}
+
+function highlightCode(text, lang) {
+  if (typeof hljs === 'undefined' || text.length > HLJS_MAX_CHARS || !hljs.getLanguage(lang)) return null;
+  try {
+    return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+  } catch (_) {
+    return null;
+  }
+}
+
+function renderSourcePreview(filePath, content) {
+  const ext = langOfPath(filePath);
+  const value = highlightCode(content, ext);
+  const n = treeHighlight.lineCount(content);
+  const gutter = `<span class="src-gutter" aria-hidden="true">${Array.from({ length: n }, (_, i) => i + 1).join('\n')}</span>`;
+  const code =
+    value != null
+      ? `<code class="hljs language-${escapeHtml(ext)}">${value}</code>`
+      : `<code class="hljs">${escapeHtml(content)}</code>`;
+  return `<pre class="preview-source" data-lines="${n}">${gutter}${code}</pre>`;
+}
+
+// Every kind but html, which needs a frame.
+function renderPreviewContent(bodyEl, filePath, content, kind) {
+  if (kind === 'text') {
+    bodyEl.innerHTML = renderSourcePreview(filePath, content);
+  } else if (kind === 'image') {
+    const img = document.createElement('img');
+    img.className = 'preview-image';
+    img.src = `/api/preview/image?${new URLSearchParams({ path: filePath })}`;
+    img.alt = filePath.split(/[\\/]/).pop();
+    bodyEl.replaceChildren(img);
+  } else {
+    const { fm, body } = splitFrontmatter(content);
+    bodyEl.innerHTML = (fm ? renderFrontmatterBlock(fm) : '') + renderMarkdownFile(body, filePath);
+  }
+}
+
+// A relative src would resolve against the board's URL, and DOMPurify drops a drive path (`C:/x`
+// reads as a scheme), so the hook moves a local image to the image route before that check.
+function renderMarkdownFile(text, filePath) {
+  if (!filePath || typeof DOMPurify === 'undefined') return renderMarkdown(text);
+  DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+    if (node.nodeName === 'IMG' && data.attrName === 'src') data.attrValue = localImageUrl(data.attrValue, filePath);
+  });
+  try {
+    return renderMarkdown(text);
+  } finally {
+    DOMPurify.removeHook('uponSanitizeAttribute');
+  }
+}
+
+function localImageUrl(src, base) {
+  const fileUrl = /^file:/i.test(src);
+  if (src.startsWith('//') || (!fileUrl && !isAbsolutePath(src) && isUrlRef(src))) return src;
+  let p = src;
+  if (!fileUrl) {
+    p = src.replace(/[?#].*$/, '');
+    try {
+      p = decodeURI(p);
+    } catch {}
+  }
+  return `/api/preview/image?${new URLSearchParams({ path: p, base })}`;
+}
+
+function openPreviewModal(filePath, content, kind, sessionId) {
+  currentPreviewPath = filePath;
+  previewSessionId = sessionId;
+  const fileName = filePath.split(/[\\/]/).pop();
+  document.getElementById('preview-modal-title').textContent = fileName;
+  const bodyEl = document.getElementById('preview-modal-body');
+  const isHtml = kind === 'html';
+  document.querySelector('#preview-modal .modal').classList.toggle('preview-html', isHtml);
+  bindPreviewRelativeLinks(bodyEl);
+  if (isHtml) renderHtmlPreview(bodyEl, content);
+  else renderPreviewContent(bodyEl, filePath, content, kind);
+  document.getElementById('preview-modal-meta').textContent = filePath;
+  document.getElementById('preview-modal').classList.add('visible');
+  // A preview the CLI opens finds focus in the terminal frame, whose keys never reach the board's Esc.
+  previewFromTerminal ||= terminalPaneFocused();
+  document.querySelector('#preview-modal .modal').focus();
+  updatePreviewLinkBtn();
+  const panelEl = document.getElementById('preview-review-panel');
+  const opts = fileReviewOpts(filePath, kind, bodyEl, isHtml ? bodyEl.querySelector('iframe') : null);
+  if (!opts) return unmountReview(panelEl);
+  mountReview({
+    ...opts,
+    sessionId,
+    panelEl,
+    hostEl: document.querySelector('#preview-modal .modal'),
+    onSent: closePreviewModal,
+  });
+}
+
+// Null for an image, which takes no comments.
+function fileReviewOpts(filePath, kind, contentEl, frame) {
+  if (kind === 'image') return null;
+  return {
+    contentEl,
+    frame,
+    source: { kind: 'file', label: pathBasename(filePath), path: filePath },
+    context: kind === 'text' ? (range) => ({ line: sourceLineOf(contentEl, range) }) : null,
+  };
+}
+
+function sourceLineOf(bodyEl, range) {
+  const code = bodyEl.querySelector('.preview-source code');
+  if (!code?.contains(range.startContainer)) return undefined;
+  return reviewTextBefore(code, range.startContainer, range.startOffset).split('\n').length;
+}
+
+function isPreviewLinkedToSession() {
+  if (!currentPreviewPath || !previewSessionId) return false;
+  const key = canonicalPath(currentPreviewPath);
+  return getSessionPreviewPaths(previewSessionId).some((p) => canonicalPath(p) === key);
 }
 
 function updatePreviewLinkBtn() {
+  const paneBtn = document.getElementById('preview-pane-btn');
+  if (paneBtn) paneBtn.style.display = previewSessionId ? '' : 'none';
   const btn = document.getElementById('preview-link-btn');
   if (!btn) return;
-  if (!currentSessionId) {
+  if (!previewSessionId) {
     btn.style.display = 'none';
     return;
   }
   btn.style.display = '';
-  const linked = isPreviewLinkedToCurrentSession();
-  btn.title = linked ? 'Unlink from current session' : 'Link to current session';
-  btn.style.color = linked ? 'var(--accent, #5b9a6b)' : '';
+  const linked = isPreviewLinkedToSession();
+  btn.title = linked ? 'Unlink from the session' : 'Link to the session';
+  btn.style.color = linked ? 'var(--accent)' : '';
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function togglePreviewSessionLink() {
-  if (!currentPreviewPath || !currentSessionId) {
+  if (!currentPreviewPath || !previewSessionId) {
     showToast('Select a session first');
     return;
   }
-  if (isPreviewLinkedToCurrentSession()) {
-    removeSessionPreviewPath(currentSessionId, currentPreviewPath);
-    showToast('Unlinked from session');
-  } else {
-    addSessionPreviewPath(currentSessionId, currentPreviewPath);
-    showToast('Linked to session');
-  }
-  updatePreviewLinkBtn();
-  if (_infoModalSessionId === currentSessionId) {
-    refreshInfoModalLinkedDocs();
-  }
-  renderSessions();
+  const unlink = isPreviewLinkedToSession();
+  setSessionDocLink(previewSessionId, currentPreviewPath, unlink);
+  showToast(unlink ? 'Unlinked from session' : 'Linked to session');
 }
 
 function refreshInfoModalLinkedDocs() {
-  const bodyEl = document.getElementById('session-info-modal-body');
+  const bodyEl = document.getElementById('team-modal-body');
   if (!bodyEl) return;
   const existing = bodyEl.querySelector('.linked-docs-section');
-  const html = renderLinkedDocsHtml(_infoModalSessionId);
-  if (!existing) {
-    if (!html) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = renderLinkedDocsHtml(_infoModalSessionId);
+  const node = wrap.firstElementChild;
+  if (existing) {
+    existing.replaceWith(node);
+  } else {
     const planCard = bodyEl.querySelector('[data-plan-card]');
-    const wrap = document.createElement('div');
-    wrap.innerHTML = html;
-    const node = wrap.firstElementChild;
     if (planCard?.nextSibling) planCard.parentNode.insertBefore(node, planCard.nextSibling);
     else bodyEl.appendChild(node);
-    bindLinkedDocsHandlers(node, _infoModalSessionId);
-    return;
   }
-  if (!html) {
-    existing.remove();
-    return;
-  }
-  const wrap = document.createElement('div');
-  wrap.innerHTML = html;
-  const node = wrap.firstElementChild;
-  existing.replaceWith(node);
   bindLinkedDocsHandlers(node, _infoModalSessionId);
 }
 
 function closePreviewModal() {
-  resetModalFullscreen('preview-modal');
+  unmountReview(document.getElementById('preview-review-panel'));
+  hideModalOverlay('preview-modal');
+  // Empty the body so an iframe preview is destroyed and its scripts/timers stop.
+  document.getElementById('preview-modal-body').innerHTML = '';
   currentPreviewPath = null;
+  previewSessionId = null;
+  if (previewFromTerminal) focusTerminalPane();
+  previewFromTerminal = false;
+}
+
+function openFileInEditor(filePath) {
+  postAndToast('/api/open-in-editor', { file: filePath }, 'in editor');
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function openPreviewInEditor() {
   if (!currentPreviewPath) return;
-  postAndToast('/api/open-in-editor', { file: currentPreviewPath }, 'in editor');
+  openFileInEditor(currentPreviewPath);
 }
 
-async function openPreviewByPath(filePath, base) {
+// The server is the only place that knows what it can render, so a null `kind` is its
+// answer to "not previewable" rather than a failure: callers that have a fallback
+// destination pass `onUnsupported` instead of keeping a copy of the extension list here.
+// A link followed inside an open preview keeps the preview's session.
+async function openPreviewByPath(filePath, base, onUnsupported, sessionId = previewSessionId || currentSessionId) {
   if (!filePath) return;
   try {
-    const qs = new URLSearchParams({ path: filePath });
-    if (base) qs.set('base', base);
-    const r = await fetch(`/api/preview?${qs}`);
+    const r = await api('/api/preview', { query: { path: filePath, base: base || null } });
     if (!r.ok) {
-      showToast('Preview file unavailable');
+      showToast('Preview file unavailable', 'error');
       return;
     }
     const data = await r.json();
-    openPreviewModal(data.path, data.content);
+    if (data.exists === false) {
+      showToast('File not found', 'error');
+      return;
+    }
+    if (data.kind === null) {
+      if (onUnsupported) onUnsupported(data.path);
+      else showToast('Nothing to preview in this file');
+      return;
+    }
+    openPreviewModal(data.path, data.content, data.kind, sessionId);
   } catch {
-    showToast('Failed to load preview');
+    showToast('Failed to load preview', 'error');
   }
 }
 
@@ -4304,11 +9474,23 @@ function handleSessionOpenEvent(data) {
     showToast(`Session not found: ${id.slice(0, 8)}`);
     return;
   }
+  if (sessionFilter !== 'active') {
+    sessionFilter = 'active';
+    const sel = document.getElementById('session-filter');
+    if (sel) sel.value = 'active';
+    updateUrl();
+  }
+  if (!isSessionActive(target)) {
+    stickySessionIds.add(id);
+    openedStickyIds.add(id);
+  }
+  setSessionDismissed(id, false);
+  cliOpenedId = id;
   fetchTasks(id);
 }
 
 async function handlePreviewOpenEvent(data) {
-  const { path: filePath, content, sessionId, link } = data;
+  const { path: filePath, sessionId } = data;
   if (sessionId && sessionId !== currentSessionId) {
     if (sessions.find((s) => s.id === sessionId)) {
       await fetchTasks(sessionId);
@@ -4316,15 +9498,20 @@ async function handlePreviewOpenEvent(data) {
       showToast(`Preview received for unknown session ${sessionId.slice(0, 8)}`);
     }
   }
-  if (link && sessionId && filePath) {
-    const before = getSessionPreviewPaths(sessionId).includes(filePath);
-    addSessionPreviewPath(sessionId, filePath);
-    if (!before) showToast('Linked to session');
-    if (_infoModalSessionId === sessionId) refreshInfoModalLinkedDocs();
-    renderSessions();
-  }
-  if (!link) openPreviewModal(filePath, content);
-  if (link) updatePreviewLinkBtn();
+  // The broadcast carries the path only — each tab fetches the document itself.
+  openPreviewByPath(filePath, undefined, undefined, currentSessionId);
+}
+
+// Linked docs live in localStorage, so the CLI can only reach them through a tab:
+// the server broadcasts the resolved path and every tab applies it idempotently.
+function handleDocumentLinkEvent(data) {
+  const { path: filePath, sessionId, unlink, open } = data;
+  if (!filePath || !sessionId) return;
+  setSessionDocLink(sessionId, filePath, unlink);
+  const msg = `${unlink ? 'Unlinked' : 'Linked'} ${linkedDocLabel(filePath)}`;
+  // Every tab gets the event; only the one on screen offers to open the URL.
+  if (open && isOnScreen()) showToast(msg, 'info', { label: 'Open', onClick: () => hub.openExternal(filePath) });
+  else showToast(msg);
 }
 
 function getSessionBaseDir(sessionId) {
@@ -4332,43 +9519,617 @@ function getSessionBaseDir(sessionId) {
   return s?.cwd || s?.project || '';
 }
 
+// Linked paths are stored as bare strings, so the row has to ask what each one is. The
+// server owns that answer — /api/file/resolve reports `kind` for any file, previewable
+// or not — and it is cached for the tab because a path's kind does not change under it.
+// A resolve that fails is cached as unpreviewable: the editor is the right destination
+// for a file the server cannot read either, and re-asking on every render of a panel the
+// SSE tick repaints would be a poll.
+const previewKindByPath = new Map();
+const kindResolveInFlight = new Set();
+
+async function loadPreviewKinds(sessionId, paths) {
+  const pending = paths.filter((p) => !previewKindByPath.has(p) && !kindResolveInFlight.has(p));
+  if (!pending.length) return;
+  for (const p of pending) kindResolveInFlight.add(p);
+  try {
+    await Promise.all(
+      pending.map(async (p) => {
+        const data = await getJson('/api/file/resolve', {}, { query: { path: p } });
+        previewKindByPath.set(p, data.kind ?? null);
+      }),
+    );
+  } finally {
+    for (const p of pending) kindResolveInFlight.delete(p);
+  }
+  afterLinkedDocsChanged(sessionId);
+}
+
+// A pad the session made with `scratch new` becomes an ordinary linked document.
+// The server derives the pads on every read, so this record of the ones already
+// linked is what stops the next read undoing an unlink.
+const PAD_LINKED_PREFIX = 'autolinked-pads-';
+const padsFetched = new Set();
+
+function getOfferedPadPaths(sessionId) {
+  return readStoredList(PAD_LINKED_PREFIX + sessionId);
+}
+
+function setOfferedPadPaths(sessionId, paths) {
+  store.writeJson(PAD_LINKED_PREFIX + sessionId, paths);
+}
+
+async function loadSessionPads(sessionId) {
+  if (!sessionId || padsFetched.has(sessionId)) return;
+  padsFetched.add(sessionId);
+  const data = await getJson(apiPath`/api/sessions/${sessionId}/pads`);
+  if (!data) {
+    padsFetched.delete(sessionId);
+    return;
+  }
+  const pads = data.pads || [];
+  const offered = new Set(getOfferedPadPaths(sessionId).map(canonicalPath));
+  const fresh = pads.map((p) => p.path).filter((p) => !offered.has(canonicalPath(p)));
+  if (!fresh.length) return;
+  // Recorded before the link, so a render triggered by the link already sees a pad
+  // that will not be offered again.
+  setOfferedPadPaths(sessionId, [...offered, ...fresh]);
+  for (const p of fresh) setSessionDocLink(sessionId, p, false);
+}
+
+// A scratchpad manifest opens in the external `scratch` viewer, not the editor —
+// the raw JSON is a manifest, not the document the user linked.
+function isScratchpadPath(p) {
+  return /(^|[\\/])scratchpad\.json$/i.test(p);
+}
+
+// `linkedDocOpener` is the only place a linked path is classified; the row's tag,
+// tooltip and action are all read from here, so a new destination is one entry.
+const LINKED_DOC_OPENERS = {
+  preview: { tag: '', hint: '', cls: '', noun: 'path' },
+  url: { tag: '', hint: ' — opens in a new tab', cls: ' is-url', noun: 'URL' },
+  scratch: {
+    tag: '(scratchpad)',
+    hint: ' — opens in the scratch viewer',
+    cls: ' is-editor',
+    noun: 'path',
+    url: '/api/scratchpad/open',
+    body: (p) => ({ path: p }),
+    toast: 'in the scratch viewer',
+  },
+  editor: {
+    tag: '(editor)',
+    hint: ' — opens in editor',
+    cls: ' is-editor',
+    noun: 'path',
+    url: '/api/open-in-editor',
+    body: (p) => ({ file: p }),
+    toast: 'in editor',
+  },
+};
+
+// The manifest is checked before previewability, not after: its `.json` is previewable
+// text, but the pad is what the user linked, so the viewer wins over the raw file.
+// Without the CLI there is nothing to launch, so it falls back to the editor.
+function linkedDocOpener(p) {
+  if (linkUrl(p)) return 'url';
+  if (isScratchpadPath(p)) return appConfig.scratchAvailable ? 'scratch' : 'editor';
+  // A path whose kind has not arrived yet renders as previewable, which is what the
+  // click does anyway — openPreviewByPath falls back to the editor on a null kind.
+  return previewKindByPath.get(p) === null ? 'editor' : 'preview';
+}
+
+// Every manifest is called scratchpad.json, so the pad's folder names it. Kept
+// independent of the opener: the pad is still the pad when the CLI is missing.
+function linkedDocLabel(p) {
+  if (linkUrl(p)) return p.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return isScratchpadPath(p) ? parts[parts.length - 2] || parts[parts.length - 1] : parts[parts.length - 1];
+}
+
+function openLinkedDoc(p, baseDir) {
+  const opener = linkedDocOpener(p);
+  if (opener === 'url') {
+    hub.openExternal(p);
+    return;
+  }
+  if (opener === 'preview') {
+    openPreviewByPath(p, baseDir, openFileInEditor);
+    return;
+  }
+  const { url, body, toast } = LINKED_DOC_OPENERS[opener];
+  postAndToast(url, body(p), toast);
+}
+
+const LINKED_DOCS_COLLAPSED = 10;
+const linkedDocsExpanded = new Set();
+
+function showAllToggle(expandedSet, key, list, limit, btnAttrs) {
+  const expanded = expandedSet.has(key);
+  const shown = expanded ? list : list.slice(0, limit);
+  const moreHtml =
+    list.length > limit
+      ? `<button type="button" class="expand-toggle-btn list-more" ${btnAttrs}>${expanded ? 'Show less' : `Show all ${list.length}`}</button>`
+      : '';
+  return { shown, moreHtml };
+}
+
+function toggleSetMember(set, key) {
+  if (!set.delete(key)) set.add(key);
+}
+
 function renderLinkedDocsHtml(sessionId) {
   const paths = getSessionPreviewPaths(sessionId);
-  if (!paths.length) return '';
+  const { shown, moreHtml } = showAllToggle(
+    linkedDocsExpanded,
+    sessionId,
+    paths,
+    LINKED_DOCS_COLLAPSED,
+    'data-linked-docs-more',
+  );
+  // Kicked off from the render rather than the three call sites, so a new surface that
+  // shows linked docs cannot forget it. Returns at once once every path is cached.
+  const rows = shown.map((p) => ({ p, opener: linkedDocOpener(p) }));
+  const filePaths = rows.filter((r) => r.opener !== 'url').map((r) => r.p);
+  loadPreviewKinds(sessionId, filePaths);
   const baseDir = getSessionBaseDir(sessionId);
-  const items = paths
-    .map((p, i) => {
-      const name = p.split(/[\\/]/).pop();
+  const items = rows
+    .map(({ p, opener }) => {
+      const { tag, hint, cls, noun } = LINKED_DOC_OPENERS[opener];
+      const name = linkedDocLabel(p);
+      const isUrl = opener === 'url';
       const rel = baseDir ? toRelativeIfUnder(p, baseDir) : null;
       const pathSpan = rel ? `<span class="linked-doc-path" title="${escapeHtml(p)}">${escapeHtml(rel)}</span>` : '';
-      return `<li class="linked-doc-item">
-        <a href="#" class="linked-doc-link" data-idx="${i}" title="${escapeHtml(p)}">${escapeHtml(name)}</a>
-        ${pathSpan}
+      const attr = escapeHtml(p);
+      const href = isUrl ? `href="${attr}" target="_blank" rel="noopener"` : 'href="#"';
+      return `<li class="linked-doc-item${escapeHtml(cls)}">
+        <a ${href} class="linked-doc-link" data-path="${attr}" title="${escapeHtml(p + hint)}">${escapeHtml(name)}</a>${isUrl ? '<span class="linked-doc-external" aria-hidden="true">↗</span>' : ''}
+        ${pathSpan}${tag ? `<span class="linked-doc-path">${tag}</span>` : ''}
+        <span class="row-actions linked-doc-actions">
+          <button type="button" class="linked-doc-copy" data-path="${attr}" title="Copy ${escapeHtml(noun)}" aria-label="Copy ${escapeHtml(noun)} of ${escapeHtml(name)}">${ICON_COPY}</button>
+          <button type="button" class="linked-doc-remove" data-path="${attr}" title="Unlink" aria-label="Unlink ${escapeHtml(name)}">&times;</button>
+        </span>
       </li>`;
     })
     .join('');
-  return `<div class="linked-docs-section" style="margin-bottom:16px;font-size:12px;">
-    <div style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;display:flex;align-items:center;gap:6px;">
+  // Rendered even when empty — the add button has to stay reachable.
+  const body = paths.length
+    ? `<ul class="linked-doc-list">${items}</ul>${moreHtml}`
+    : '<div class="linked-docs-empty">No linked documents yet</div>';
+  return `<div class="linked-docs-section panel-section">
+    <div class="panel-section-header">
       ${linkSvg(12)}
       <span>Linked documents</span>
-      <span style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:0 6px;font-size:10px;color:var(--text-secondary);">${paths.length}</span>
+      <span class="panel-section-count">${paths.length}</span>
+      <button type="button" class="linked-docs-add-btn" title="Link a file or URL" aria-label="Link a file or URL">+</button>
     </div>
-    <ul class="linked-doc-list">${items}</ul>
+    <div class="linked-doc-editor-slot"></div>
+    ${body}
   </div>`;
 }
 
+function paintSectionSlots(attr, sessionId, html) {
+  for (const slot of document.querySelectorAll(`[${attr}="${CSS.escape(sessionId)}"]`)) {
+    slot.innerHTML = html;
+  }
+}
+
+// A panel section whose data is not part of the session object arrives after the panel
+// is already on screen, so every one of them needs the same lifecycle: one fetch per
+// session at a time, and a patch of the slot — always rendered, empty or not — once the
+// data lands. `ttlMs` is for the sections the server does not cache itself; at 0 the
+// section re-asks on every render, which is right when the server holds the answer.
+function makeSectionLoader({ attr, endpoint, pick, innerHtml, ttlMs = 0 }) {
+  const store = new Map();
+  const inFlight = new Set();
+  return {
+    get: (sessionId) => store.get(sessionId)?.data || [],
+    repaint: (sessionId) => paintSectionSlots(attr, sessionId, innerHtml(sessionId)),
+    async load(sessionId) {
+      if (!sessionId || inFlight.has(sessionId)) return;
+      const cached = store.get(sessionId);
+      if (cached && Date.now() - cached.at < ttlMs) return;
+      inFlight.add(sessionId);
+      const data = await getJson(apiPath`/api/sessions/${sessionId}/${endpoint}`);
+      inFlight.delete(sessionId);
+      if (!data) return;
+      store.set(sessionId, { at: Date.now(), data: pick(data) });
+      paintSectionSlots(attr, sessionId, innerHtml(sessionId));
+    },
+  };
+}
+
+function artifactLabel(a) {
+  if (a.title) return a.title;
+  return a.path ? pathBasename(a.path).replace(/\.html?$/i, '') : 'Artifact';
+}
+
+// The list comes from the transcript on every read, so a dropped artifact is kept out by URL.
+const DROPPED_ARTIFACTS_PREFIX = 'artifacts-dropped-';
+
+function droppedArtifacts(sessionId) {
+  return new Set(readStoredList(DROPPED_ARTIFACTS_PREFIX + sessionId));
+}
+
+function setArtifactDropped(sessionId, url, dropped) {
+  const urls = droppedArtifacts(sessionId);
+  if (dropped) urls.add(url);
+  else urls.delete(url);
+  if (urls.size) store.writeJson(DROPPED_ARTIFACTS_PREFIX + sessionId, [...urls]);
+  else store.removeItem(DROPPED_ARTIFACTS_PREFIX + sessionId);
+  artifactsSection.repaint(sessionId);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function dropArtifact(sessionId, url) {
+  setArtifactDropped(sessionId, url, true);
+  showToast('Artifact dropped from the list', 'info', {
+    label: 'Undo',
+    onClick: () => setArtifactDropped(sessionId, url, false),
+  });
+}
+
+function artifactsInnerHtml(sessionId) {
+  const dropped = droppedArtifacts(sessionId);
+  const list = artifactsSection.get(sessionId).filter((a) => !dropped.has(a.url));
+  if (!list.length) return '';
+  const items = list
+    .map(
+      (a) => `<li class="artifact-item">
+        <a class="artifact-link" href="${escapeHtml(a.url)}" target="_blank" rel="noopener" title="${escapeHtml(a.url)}">${escapeHtml(artifactLabel(a))}</a>
+        <span class="row-actions artifact-actions">
+          <button type="button" onclick="copyWithFeedback('${escAttrJs(a.url)}', this)" title="Copy link" aria-label="Copy artifact link">${ICON_COPY}</button>
+          <button type="button" class="artifact-remove" onclick="dropArtifact('${escAttrJs(sessionId)}','${escAttrJs(a.url)}')" title="Drop from the list" aria-label="Drop ${escapeHtml(artifactLabel(a))} from the list">&times;</button>
+        </span>
+      </li>`,
+    )
+    .join('');
+  return `<div class="panel-section-header">
+      ${ICON_OPEN_EXTERNAL}
+      <span>Artifacts</span>
+      <span class="panel-section-count">${list.length}</span>
+    </div>
+    <ul class="artifact-list">${items}</ul>`;
+}
+
+function renderArtifactsHtml(sessionId) {
+  return `<div class="artifacts-section panel-section" data-artifacts-for="${escapeHtml(sessionId)}">${artifactsInnerHtml(sessionId)}</div>`;
+}
+
+const ZEN_BOOKMARKS_COLLAPSED = 3;
+const zenBookmarksExpanded = new Set();
+
+function zenBookmarkParts(p) {
+  if (p.type === 'tool_use') return { who: p.tool || 'Tool', text: p.description || p.detail || '' };
+  if (p.type === 'agent') return { who: p.agentType || 'Agent', text: stripTeammateWrapper(p.lastMessage || '') };
+  return { who: p.type === 'assistant' ? 'Claude' : 'You', text: p.text || '' };
+}
+
+// Zen shows the open session only, so its pins are currentPins and a row opens through
+// showPinnedMsgDetail by index.
+function renderZenBookmarksHtml(sessionId) {
+  if (sessionId !== currentSessionId || !currentPins.length) return '';
+  const { shown, moreHtml } = showAllToggle(
+    zenBookmarksExpanded,
+    sessionId,
+    currentPins,
+    ZEN_BOOKMARKS_COLLAPSED,
+    `onclick="toggleZenBookmarks('${escAttrJs(sessionId)}')"`,
+  );
+  const items = shown
+    .map((p, i) => {
+      const { who, text } = zenBookmarkParts(p);
+      const label = truncateAtWord(cleanMessageText(text), 200);
+      return `<li class="zen-bookmark-item">
+        <span class="zen-bookmark-who">${escapeHtml(who)}</span>
+        <button type="button" class="zen-bookmark-link" onclick="showPinnedMsgDetail(${i})" title="${escapeHtml(label)}">${escapeHtml(label || '(empty)')}</button>
+        <span class="scratch-file-time">${formatDate(p.timestamp)}</span>
+      </li>`;
+    })
+    .join('');
+  return `<div class="zen-bookmarks-section panel-section">
+    <div class="panel-section-header">
+      ${BOOKMARK_SVG}
+      <span>Bookmarks</span>
+      <span class="panel-section-count">${currentPins.length}</span>
+    </div>
+    <ul class="zen-bookmark-list">${items}</ul>${moreHtml}
+  </div>`;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleZenBookmarks(sessionId) {
+  toggleSetMember(zenBookmarksExpanded, sessionId);
+  const section = document.querySelector('.zen-bookmarks-section');
+  if (section) section.outerHTML = renderZenBookmarksHtml(sessionId);
+}
+
+// No TTL: the server holds the scan until the transcript grows, so a repeat costs one
+// stat, and an artifact published while the panel is open still appears.
+const artifactsSection = makeSectionLoader({
+  attr: 'data-artifacts-for',
+  endpoint: 'artifacts',
+  pick: (data) => data.artifacts || [],
+  innerHtml: (sessionId) => artifactsInnerHtml(sessionId),
+});
+
+// The server decides liveness (a run has no terminal journal entry) and answers with
+// nothing once the workflow finishes, so the section empties itself and disappears.
+const workflowLiveSection = makeSectionLoader({
+  attr: 'data-workflow-live-for',
+  endpoint: 'workflow-live',
+  pick: (data) => (data.workflow ? [data.workflow] : []),
+  innerHtml: (sessionId) => workflowLiveInnerHtml(sessionId),
+  // The agent hooks re-render the sidebar on every subagent start and stop, so the TTL is
+  // what keeps that burst down to one ask per run step.
+  ttlMs: 4000,
+});
+
+function workflowLiveInnerHtml(sessionId) {
+  const run = workflowLiveSection.get(sessionId)[0];
+  if (!run) return '';
+  const pct = run.startedCount ? Math.round((run.doneCount / run.startedCount) * 100) : 0;
+  const phases = (run.phases || [])
+    .map((p) => {
+      const state = p.started === 0 ? 'pending' : p.done >= p.started ? 'done' : 'running';
+      const count = p.started ? `${p.done}/${p.started}` : '';
+      return `<span class="wf-live-phase ${escapeHtml(state)}">
+        <span class="wf-live-phase-title">${escapeHtml(p.title)}</span>
+        <span class="wf-live-phase-count">${count}</span>
+      </span>`;
+    })
+    .join('');
+  const running = run.running?.length
+    ? `<div class="wf-live-running" title="${escapeHtml(run.running.join(', '))}">${escapeHtml(run.running.join(' · '))}</div>`
+    : '';
+  return `<div class="panel-section-header">
+      ${WORKFLOW_GEAR_SVG}
+      <span>Workflow</span>
+      <span class="panel-section-count">${run.doneCount}/${run.startedCount} agents</span>
+    </div>
+    <div class="wf-live" onclick="showWorkflowModal('${escAttrJs(sessionId)}')" title="Open workflow run">
+      <div class="wf-live-name"><span class="pulse"></span>${escapeHtml(run.name || run.id)}</div>
+      <div class="progress-bar wf-live-bar"><div class="progress-fill" style="width: ${pct}%"></div></div>
+      ${phases ? `<div class="wf-live-phases">${phases}</div>` : ''}
+      ${running}
+    </div>`;
+}
+
+function renderWorkflowLiveHtml(sessionId) {
+  return `<div class="workflow-live-section" data-workflow-live-for="${escapeHtml(sessionId)}">${workflowLiveInnerHtml(sessionId)}</div>`;
+}
+
+// Every agent start and stop already re-renders the sidebar through the agent-activity
+// feed, which is what keeps the card current. The timer is the fallback for a config dir
+// with no cck hooks installed: there the last agent's result reaches nobody, and the card
+// would sit on a finished run until the next render. Slow on purpose — the hooked case
+// never waits for it. The generation guard drops a chain left mid-fetch by an earlier
+// render, so renders can't stack up chains.
+const WORKFLOW_LIVE_POLL_MS = 30000;
+let workflowLivePoll = null;
+let workflowLivePollFor = null;
+
+function pollWorkflowLive(sessionId) {
+  workflowLiveSection.load(sessionId);
+  // A render must not restart the timer: renders arrive far faster than the interval, and
+  // each restart would push the fallback tick back out of reach, leaving a finished run on
+  // screen forever in a config dir with no hooks.
+  if (workflowLivePoll && workflowLivePollFor === sessionId) return;
+  clearTimeout(workflowLivePoll);
+  workflowLivePollFor = sessionId;
+  const tick = async () => {
+    workflowLivePoll = null;
+    if (workflowLivePollFor !== sessionId) return;
+    if (!document.querySelector(`[data-workflow-live-for="${CSS.escape(sessionId)}"]`)) return;
+    await workflowLiveSection.load(sessionId);
+    if (workflowLivePollFor !== sessionId || !workflowLiveSection.get(sessionId).length) return;
+    workflowLivePoll = setTimeout(tick, WORKFLOW_LIVE_POLL_MS);
+  };
+  workflowLivePoll = setTimeout(tick, WORKFLOW_LIVE_POLL_MS);
+}
+
+const SCRATCH_FILES_COLLAPSED = 3;
+// Unlike the artifacts scan the server caches nothing here, so a TTL is what stops the
+// zen panel — re-rendered on every SSE tick — from turning a readdir plus a stat per
+// file into a 2 s poll.
+const scratchFilesSection = makeSectionLoader({
+  attr: 'data-scratch-files-for',
+  endpoint: 'scratchpad-files',
+  pick: (data) => data.files || [],
+  innerHtml: (sessionId) => scratchFilesInnerHtml(sessionId),
+  ttlMs: 10000,
+});
+// Outlives the cache entries on purpose: a refetch on the TTL must not collapse a list
+// the user opened.
+const scratchFilesExpanded = new Set();
+// Open folders only, keyed by absolute path: path -> { status: 'loading' | 'ready' |
+// 'error', children }. Closing a folder drops its entry, so the cache is bounded by
+// what is on screen and a reopen shows fresh contents for one readdir.
+const scratchFolders = new Map();
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openScratchFile(filePath) {
+  openPreviewByPath(filePath, undefined, openFileInEditor);
+}
+
+function scratchRowHtml(f) {
+  const escPath = escapeHtml(f.path);
+  const isDir = f.kind === 'dir';
+  const folder = isDir ? scratchFolders.get(f.path) : null;
+  const name = escapeHtml(f.name);
+  const link = isDir
+    ? `<button type="button" class="scratch-file-link scratch-folder-toggle${folder ? '' : ' collapsed'}" title="${escPath}" ${folder ? 'aria-expanded="true"' : 'aria-expanded="false"'}>${groupChevronSvg(10)}${name}/</button>`
+    : `<button type="button" class="scratch-file-link" onclick="openScratchFile(this.closest('li').dataset.file)" title="${escPath}">${name}</button>`;
+  let body = '';
+  if (folder?.status === 'loading') body = '<div class="scratch-folder-empty">Loading…</div>';
+  else if (folder?.status === 'error') body = '<div class="scratch-folder-empty">Failed to load</div>';
+  else if (folder && !folder.children.length) body = '<div class="scratch-folder-empty">Empty</div>';
+  else if (folder) body = scratchRowsHtml(folder.children);
+  return `<li class="scratch-file-item${isDir ? ' scratch-folder-item' : ''}" data-file="${escPath}">
+    ${link}
+    <span class="scratch-file-time">${formatDate(f.modifiedAt)}</span>
+    <span class="row-actions scratch-file-actions">
+      <button type="button" onclick="copyWithFeedback(this.closest('li').dataset.file, this)" title="Copy path" aria-label="Copy path">${ICON_COPY}</button>
+      <button type="button" onclick="${isDir ? 'openFolderInEditor' : 'openFileInEditor'}(this.closest('li').dataset.file)" title="Open in editor" aria-label="Open in editor">${ICON_OPEN_EXTERNAL}</button>
+    </span>
+    ${body}
+  </li>`;
+}
+
+function scratchRowsHtml(rows) {
+  return `<ul class="scratch-file-list">${rows.map(scratchRowHtml).join('')}</ul>`;
+}
+
+function scratchFilesInnerHtml(sessionId) {
+  const list = scratchFilesSection.get(sessionId);
+  if (!list.length) return '';
+  const { shown, moreHtml } = showAllToggle(
+    scratchFilesExpanded,
+    sessionId,
+    list,
+    SCRATCH_FILES_COLLAPSED,
+    `onclick="toggleScratchFiles('${escAttrJs(sessionId)}')"`,
+  );
+  return `${scratchRowsHtml(shown)}${moreHtml}`;
+}
+
+// Delegated at the document because the whole zen panel is re-rendered on every SSE tick,
+// which would drop a listener bound on the section.
+document.addEventListener('click', (e) => {
+  const toggle = e.target.closest('.scratch-folder-toggle');
+  if (!toggle) return;
+  const section = toggle.closest('[data-scratch-files-for]');
+  if (section) toggleScratchFolder(section.dataset.scratchFilesFor, toggle.closest('li').dataset.file);
+});
+
+async function toggleScratchFolder(sessionId, dirPath) {
+  if (scratchFolders.has(dirPath)) {
+    scratchFolders.delete(dirPath);
+    scratchFilesSection.repaint(sessionId);
+    return;
+  }
+  scratchFolders.set(dirPath, { status: 'loading', children: [] });
+  scratchFilesSection.repaint(sessionId);
+  const data = await getJson(apiPath`/api/sessions/${sessionId}/scratchpad-files`, null, { query: { path: dirPath } });
+  // An error entry reads "Failed to load"; closing and reopening the folder retries.
+  const entry = data ? { status: 'ready', children: data.files || [] } : { status: 'error', children: [] };
+  // The user may have closed the folder while the request was in flight.
+  if (scratchFolders.has(dirPath)) {
+    scratchFolders.set(dirPath, entry);
+    scratchFilesSection.repaint(sessionId);
+  }
+}
+
+function renderScratchFilesHtml(sessionId) {
+  return `<div class="scratch-files-section" data-scratch-files-for="${escapeHtml(sessionId)}">${scratchFilesInnerHtml(sessionId)}</div>`;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleScratchFiles(sessionId) {
+  toggleSetMember(scratchFilesExpanded, sessionId);
+  scratchFilesSection.repaint(sessionId);
+}
+
+// One delegated listener per section: the list is re-rendered on every change, so
+// per-row handlers would only be rebound each time anyway.
 function bindLinkedDocsHandlers(container, sessionId) {
   if (!container) return;
-  const links = container.querySelectorAll('.linked-doc-link');
-  if (!links.length) return;
-  const paths = getSessionPreviewPaths(sessionId);
-  const base = getSessionBaseDir(sessionId);
-  for (const link of links) {
-    link.addEventListener('click', (e) => {
+  container.addEventListener('click', (e) => {
+    const hit = e.target.closest(
+      '.linked-doc-link, .linked-doc-copy, .linked-doc-remove, .linked-docs-add-btn, [data-linked-docs-more]',
+    );
+    if (!hit || hit.target === '_blank') return;
+    e.preventDefault();
+    if (hit.hasAttribute('data-linked-docs-more')) {
+      toggleSetMember(linkedDocsExpanded, sessionId);
+      const wrap = document.createElement('div');
+      wrap.innerHTML = renderLinkedDocsHtml(sessionId);
+      container.replaceChildren(...wrap.firstElementChild.childNodes);
+    } else if (hit.classList.contains('linked-docs-add-btn')) {
+      startLinkedDocInput(container, sessionId);
+    } else if (hit.classList.contains('linked-doc-copy')) {
+      copyWithFeedback(hit.dataset.path, hit);
+    } else if (hit.classList.contains('linked-doc-remove')) {
+      removeSessionPreviewPath(sessionId, hit.dataset.path);
+      forgetServerLinkedDoc(sessionId, hit.dataset.path);
+      afterLinkedDocsChanged(sessionId);
+    } else {
+      openLinkedDoc(hit.dataset.path, getSessionBaseDir(sessionId));
+    }
+  });
+}
+
+function startLinkedDocInput(container, sessionId) {
+  const slot = container.querySelector('.linked-doc-editor-slot');
+  if (!slot) return;
+  slot.innerHTML = `<input class="linked-doc-input" type="text" spellcheck="false" placeholder="Path, file:// or https:// URL">
+    <div class="linked-doc-hint">${escapeHtml(getSessionBaseDir(sessionId) || 'no session cwd — absolute paths only')}</div>
+    <div class="linked-doc-error"></div>
+    <div class="edit-actions">
+      <button type="button" class="edit-cancel">Cancel</button>
+      <button type="button" class="edit-save">Link</button>
+    </div>`;
+  const input = slot.querySelector('.linked-doc-input');
+  const save = () => linkFileByPath(sessionId, input.value, slot);
+  const cancel = () => {
+    slot.innerHTML = '';
+  };
+  slot.querySelector('.edit-save').addEventListener('click', save);
+  slot.querySelector('.edit-cancel').addEventListener('click', cancel);
+  input.addEventListener('input', () => {
+    slot.querySelector('.linked-doc-error').textContent = '';
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
       e.preventDefault();
-      openPreviewByPath(paths[+link.dataset.idx], base);
-    });
+      save();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+  input.focus();
+}
+
+async function linkFileByPath(sessionId, raw, slot) {
+  // Paths pasted from Explorer or a shell often arrive quoted.
+  const value = (raw || '').trim().replace(/^["']|["']$/g, '');
+  // Reported inline so the input stays open and the path can be corrected in place.
+  const fail = (msg) => {
+    const err = slot?.querySelector('.linked-doc-error');
+    if (err) err.textContent = msg;
+    else showToast(msg, 'error');
+  };
+  if (!value) {
+    fail('Enter a file path or URL');
+    return;
   }
+  let target;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) && !/^file:/i.test(value)) {
+    target = linkUrl(value);
+    if (!target) {
+      fail('Only http and https URLs can be linked');
+      return;
+    }
+  } else {
+    try {
+      const r = await api('/api/file/resolve', { query: { path: value, base: getSessionBaseDir(sessionId) || null } });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.exists) {
+        fail(data.error || 'File not found');
+        return;
+      }
+      target = data.path;
+    } catch {
+      fail('Failed to resolve file');
+      return;
+    }
+  }
+  // Close the editor before the refresh: a sidebar panel defers its re-render while an
+  // input is open, so leaving it up would hide the file that was just linked.
+  if (slot) slot.innerHTML = '';
+  setSessionDocLink(sessionId, target, false);
+  showToast('Linked to session', 'success');
 }
 //#endregion
 
@@ -4391,6 +10152,18 @@ function setupEventSource() {
     failCount = 0;
   }
 
+  let taskRefreshTimer = null;
+  let metadataRefreshTimer = null;
+  let metadataDeadline = 0;
+  let agentRefreshTimer = null;
+  const pendingTaskSessionIds = new Set();
+  const pendingAgentSessionIds = new Set();
+
+  async function refreshSessionDetail(sessionId) {
+    await fetchAgents(sessionId);
+    if (!agentLogMode) fetchMessages(sessionId);
+  }
+
   function connect() {
     eventSource = new EventSource('/api/events');
 
@@ -4399,69 +10172,57 @@ function setupEventSource() {
         console.warn('[SSE] Reconnected after drop — forcing full refresh');
         fetchSessions().catch(() => {});
         if (currentSessionId) fetchTasks(currentSessionId);
+        refetchPaneLayout();
+        if (sgRev === null) syncSessionGroups();
+        else if (sgUnsent) persistSessionGroups();
+        else sgRefresh();
+        syncSessionPins();
+        if (terminalAvailable())
+          loadTerminals()
+            .then(renderSessions)
+            .catch(() => {});
       }
       wasConnected = true;
+      mergeServerLinkedDocs();
       retryDelay = 1000;
       hideOffline();
-      connectionStatus.innerHTML = `
-            <span class="connection-dot live"></span>
-            <span>Connected</span>
-          `;
     };
 
     eventSource.onerror = () => {
       eventSource.close();
       failCount++;
       console.warn('[SSE] Connection lost, retrying in', retryDelay, 'ms');
-      connectionStatus.innerHTML = `
-            <span class="connection-dot error"></span>
-            <span>Reconnecting...</span>
-          `;
       if (failCount >= 2) showOffline();
       setTimeout(connect, retryDelay);
       retryDelay = Math.min(retryDelay * 2, 30000);
     };
 
-    let taskRefreshTimer = null;
-    let metadataRefreshTimer = null;
-    let agentRefreshTimer = null;
-    const pendingTaskSessionIds = new Set();
-    const pendingAgentSessionIds = new Set();
-
     function debouncedRefresh(sessionId, isMetadata) {
       if (isMetadata) {
+        // Busy sessions emit events faster than the 2 s quiet period, so a pure debounce would
+        // never fire; the deadline caps how long a burst can hold the refresh back.
+        metadataDeadline ||= Date.now() + METADATA_MAX_WAIT_MS;
         clearTimeout(metadataRefreshTimer);
-        metadataRefreshTimer = setTimeout(async () => {
-          fetchSessions(false).catch((err) => console.error('[SSE] fetchSessions failed:', err));
-          if (currentSessionId) {
-            await fetchAgents(currentSessionId);
-            if (!agentLogMode) fetchMessages(currentSessionId);
-          }
-        }, 2000);
+        metadataRefreshTimer = setTimeout(
+          () => {
+            metadataDeadline = 0;
+            if (skipOffScreen()) return;
+            fetchSessions(false).catch((err) => console.error('[SSE] fetchSessions failed:', err));
+            if (currentSessionId) refreshSessionDetail(currentSessionId);
+          },
+          Math.min(2000, metadataDeadline - Date.now()),
+        );
       } else {
         pendingTaskSessionIds.add(sessionId);
         clearTimeout(taskRefreshTimer);
         taskRefreshTimer = setTimeout(async () => {
+          if (skipOffScreen()) return;
           await fetchSessions().catch((err) => console.error('[SSE] fetchSessions failed:', err));
-          if (viewMode === 'all') {
-            currentTasks = filterProject ? allTasksCache.filter((t) => matchesProjectFilter(t.project)) : allTasksCache;
-            renderAllTasks();
-          } else if (viewMode === 'project' && currentProjectPath) {
+          if (viewMode === 'project' && currentProjectPath) {
             const hasUpdate = currentProjectSessionIds.some((id) => pendingTaskSessionIds.has(id));
             if (hasUpdate) fetchProjectView(currentProjectPath);
           } else if (currentSessionId && pendingTaskSessionIds.has(currentSessionId)) {
             fetchTasks(currentSessionId);
-          }
-          if (
-            currentSessionId &&
-            pendingTaskSessionIds.has(currentSessionId) &&
-            messagePanelOpen &&
-            !agentLogMode
-          ) {
-            fetchMessages(currentSessionId);
-          }
-          if (currentSessionId && pendingTaskSessionIds.has(currentSessionId)) {
-            fetchAgents(currentSessionId);
           }
           pendingTaskSessionIds.clear();
         }, 500);
@@ -4476,23 +10237,37 @@ function setupEventSource() {
       }
 
       if (data.type === 'plan-update') {
-        if (!data.path) {
-          refreshOpenPlan();
-        } else {
-          const stored = _planSessionId ? getStoredPlan(_planSessionId) : null;
-          if (stored?.path === data.path) refreshOpenPlan();
-        }
+        if (!skipOffScreen()) refreshOpenPlan();
       }
 
+      if (data.type === 'terminals-update' && Array.isArray(data.ids))
+        setRunningTerminals(data.ids, data.awaitingTrust);
+
+      if (data.type === 'terminal:ended' && typeof data.id === 'string') onTerminalEnded(data.id);
+
+      if (data.type === 'dispatch-update') onDispatchUpdate();
+
+      if (data.type === 'show:posted') onShowPosted(data);
+
+      if (data.type === 'show:cleared') onShowCleared(data);
+      if (data.type === 'show:removed') onShowRemoved(data);
+      if (data.type === 'ask:opened') onAskOpened(data);
+      if (data.type === 'ask:closed') onAskClosed(data);
+
       if (data.type === 'agent-update') {
-        pendingAgentSessionIds.add(data.sessionId);
+        if (!data.unreadOnly) pendingAgentSessionIds.add(data.sessionId);
         clearTimeout(agentRefreshTimer);
         agentRefreshTimer = setTimeout(() => {
+          if (skipOffScreen()) return;
           fetchSessions(false).catch((err) => console.error('[SSE] fetchSessions failed:', err));
           if (viewMode === 'project' && currentProjectSessionIds.some((id) => pendingAgentSessionIds.has(id))) {
             refreshProjectAgents();
           } else if (currentSessionId && pendingAgentSessionIds.has(currentSessionId)) {
-            fetchAgents(currentSessionId);
+            // An agent starting/stopping adds its Agent tool_use + completion rows to
+            // the transcript. Refresh the message log on the same signal so they appear
+            // at start, not only when an unrelated metadata/context refresh coincides
+            // with completion.
+            refreshSessionDetail(currentSessionId);
           }
           pendingAgentSessionIds.clear();
         }, 500);
@@ -4500,59 +10275,106 @@ function setupEventSource() {
 
       if (data.type === 'context-update') {
         debouncedRefresh(data.sessionId, true);
-        refreshRateLimits();
+        if (!skipOffScreen()) refreshRateLimits();
       }
 
       if (data.type === 'preview:open') {
         handlePreviewOpenEvent(data);
       }
 
+      if (data.type === 'document:link') {
+        handleDocumentLinkEvent(data);
+      }
+
       if (data.type === 'session:open') {
         handleSessionOpenEvent(data);
+      }
+
+      // Alone, the page would open a tab without a user gesture, which the browser blocks; the
+      // CLI prints the link instead.
+      if (data.type === 'session:cost' && hub.inHub) {
+        openCost(data.id, { agent: data.agent, pane: false });
       }
 
       if (data.type === 'session:pin') {
         handleSessionPinEvent(data);
       }
 
-      if (data.type === 'session:plan') {
-        handleSessionPlanEvent(data);
+      if (data.type === 'group:changed') {
+        onGroupChanged(data);
       }
 
-      if (data.type === 'branch:resolved') {
-        let changed = false;
-        for (const s of sessions) {
-          if (s.cwd === data.cwd && s.gitBranch !== data.branch) {
-            s.gitBranch = data.branch;
-            changed = true;
-          }
+      if (data.type === 'pane:changed') {
+        applyPaneLayout(data.sessionId, data.layout);
+      }
+
+      if (data.type === 'pane:file-changed') {
+        onPaneFileChanged(data.path);
+      }
+
+      if (data.type === 'team-update') {
+        const teamSession = sessions.find((s) => s.isTeam && s.teamName === data.teamName);
+        if (teamSession) {
+          debouncedRefresh(teamSession.id, false);
+        } else if (currentSessionId) {
+          debouncedRefresh(currentSessionId, false);
         }
-        if (changed) renderSessions();
       }
-
-      if (data.type === 'task:update' && data.sessionId === currentSessionId) {
-        fetchTasks(currentSessionId).catch(() => {});
-      }
-
     };
   }
 
-  // Browsers may suspend SSE when tab is hidden, so catch up on return.
-  // Cheap with ETag in place — 304 when nothing changed.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) return;
+  // When cck comes back on screen (tab visible or hub:active), catch up immediately
+  async function catchUp() {
+    markOpenSessionRead();
+    if (!isOnScreen() || !missedWhileHidden) return;
+    missedWhileHidden = false;
+    // The full refresh below covers whatever the pending debounces would have fetched.
+    for (const t of [taskRefreshTimer, metadataRefreshTimer, agentRefreshTimer]) clearTimeout(t);
+    metadataDeadline = 0;
+    pendingTaskSessionIds.clear();
+    pendingAgentSessionIds.clear();
+    const sessionsLoaded = fetchSessions().catch(() => {});
+    if (viewMode === 'project' && currentProjectPath) {
+      await sessionsLoaded;
+      fetchProjectView(currentProjectPath);
+    } else if (currentSessionId) {
+      fetchTasks(currentSessionId).catch(() => {});
+      await refreshSessionDetail(currentSessionId);
+    }
+    refreshOpenPlan();
+    refreshRateLimits();
+    renderAgentFooter();
+  }
+  document.addEventListener('visibilitychange', catchUp);
+  onHubActive = (active) => {
+    hubActive = active;
+    catchUp();
+    if (hubActive && wantsTerminal()) onTerminalShown();
+  };
+
+  // Fallback poll every 30s in case SSE silently drops; skip when not on screen
+  setInterval(() => {
+    if (!isOnScreen()) {
+      if (eventSource?.readyState !== EventSource.OPEN) missedWhileHidden = true;
+      return;
+    }
     fetchSessions().catch(() => {});
-    if (currentSessionId) fetchTasks(currentSessionId).catch(() => {});
-  });
+  }, 30000);
 
   connect();
 }
 
-const CONTEXT_COLORS = { green: '#5b9a6b', yellow: '#b8a63e', orange: '#c07840', red: '#b85555' };
+const CONTEXT_COLORS = {
+  green: 'var(--success)',
+  yellow: 'var(--warning)',
+  orange: 'color-mix(in srgb, var(--warning), var(--danger))',
+  red: 'var(--danger)',
+};
 const COST_THRESHOLDS = { green: 0.5, yellow: 2, orange: 5 };
 const MODEL_THRESHOLDS = [
-  { match: /sonnet|haiku/i, yellow: 100000, orange: 130000, red: 150000 },
-  { match: /opus/i, yellow: 100000, orange: 200000, red: 700000 },
+  { match: /sonnet/i, yellow: 120000, orange: 200000, red: 300000 },
+  { match: /haiku/i, yellow: 100000, orange: 130000, red: 150000 },
+  { match: /opus/i, yellow: 150000, orange: 250000, red: 400000 },
 ];
 const DEFAULT_THRESHOLDS = { yellow: 100000, orange: 130000, red: 150000 };
 
@@ -4593,20 +10415,30 @@ function renderMarkers(markers) {
 }
 
 function formatTokens(k) {
-  if (k >= 1000) return `${(k / 1000).toFixed(1)}M`;
+  if (k >= 1000) return `${(k / 1000).toFixed(1).replace(/\.0$/, '')}M`;
   if (k < 1) return (k * 1000).toFixed(0);
   return `${Math.round(k)}K`;
 }
 
-function getCtx(raw) {
+// session.autoCompact ({window, pct} from the session's settings) makes the compaction point the
+// bar's full scale, because the status line reports the model's full window regardless.
+function getCtx(session) {
+  const raw = session?.contextStatus;
+  const autoCompact = session?.autoCompact;
   if (!raw) return null;
   const cw = raw.context_window || {};
-  const size = cw.context_window_size || 0;
-  const pct = cw.used_percentage || 0;
+  const modelSize = cw.context_window_size || 0;
   const model = raw.model || {};
   const modelName = model.display_name || model.id || '';
   const thresholds = getModelThresholds(modelName);
-  const usedTokens = size > 0 ? (pct / 100) * size : 0;
+  const usedTokens = modelSize > 0 ? ((cw.used_percentage || 0) / 100) * modelSize : 0;
+  const compactAt =
+    modelSize > 0 && autoCompact
+      ? (Math.min(modelSize, autoCompact.window || modelSize) * (autoCompact.pct || 100)) / 100
+      : 0;
+  const compacts = compactAt > 0 && compactAt < modelSize;
+  const size = compacts ? compactAt : modelSize;
+  const pct = compacts ? Math.min(100, (usedTokens / size) * 100) : cw.used_percentage || 0;
   const markers =
     size > 0
       ? [
@@ -4617,8 +10449,10 @@ function getCtx(raw) {
       : [];
   return {
     pct,
-    remaining: cw.remaining_percentage || 100 - pct,
+    remaining: 100 - pct,
     size,
+    modelSize,
+    compacts,
     usedTokens,
     modelName,
     inputTokens: cw.total_input_tokens || 0,
@@ -4627,18 +10461,23 @@ function getCtx(raw) {
   };
 }
 
-function renderContextBar(raw) {
-  const ctx = getCtx(raw);
+function renderContextBar(session) {
+  const ctx = getCtx(session);
   if (!ctx) return '';
   const color = getContextColor(ctx.usedTokens, ctx.modelName);
+  const fmt = (n) => formatTokens(n / 1000);
+  const used = fmt(ctx.usedTokens);
+  const title = ctx.compacts
+    ? `Context: ${used} of ${fmt(ctx.size)} tokens before auto-compact (model window ${fmt(ctx.modelSize)})`
+    : `Context: ${used}${ctx.size ? ` of ${fmt(ctx.size)}` : ''} tokens`;
   return `
-        <div class="context-bar" style="display:block">
+        <div class="context-bar" title="${escapeHtml(title)}">
           <div class="context-bar-track">
             <div class="context-bar-fill" style="width:${ctx.pct}%;background:${color}"></div>
             ${renderMarkers(ctx.markers)}
           </div>
           <div class="context-bar-labels">
-            <span style="color:${color}">${Math.round(ctx.pct)}% (${formatTokens(ctx.usedTokens / 1000)})</span>
+            <span style="color:${color}">${Math.round(ctx.pct)}% (${used})</span>
             <span>${Math.round(ctx.remaining)}% free</span>
           </div>
         </div>`;
@@ -4649,20 +10488,99 @@ function formatCost(usd) {
   return `$${usd.toFixed(2)}`;
 }
 
-function renderContextDetail(raw) {
-  const ctx = getCtx(raw);
-  if (!ctx) return '';
-  const totalK = ctx.size / 1000;
-  const color = getContextColor(ctx.usedTokens, ctx.modelName);
+const CACHE_TTL = { '5m': { ms: 5 * 60000, write: 1.25 }, '1h': { ms: 60 * 60000, write: 2 } };
+// List input price, $ per million tokens. Most specific prefix first.
+const INPUT_PRICE_PER_MTOK = [
+  ['claude-fable-5', 10],
+  ['claude-mythos-5', 10],
+  ['claude-opus-5-5', 4],
+  ['claude-opus-5', 5],
+  ['claude-opus-4', 5],
+  ['claude-sonnet-5', 2],
+  ['claude-sonnet-4', 3],
+  ['claude-haiku-4', 1],
+];
 
-  const cw = raw.context_window || {};
-  const usage = cw.current_usage || {};
-  const cost = raw.cost || {};
+// Same token count Claude Code prices in its own estimated_cache_write_usd.
+function cacheRewrite(usage, modelId, writeRate) {
+  const price = INPUT_PRICE_PER_MTOK.find(([prefix]) => modelId?.startsWith(prefix))?.[1];
+  const tokens =
+    (usage?.input_tokens || 0) +
+    (usage?.cache_read_input_tokens || 0) +
+    (usage?.cache_creation_input_tokens || 0) +
+    (usage?.output_tokens || 0);
+  if (!price || !tokens) return null;
+  return { tokens, usd: (tokens / 1e6) * price * writeRate };
+}
 
-  return `
-        <div class="detail-context">
-          <div class="detail-context-title">${ctx.modelName ? escapeHtml(ctx.modelName) : 'Context Window'}</div>
-          <div class="detail-context-bar">
+function formatCacheLeft(expiresAt, expiredText) {
+  const left = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+  if (left === 0) return { text: expiredText, color: 'var(--text-muted)' };
+  const text = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+  const color = left < 120 ? CONTEXT_COLORS.red : left < 300 ? CONTEXT_COLORS.orange : CONTEXT_COLORS.green;
+  return { text, color };
+}
+
+let cacheTimerInterval = null;
+
+function tickCacheTimers() {
+  const els = document.querySelectorAll('.cache-timer');
+  if (!els.length) {
+    clearInterval(cacheTimerInterval);
+    cacheTimerInterval = null;
+    return;
+  }
+  if (!isOnScreen()) return;
+  for (const el of els) {
+    const { text, color } = formatCacheLeft(Number(el.dataset.expires), el.dataset.expiredText);
+    if (el.textContent === text) continue;
+    el.textContent = text;
+    el.style.color = color;
+  }
+}
+
+function renderCacheTimer({ at, ttl, usage, model }) {
+  const cache = CACHE_TTL[ttl];
+  if (!at || !cache) return '';
+  const expiresAt = at + cache.ms;
+  const rewrite = cacheRewrite(usage, model, cache.write);
+  const expiredText = rewrite ? `expired · ~${formatCost(rewrite.usd)}` : 'expired';
+  const { text, color } = formatCacheLeft(expiresAt, expiredText);
+  cacheTimerInterval ??= setInterval(tickCacheTimers, 1000);
+  const clock = new Date(expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const cost = rewrite
+    ? ` It writes ${formatTokens(rewrite.tokens / 1000)} tokens again, about ${formatCost(rewrite.usd)} at list price.`
+    : '';
+  const title = `Prompt cache, ${ttl} TTL. Expires at ${clock}; the next request after that writes it again.${cost}`;
+  return `<div class="stat-item" title="${escapeHtml(title)}"><span class="stat-label">Cache</span><span class="stat-value cache-timer" data-expires="${escapeHtml(expiresAt)}" data-expired-text="${escapeHtml(expiredText)}" style="color:${color}">${text}</span></div>`;
+}
+
+// The Cache row and the current-usage rows come from the transcript (session.cache); the rest needs the plugin's file.
+function renderContextDetail(session, { tokens = true } = {}) {
+  const ctx = getCtx(session);
+  const reply = session.cache;
+  if (!ctx && !reply) return '';
+  const usage = reply?.usage;
+  const cost = session.contextStatus?.cost || {};
+  const color = ctx && getContextColor(ctx.usedTokens, ctx.modelName);
+  const title = ctx?.modelName || reply?.modelName || 'Context Window';
+
+  const usageRows =
+    tokens && usage
+      ? `<div class="stat-item"><span class="stat-label">Cache read</span><span class="stat-value">${formatTokens(usage.cache_read_input_tokens / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Cache write</span><span class="stat-value">${formatTokens(usage.cache_creation_input_tokens / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Current input</span><span class="stat-value">${formatTokens(usage.input_tokens / 1000)}</span></div>
+            <div class="stat-item"><span class="stat-label">Current output</span><span class="stat-value">${formatTokens(usage.output_tokens / 1000)}</span></div>
+            <div class="stat-divider"></div>`
+      : '';
+  const totalRows =
+    tokens && ctx
+      ? `<div class="stat-item"><span class="stat-label">Total input</span><span class="stat-value">${formatTokens(ctx.inputTokens / 1000)}</span></div>
+            ${ctx.outputTokens ? `<div class="stat-item"><span class="stat-label">Total output</span><span class="stat-value">${formatTokens(ctx.outputTokens / 1000)}</span></div>` : ''}
+            <div class="stat-divider"></div>`
+      : '';
+  const bar = ctx
+    ? `<div class="detail-context-bar">
             <div class="context-bar-track">
               <div class="context-bar-fill" style="width:${ctx.pct}%;background:${color}"></div>
               ${renderMarkers(ctx.markers)}
@@ -4670,21 +10588,22 @@ function renderContextDetail(raw) {
           </div>
           <div class="detail-context-summary">
             <span style="color:${color}">${Math.round(ctx.pct)}% used</span>
-            <span>${formatTokens((ctx.pct / 100) * totalK)} / ${formatTokens(totalK)}</span>
-          </div>
+            <span${ctx.compacts ? ` title="Auto-compact window · model window ${escapeHtml(formatTokens(ctx.modelSize / 1000))}"` : ''}>${formatTokens(ctx.usedTokens / 1000)} / ${formatTokens(ctx.size / 1000)}</span>
+          </div>`
+    : '';
+
+  return `
+        <div class="detail-context">
+          <div class="detail-context-title">${escapeHtml(title)}</div>
+          ${bar}
           <div class="detail-context-stats">
-            <div class="stat-item"><span class="stat-label">Cache read</span><span class="stat-value">${formatTokens((usage.cache_read_input_tokens || 0) / 1000)}</span></div>
-            <div class="stat-item"><span class="stat-label">Cache write</span><span class="stat-value">${formatTokens((usage.cache_creation_input_tokens || 0) / 1000)}</span></div>
-            <div class="stat-item"><span class="stat-label">Current input</span><span class="stat-value">${formatTokens((usage.input_tokens || 0) / 1000)}</span></div>
-            <div class="stat-item"><span class="stat-label">Current output</span><span class="stat-value">${formatTokens((usage.output_tokens || 0) / 1000)}</span></div>
-            <div class="stat-divider"></div>
-            <div class="stat-item"><span class="stat-label">Total input</span><span class="stat-value">${formatTokens(ctx.inputTokens / 1000)}</span></div>
-            <div class="stat-item"><span class="stat-label">Total output</span><span class="stat-value">${formatTokens(ctx.outputTokens / 1000)}</span></div>
-            <div class="stat-divider"></div>
-            <div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(cost.total_cost_usd)}">${formatCost(cost.total_cost_usd)}</span></div>
-            <div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(cost.total_duration_ms)}</span></div>
-            <div class="stat-item"><span class="stat-label">API time</span><span class="stat-value">${formatDuration(cost.total_api_duration_ms)}</span></div>
-            <div class="stat-item"><span class="stat-label">Lines</span><span class="stat-value"><span style="color:${CONTEXT_COLORS.green}">+${(cost.total_lines_added || 0).toLocaleString()}</span> / <span style="color:${CONTEXT_COLORS.red}">-${(cost.total_lines_removed || 0).toLocaleString()}</span></span></div>
+            ${usageRows}
+            ${totalRows}
+            ${ctx ? `<div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(cost.total_cost_usd)}">${formatCost(cost.total_cost_usd)}</span></div>` : ''}
+            ${reply ? renderCacheTimer(reply) : ''}
+            ${cost.total_duration_ms != null ? `<div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(cost.total_duration_ms)}</span></div>` : ''}
+            ${cost.total_api_duration_ms != null ? `<div class="stat-item"><span class="stat-label">API time</span><span class="stat-value">${formatDuration(cost.total_api_duration_ms)}</span></div>` : ''}
+            ${cost.total_lines_added != null ? `<div class="stat-item"><span class="stat-label">Lines</span><span class="stat-value"><span style="color:${CONTEXT_COLORS.green}">+${(cost.total_lines_added || 0).toLocaleString()}</span> / <span style="color:${CONTEXT_COLORS.red}">-${(cost.total_lines_removed || 0).toLocaleString()}</span></span></div>` : ''}
           </div>
         </div>`;
 }
@@ -4693,13 +10612,333 @@ function renderContextDetail(raw) {
 
 //#region UTILS
 function maybeFollowLatest() {
-  if (msgDetailFollowLatest && currentMessages.length) {
+  if (!msgDetailFollowLatest) return;
+  if (isWaitingFresh()) {
+    showWaitingDetail();
+  } else if (currentMessages.length) {
     showMsgDetail(currentMessages.length - 1);
   }
 }
 
+// A new answerable ask opens its modal on its own, but only onto an empty
+// screen: an open modal means the user is reading something, so the ask stays
+// on the card and the badge until they get to it. Each ask id is offered once,
+// so closing the modal does not bring it back on the next poll.
+let lastAutoOpenedWaitingId = null;
+// Set only on that self-opening path: answering an ask the user never asked to see
+// should put the screen back the way it was, where answering one they navigated to
+// keeps them following. Cleared with the modal, so a manual reopen is not "auto".
+let waitingDetailAutoOpened = false;
+function maybeAutoOpenWaiting() {
+  if (!isWaitingAnswerable() || !isWaitingFresh()) return;
+  if (currentWaiting.id === lastAutoOpenedWaitingId || isAnyModalOpen()) return;
+  // The terminal on screen shows the same ask; hiding it lets the next poll open the modal.
+  if (termState.shown) return;
+  lastAutoOpenedWaitingId = currentWaiting.id;
+  msgDetailFollowLatest = true;
+  waitingDetailAutoOpened = true;
+  maybeFollowLatest();
+}
+
+function isWaitingFresh() {
+  if (!currentWaiting?.timestamp) return false;
+  return Date.now() - new Date(currentWaiting.timestamp).getTime() < WAITING_TTL_MS;
+}
+
+// Per-question selections for the AskUserQuestion form, keyed by question text
+// (the shape the tool's `answers` input expects). Picks hold arrays of option
+// labels (length <= 1 unless multiSelect); free text lives separately so a
+// multi-select can combine both, the way the TUI's "Other" row does. Reset
+// when the ask changes.
+let waitingAnswerDraft = {};
+let waitingCustomDraft = {};
+let waitingDraftId = null;
+let waitingQuestions = [];
+
+function waitingAnswerFor(q) {
+  const picks = waitingAnswerDraft[q.question] || [];
+  const custom = waitingCustomDraft[q.question] || '';
+  if (q.multiSelect) {
+    const all = custom ? picks.concat(custom) : picks;
+    return all.length ? all : null;
+  }
+  return picks[0] || custom || null;
+}
+
+// The action buttons live in the modal's fixed footer (#msg-detail-waiting-footer),
+// not the scrollable body — long content must not push them out of reach.
+function renderWaitingFooter(tool, params) {
+  if (currentWaiting?.kind === 'plan') {
+    return isWaitingAnswerable() ? planApprovalControlsHtml('plan-reject-feedback') : '';
+  }
+  if (currentWaiting?.kind !== 'question') {
+    const buttons = waitingDecisionButtons('waiting-btn');
+    const hint = `<span class="waiting-footer-hint">${sendKbd()} allow · ${termKbd()} terminal</span>`;
+    return buttons ? hint + buttons : '';
+  }
+  if (!isWaitingAnswerable()) return '';
+  if (tool !== 'AskUserQuestion') return '';
+  const questions = Array.isArray(params?.questions) ? params.questions : [];
+  if (!questions.length) return '';
+  const picked = questions.filter((q) => waitingAnswerFor(q)).length;
+  const partial = picked > 0 && picked < questions.length ? ` (${picked}/${questions.length})` : '';
+  return `<span class="waiting-footer-hint"><kbd>1</kbd>–<kbd>9</kbd> pick · ${sendKbd()} send</span><button id="waiting-answer-btn" class="waiting-btn-allow" ${picked > 0 ? '' : 'disabled'} onclick="submitWaitingAnswers()">Send answers${partial}</button>`;
+}
+
+function renderWaitingActions(tool, params) {
+  if (!isWaitingAnswerable() || currentWaiting.kind !== 'question' || tool !== 'AskUserQuestion') return '';
+  waitingQuestions = Array.isArray(params?.questions) ? params.questions : [];
+  if (!waitingQuestions.length) return '';
+  const multiQ = waitingQuestions.length > 1;
+  waitingTab = Math.max(0, Math.min(waitingTab, multiQ ? waitingQuestions.length : 0));
+  const onReview = multiQ && waitingTab === waitingQuestions.length;
+  const tabs = multiQ
+    ? `<div class="waiting-qtabs" role="tablist">${waitingQuestions
+        .map((q, idx) => {
+          const done = !!waitingAnswerFor(q);
+          return `<button class="waiting-qtab${idx === waitingTab ? ' active' : ''}${done ? ' done' : ''}" role="tab" onclick="setWaitingTab(${idx})"><span class="waiting-qtab-n">${idx + 1}</span>${escapeHtml(q.header || `Question ${idx + 1}`)}${done ? '<span class="waiting-qtab-check">✓</span>' : ''}</button>`;
+        })
+        .join(
+          '',
+        )}<button class="waiting-qtab${onReview ? ' active' : ''}" role="tab" onclick="setWaitingTab(${escapeHtml(String(waitingQuestions.length))})">Review</button><span class="waiting-qtabs-hint"><kbd>←</kbd><kbd>→</kbd> switch</span></div>`
+    : '';
+  if (onReview) {
+    const rows = waitingQuestions
+      .map((q) => {
+        const a = waitingAnswerFor(q);
+        const text = Array.isArray(a) ? a.join(', ') : a;
+        return `<div class="waiting-review-row"><div class="waiting-review-q">${escapeHtml(q.header || q.question || '')}</div><div class="waiting-review-a${text ? '' : ' empty'}">${text ? escapeHtml(text) : 'Not answered'}</div></div>`;
+      })
+      .join('');
+    return `<div class="waiting-actions">${tabs}<div class="waiting-review">${rows}</div></div>`;
+  }
+  const qs = waitingQuestions
+    .map((q, idx) => {
+      if (idx !== waitingTab && multiQ) return '';
+      const picks = waitingAnswerDraft[q.question] || [];
+      const opts = (q.options || [])
+        .map((o, oi) => {
+          const label = waitingOptionLabel(o);
+          const desc = typeof o === 'object' ? o?.description || '' : '';
+          const descHtml = desc ? `<span class="waiting-option-desc">${renderMarkdown(desc)}</span>` : '';
+          // The option `preview` field is the TUI's side-by-side visualization
+          // pane (mockups, code snippets, diagrams) — rendered as markdown
+          const preview = typeof o === 'object' ? o?.preview || '' : '';
+          const previewHtml = preview ? `<span class="waiting-option-preview">${renderMarkdown(preview)}</span>` : '';
+          return `<button class="waiting-option${picks.includes(label) ? ' selected' : ''}" data-label="${escapeHtml(label)}" onclick="selectWaitingAnswer(${idx}, this.dataset.label)"><kbd class="waiting-option-key">${oi + 1}</kbd><span class="waiting-option-text"><span class="waiting-option-label">${escapeHtml(label)}</span>${descHtml}${previewHtml}</span></button>`;
+        })
+        .join('');
+      const header = q.header ? `<span class="waiting-question-header">${escapeHtml(q.header)}</span>` : '';
+      const multi = q.multiSelect ? '<span class="waiting-question-multi">multi-select</span>' : '';
+      const input = `<input type="text" class="waiting-option-input" placeholder="Or type your own answer" value="${escapeHtml(waitingCustomDraft[q.question] || '')}" oninput="setWaitingCustomAnswer(${idx}, this)" onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();submitWaitingAnswers()}">`;
+      return `<div class="waiting-question">${multiQ ? '' : header}${multi}<div class="waiting-question-text">${renderMarkdown(q.question || '')}</div><div class="waiting-options">${opts}</div>${input}</div>`;
+    })
+    .join('');
+  return `<div class="waiting-actions">${tabs}${qs}</div>`;
+}
+
+let waitingTab = 0;
+
+function waitingOptionLabel(o) {
+  return typeof o === 'string' ? o : o?.label || '';
+}
+
+function setWaitingTab(i) {
+  const last = waitingQuestions.length > 1 ? waitingQuestions.length : 0;
+  const next = Math.max(0, Math.min(i, last));
+  if (next === waitingTab) return;
+  waitingTab = next;
+  showWaitingDetail();
+}
+
+function pickWaitingOptionByNumber(n) {
+  const qi = waitingQuestions.length > 1 ? waitingTab : 0;
+  const o = waitingQuestions[qi]?.options?.[n];
+  if (!o) return;
+  selectWaitingAnswer(qi, waitingOptionLabel(o));
+}
+
+function selectWaitingAnswer(qi, label) {
+  const q = waitingQuestions[qi];
+  if (!q) return;
+  // Clicking a picked option unpicks it, in both modes
+  const picks = waitingAnswerDraft[q.question] || [];
+  if (q.multiSelect) {
+    waitingAnswerDraft[q.question] = picks.includes(label) ? picks.filter((l) => l !== label) : picks.concat(label);
+  } else if (picks.includes(label)) {
+    delete waitingAnswerDraft[q.question];
+  } else {
+    waitingAnswerDraft[q.question] = [label];
+    delete waitingCustomDraft[q.question];
+    if (waitingQuestions.length > 1 && waitingTab < waitingQuestions.length) waitingTab += 1;
+  }
+  showWaitingDetail();
+}
+
+// Free-text path — the TUI's "type your own answer". Updates the draft and the
+// Answer button in place: a full re-render here would drop the input's focus
+// on every keystroke.
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML oninput
+function setWaitingCustomAnswer(qi, el) {
+  const q = waitingQuestions[qi];
+  if (!q) return;
+  const v = el.value.trim();
+  if (v) waitingCustomDraft[q.question] = v;
+  else delete waitingCustomDraft[q.question];
+  if (v && !q.multiSelect) {
+    delete waitingAnswerDraft[q.question];
+    for (const b of el.closest('.waiting-question')?.querySelectorAll('.waiting-option.selected') || []) {
+      b.classList.remove('selected');
+    }
+  }
+  const btn = document.getElementById('waiting-answer-btn');
+  if (btn) {
+    const picked = waitingQuestions.filter((qq) => waitingAnswerFor(qq)).length;
+    btn.disabled = picked === 0;
+    btn.textContent =
+      picked > 0 && picked < waitingQuestions.length
+        ? `Send answers (${picked}/${waitingQuestions.length})`
+        : 'Send answers';
+  }
+}
+
+function submitWaitingAnswers() {
+  // Partial submits are fine — send only the questions actually answered.
+  // multiSelect answers go as arrays of labels (the shape the TUI validates).
+  const answers = {};
+  for (const q of waitingQuestions) {
+    const a = waitingAnswerFor(q);
+    if (a) answers[q.question] = a;
+  }
+  if (!Object.keys(answers).length) return;
+  respondWaiting({ answers });
+}
+
+function renderPermissionDiff(oldText, newText) {
+  const rows = (text, sign, cls) =>
+    String(text)
+      .split('\n')
+      .map(
+        (l) =>
+          `<div class="perm-diff-row ${escapeHtml(cls)}"><span class="perm-diff-sign">${sign}</span>${escapeHtml(l)}</div>`,
+      )
+      .join('');
+  return `<div class="perm-diff">${rows(oldText, '−', 'del')}${rows(newText, '+', 'add')}</div>`;
+}
+
+// The permission card shows what Claude wants to run in full, not a one-line gist:
+// the command or the diff, where it runs, and how long the ask has been waiting.
+function renderPermissionSummary(tool, params) {
+  const waited = formatDuration(Math.max(0, Date.now() - new Date(currentWaiting.timestamp).getTime()));
+  const head = `<div class="perm-head"><span class="perm-tool">${escapeHtml(tool)}</span><span class="perm-wait" title="How long Claude has been waiting">waiting ${escapeHtml(waited)}</span></div>`;
+  let body = '';
+  if (typeof params.command === 'string') {
+    body = `<div class="perm-label">Command</div><pre class="perm-code">${escapeHtml(params.command)}</pre>`;
+    if (params.description) body += `<div class="perm-note">${escapeHtml(params.description)}</div>`;
+  } else if (typeof params.old_string === 'string' && typeof params.new_string === 'string') {
+    body = `<div class="perm-label">${escapeHtml(params.file_path || 'File')}</div>${renderPermissionDiff(params.old_string, params.new_string)}`;
+  } else if (typeof params.file_path === 'string') {
+    body = `<div class="perm-label">File</div><pre class="perm-code">${escapeHtml(params.file_path)}</pre>`;
+  } else if (typeof params.description === 'string') {
+    body = `<pre class="perm-code">${escapeHtml(params.description)}</pre>`;
+  }
+  const cwd = currentWaiting.cwd ? `<div class="perm-cwd">in ${escapeHtml(currentWaiting.cwd)}</div>` : '';
+  return `<div class="perm-card">${head}${body}${cwd}</div>`;
+}
+
+function showWaitingDetail() {
+  if (!isWaitingFresh()) return;
+  currentMsgDetailIdx = MSG_DETAIL_WAITING_IDX;
+  unmountMsgReview();
+  msgHighlightDimmed = false;
+  highlightSelectedMsg();
+  // Follow-mode poll ticks re-run this whole render — carry any typed reject
+  // feedback across the rebuild, but never onto a different ask.
+  const sameAsk = currentWaiting.id === waitingDraftId;
+  const feedbackDraft = sameAsk ? document.getElementById('plan-reject-feedback')?.value || '' : '';
+  if (!sameAsk) {
+    waitingDraftId = currentWaiting.id || null;
+    waitingAnswerDraft = {};
+    waitingCustomDraft = {};
+    waitingTab = 0;
+  }
+  const tool = currentWaiting.toolName || 'unknown';
+  const label = getWaitingLabel(currentWaiting.kind, tool);
+  const body = document.getElementById('msg-detail-body');
+  let inputHtml = '';
+  const params = parseWaitingInput();
+  if (currentWaiting.toolInput) {
+    const pretty = params ? JSON.stringify(params, null, 2) : currentWaiting.toolInput;
+    inputHtml = `<pre class="${TINTED_PRE_CLASS}">${escapeHtml(pretty)}</pre>`;
+  }
+  const actionsHtml = renderWaitingActions(tool, params);
+  const footerHtml = renderWaitingFooter(tool, params);
+  // With actions on screen the form/buttons are the content — tuck the raw
+  // JSON behind a toggle, but keep what the user is approving visible: for a
+  // permission ask surface the command (or description) as a one-line summary
+  if ((actionsHtml || footerHtml) && inputHtml) {
+    let summaryHtml = '';
+    if (currentWaiting.kind === 'plan' && typeof params?.plan === 'string' && params.plan) {
+      // A plan ask IS the plan — render it in full so it can be reviewed and
+      // approved right here (follow mode included) instead of a JSON dump. The
+      // raw tool input is dropped entirely to match the saved-plan modal.
+      inputHtml = `<div class="detail-desc rendered-md waiting-plan">${renderMarkdown(params.plan)}</div>`;
+    } else {
+      if (currentWaiting.kind !== 'question' && params) summaryHtml = renderPermissionSummary(tool, params);
+      inputHtml = `${summaryHtml}<details class="waiting-raw-input"><summary>Raw tool input</summary>${inputHtml}</details>`;
+    }
+  }
+  body.innerHTML = inputHtml + actionsHtml;
+  document.getElementById('msg-detail-waiting-footer').innerHTML = footerHtml;
+  if (feedbackDraft) {
+    const feedbackEl = document.getElementById('plan-reject-feedback');
+    if (feedbackEl) feedbackEl.value = feedbackDraft;
+  }
+  document.getElementById('msg-detail-title').textContent = label;
+  document.getElementById('msg-detail-agent-btn').style.display = 'none';
+  const modal = document.getElementById('msg-detail-modal').querySelector('.modal');
+  autoSizeModal(modal, body);
+  setMsgDetailFollow(msgDetailFollowLatest);
+  const overlay = document.getElementById('msg-detail-modal');
+  const meta = [formatDate(currentWaiting.timestamp), 'waiting'];
+  document.getElementById('msg-detail-meta').textContent = meta.join(' · ');
+  currentPinDetailId = null;
+  updateMsgDetailPinState();
+  syncMsgDetailPaneBtn();
+  overlay.classList.add('visible');
+}
+
 function isSessionActive(s) {
   return s.hasRecentLog || s.inProgress > 0 || s.hasActiveAgents || s.hasWaitingForUser;
+}
+
+function isInPinnedGroup(s) {
+  return isPlacedPinned(s.id) && !isPlacedSticky(s.id);
+}
+
+const SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function sessionDisplayName(session) {
+  const raw = session.name || session.id;
+  return SESSION_UUID_RE.test(raw) ? raw.slice(0, 8) : raw;
+}
+
+// Project paths arrive in the OS spelling, so a Windows path is backslash-separated.
+function pathBasename(p) {
+  return p.split(/[/\\]/).filter(Boolean).pop() || p;
+}
+
+// `session.worktree` is resolved server-side from the `.git` pointer file, so it holds for a
+// worktree parked beside its repo as well as one under <repo>/.claude/worktrees/.
+function renderProjectIdentity(session) {
+  if (!session.project) return null;
+  const wt = session.worktree;
+  if (!wt) return escapeHtml(pathBasename(session.project));
+  const repo = pathBasename(wt.repo);
+  // Worktrees beside the repo are conventionally named `<repo>-<branch>`, and repeating the
+  // repo inside a chip that already sits next to it wastes the whole width of the card.
+  const name = wt.name.startsWith(repo) ? wt.name.slice(repo.length).replace(/^[-._]/, '') || wt.name : wt.name;
+  return `${escapeHtml(repo)}<span class="wt-chip" title="Worktree of ${escapeHtml(wt.repo)}">⑂ ${escapeHtml(name)}</span>`;
 }
 
 function formatDate(dateStr) {
@@ -4707,21 +10946,199 @@ function formatDate(dateStr) {
   const now = new Date();
   const diff = now - date;
 
-  if (diff < 60000) return 'just now';
+  if (diff < JUST_NOW_MS) return 'just now';
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
   return date.toLocaleDateString();
 }
 
+// Terminal output reaches the transcript raw. A CSI-only pattern left OSC
+// sequences, 8-bit CSI and bare control bytes behind, and those render as tofu.
+// One ordered alternation covers every escape family, so both readers make a
+// single pass: OSC, SGR (the only one worth keeping — capture group 1 holds its
+// parameters), any other CSI, other two-char escapes, then whatever control
+// bytes are left, lone introducers included. \t \n \r are deliberately absent.
+const ANSI_TOKEN_RE =
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: escape and control bytes are the target
+  /\x1b\][\s\S]*?(?:\x07|\x1b\\|$)|[\x1b\x9b]\[([0-9;]*)m|[\x1b\x9b]\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|\x1b[ -/]+[0-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x9b]/g;
+
 function stripAnsi(text) {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: \x1b is intentional for ANSI escape sequence stripping
-  return typeof text === 'string' ? text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '') : text;
+  if (typeof text !== 'string') return text;
+  return text.replace(ANSI_TOKEN_RE, '');
+}
+
+const ANSI_COLOR_NAMES = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'];
+const XTERM_CUBE = [0, 95, 135, 175, 215, 255];
+
+// xterm-256 index -> a colour the browser understands. 0-15 stay named so they
+// follow the theme's palette; 16+ are exact and become an inline rgb().
+function ansi256Color(n) {
+  if (n < 8) return { name: ANSI_COLOR_NAMES[n] };
+  if (n < 16) return { name: `bright-${ANSI_COLOR_NAMES[n - 8]}` };
+  if (n < 232) {
+    const i = n - 16;
+    return {
+      rgb: `rgb(${XTERM_CUBE[Math.floor(i / 36) % 6]},${XTERM_CUBE[Math.floor(i / 6) % 6]},${XTERM_CUBE[i % 6]})`,
+    };
+  }
+  const v = 8 + (n - 232) * 10;
+  return { rgb: `rgb(${v},${v},${v})` };
+}
+
+// Attribute codes that only flip a flag: code -> [field, value].
+const SGR_FLAGS = {
+  1: ['bold', true],
+  2: ['dim', true],
+  3: ['italic', true],
+  4: ['underline', true],
+  7: ['inverse', true],
+  9: ['strike', true],
+  23: ['italic', false],
+  24: ['underline', false],
+  27: ['inverse', false],
+  29: ['strike', false],
+};
+
+// Reads one SGR parameter list into `st`. 38/48 consume their own arguments, so
+// the list is walked with an index rather than a for..of.
+function applySgr(params, st) {
+  const codes = params === '' ? [0] : params.split(';').map((p) => (p === '' ? 0 : Number(p)));
+  for (let i = 0; i < codes.length; i++) {
+    const c = codes[i];
+    const flag = SGR_FLAGS[c];
+    // 30-37/90-97 are foreground, 40-47/100-107 background; the low digit is the
+    // colour index and 9 in that slot means "back to the default".
+    const isColor = (c >= 30 && c <= 49) || (c >= 90 && c <= 107);
+    if (c === 0) {
+      st.fg = st.bg = null;
+      st.bold = st.dim = st.italic = st.underline = st.strike = st.inverse = false;
+      st.plain = true;
+    } else if (flag) {
+      st[flag[0]] = flag[1];
+      st.plain = false;
+    } else if (c === 22) {
+      st.bold = st.dim = false;
+    } else if (isColor && c !== 38 && c !== 48) {
+      const key = (c >= 40 && c <= 49) || c >= 100 ? 'bg' : 'fg';
+      const idx = c % 10;
+      st[key] = idx === 9 ? null : { name: c >= 90 ? `bright-${ANSI_COLOR_NAMES[idx]}` : ANSI_COLOR_NAMES[idx] };
+      if (idx !== 9) st.plain = false;
+    } else if (c === 38 || c === 48) {
+      st.plain = false;
+      const key = c === 38 ? 'fg' : 'bg';
+      if (codes[i + 1] === 5) {
+        st[key] = ansi256Color(codes[i + 2] || 0);
+        i += 2;
+      } else if (codes[i + 1] === 2) {
+        st[key] = { rgb: `rgb(${codes[i + 2] || 0},${codes[i + 3] || 0},${codes[i + 4] || 0})` };
+        i += 4;
+      }
+    }
+  }
+}
+
+function wrapAnsiChunk(chunk, st) {
+  const escaped = escapeHtml(chunk);
+  if (st.plain) return escaped;
+  const classes = [];
+  const styles = [];
+  const fg = st.inverse ? st.bg : st.fg;
+  const bg = st.inverse ? st.fg : st.bg;
+  if (fg?.name) classes.push(`ansi-fg-${fg.name}`);
+  else if (fg?.rgb) styles.push(`color:${fg.rgb}`);
+  // `ansi-bg` carries the padding both background forms share; the named form
+  // adds the colour class, the 256/truecolor form an inline background.
+  if (bg?.name) classes.push('ansi-bg', `ansi-bg-${bg.name}`);
+  else if (bg?.rgb) {
+    classes.push('ansi-bg');
+    styles.push(`background:${bg.rgb}`);
+  }
+  if (st.inverse && !fg && !bg) classes.push('ansi-inverse');
+  if (st.bold) classes.push('ansi-bold');
+  if (st.dim) classes.push('ansi-dim');
+  if (st.italic) classes.push('ansi-italic');
+  if (st.underline) classes.push('ansi-underline');
+  if (st.strike) classes.push('ansi-strike');
+  if (!classes.length && !styles.length) return escaped;
+  // Both values are built from fixed tables and digits parsed out of the SGR
+  // parameters, but they land in an attribute, so they go through the escaper.
+  const cls = classes.length ? ` class="${escapeHtml(classes.join(' '))}"` : '';
+  const style = styles.length ? ` style="${escapeHtml(styles.join(';'))}"` : '';
+  return `<span${cls}${style}>${escaped}</span>`;
+}
+
+// Renders terminal output as HTML with its SGR colours intact. One pass over
+// ANSI_TOKEN_RE: SGR tokens (capture group 1) move the state, every other token
+// is noise and is dropped, and the text between them is a chunk. Returns escaped
+// HTML — every chunk goes through escapeHtml before it is wrapped.
+function ansiToHtml(text) {
+  if (typeof text !== 'string') return '';
+  const st = {
+    fg: null,
+    bg: null,
+    bold: false,
+    dim: false,
+    italic: false,
+    underline: false,
+    strike: false,
+    inverse: false,
+    plain: true,
+  };
+  let out = '';
+  let last = 0;
+  ANSI_TOKEN_RE.lastIndex = 0;
+  let m = ANSI_TOKEN_RE.exec(text);
+  while (m) {
+    if (m.index > last) out += wrapAnsiChunk(text.slice(last, m.index), st);
+    if (m[1] !== undefined) applySgr(m[1], st);
+    last = m.index + m[0].length;
+    m = ANSI_TOKEN_RE.exec(text);
+  }
+  if (last === 0) return escapeHtml(text);
+  if (last < text.length) out += wrapAnsiChunk(text.slice(last), st);
+  return out;
+}
+
+function stripTeammateWrapper(text) {
+  if (typeof text !== 'string') return text;
+  const match = text.match(/^<teammate-message[^>]*>\n?([\s\S]*?)(?:<\/teammate-message>\s*)?$/);
+  return match ? match[1].trim() : text;
+}
+
+// The div.textContent -> innerHTML trick escapes only & < > : innerHTML serializes
+// for *text* context, where quotes are correctly left raw. That made every
+// attribute interpolation breakable with a bare " . It cannot be patched, so the
+// escaping is explicit here.
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' };
+
+function pickRandom(items) {
+  return items[Math.floor(Math.random() * items.length)];
 }
 
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  if (text == null) return '';
+  return String(text).replace(/[&<>"'`]/g, (c) => HTML_ESCAPES[c]);
+}
+
+// For a value landing inside a quoted JS string inside an HTML attribute —
+// onclick="fn('${escAttrJs(x)}')". The browser HTML-decodes the attribute before
+// the JS parser sees it, so the JS escape must happen first and be escaped in turn.
+function escAttrJs(value) {
+  const js = String(value == null ? '' : value)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+  return escapeHtml(js);
+}
+
+// For a value inside a double-quoted CSS attribute selector: [data-x="${escSel(v)}"].
+// escapeHtml is wrong here — the DOM holds the decoded value, so &quot; in the
+// selector matches nothing, and a bare " would end the selector string.
+function escSel(value) {
+  return String(value == null ? '' : value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
 }
 
 function toRelativeIfUnder(filePath, baseDir) {
@@ -4736,66 +11153,196 @@ function toRelativeIfUnder(filePath, baseDir) {
   return fp.slice(bd.length + 1);
 }
 
+// DOMPurify's default list plus `file:` and drive paths (`C:/x` reads as a scheme), so a link to a
+// local file survives and opens in the preview.
+const MARKDOWN_URI =
+  /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|file):|[a-z]:[\\/]|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
+
 function renderMarkdown(text) {
   if (typeof DOMPurify !== 'undefined' && typeof marked !== 'undefined') {
-    return DOMPurify.sanitize(marked.parse(text));
+    return DOMPurify.sanitize(marked.parse(text), { ALLOWED_URI_REGEXP: MARKDOWN_URI });
   }
   return `<pre style="white-space:pre-wrap;margin:0;">${escapeHtml(text)}</pre>`;
 }
 
-function tryParseJsonObject(text) {
-  if (typeof text !== 'string') return null;
-  const t = text.trim();
-  if (t.length < 2) return null;
-  const first = t[0];
-  const last = t[t.length - 1];
-  if (!((first === '{' && last === '}') || (first === '[' && last === ']'))) return null;
-  try {
-    const parsed = JSON.parse(t);
-    return parsed !== null && typeof parsed === 'object' ? parsed : null;
-  } catch { return null; }
-}
-
-function renderJsonPre(obj) {
-  return `<pre class="${TINTED_PRE_CLASS}">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
-}
-
-function renderJsonInputHtml(text) {
-  const parsed = tryParseJsonObject(text);
-  return parsed ? renderJsonPre(parsed) : null;
-}
-
-function renderJsonOrMarkdown(text) {
-  if (!text) return null;
-  return renderJsonInputHtml(text) || renderMarkdown(text);
-}
-
 function isLightTheme() {
-  const saved = localStorage.getItem('theme');
-  return (
-    document.body.classList.contains('light') || (!saved && window.matchMedia('(prefers-color-scheme: light)').matches)
-  );
+  return document.body.classList.contains('light');
 }
 
-function getMermaidTheme() {
-  return isLightTheme() ? 'default' : 'dark';
+const MERMAID_VARS = {
+  background: '--bg-surface',
+  primaryTextColor: '--text-primary',
+  primaryBorderColor: '--accent',
+  secondaryColor: '--bg-hover',
+  tertiaryColor: '--bg-surface',
+  lineColor: '--text-tertiary',
+  textColor: '--text-primary',
+  titleColor: '--text-primary',
+  clusterBkg: '--bg-surface',
+  clusterBorder: '--border',
+  edgeLabelBackground: '--bg-surface',
+  actorLineColor: '--text-tertiary',
+  noteBkgColor: '--bg-deep',
+  noteBorderColor: '--border',
+  noteTextColor: '--text-primary',
+  pieStrokeColor: '--bg-surface',
+  pieOuterStrokeColor: '--border',
+  pieTitleTextColor: '--text-primary',
+  pieLegendTextColor: '--text-primary',
+};
+// --bg-elevated sits too close to the dark page for a node, and the base theme derives near-black ER
+// rows from a dark primaryColor.
+const MERMAID_MODE_VARS = {
+  dark: { primaryColor: '--bg-hover', rowOdd: '--bg-hover', rowEven: '--bg-elevated' },
+  light: { primaryColor: '--bg-elevated', rowOdd: '--bg-elevated', rowEven: '--bg-elevated' },
+};
+let mermaidThemeKey = '';
+let colorProbe = null;
+const probedColors = new Map();
+
+// Mermaid's color parser knows only plain hex, rgb() and hsl(), and a hub theme may set oklch() or
+// relative color syntax; its initialize throws on one, and no diagram renders.
+function mermaidColor(value) {
+  if (!value || value.startsWith('#')) return value;
+  let rgb = probedColors.get(value);
+  if (rgb) return rgb;
+  colorProbe ??= document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  colorProbe.clearRect(0, 0, 1, 1);
+  colorProbe.fillStyle = 'transparent';
+  colorProbe.fillStyle = value;
+  colorProbe.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = colorProbe.getImageData(0, 0, 1, 1).data;
+  rgb = a === 255 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${+(a / 255).toFixed(3)})`;
+  probedColors.set(value, rgb);
+  return rgb;
 }
+
+// The base theme derives its other colors from these, and it parses colors itself, so it takes
+// resolved values rather than var() references.
+function mermaidConfig() {
+  const css = getComputedStyle(document.body);
+  const mode = isLightTheme() ? 'light' : 'dark';
+  const themeVariables = {
+    darkMode: mode === 'dark',
+    pieOpacity: '1',
+    pieSectionTextColor: '#fff',
+    fontFamily: css.getPropertyValue('--mono').trim(),
+  };
+  for (const [k, name] of Object.entries({ ...MERMAID_VARS, ...MERMAID_MODE_VARS[mode] })) {
+    themeVariables[k] = mermaidColor(css.getPropertyValue(name).trim());
+  }
+  SHOW_PALETTE[mode].series.forEach((c, i) => {
+    themeVariables[`pie${i + 1}`] = c;
+    themeVariables[`cScale${i}`] = c;
+  });
+  // ER labels are half see-through, so lines cross their text, and ER circles have a fixed white fill.
+  const themeCSS = `.relationshipLabelBox, .relationshipLabelBox rect { opacity: 1; } marker circle { fill: ${themeVariables.background}; }`;
+  // The default neo look draws borders as an accent-to-gray gradient with a drop shadow.
+  return { startOnLoad: false, theme: 'base', look: 'classic', themeVariables, themeCSS };
+}
+
+// Mermaid is about 3 MB, so it loads on the first diagram instead of on the page's critical path.
+const MERMAID_SCRIPT = {
+  src: 'https://cdn.jsdelivr.net/npm/mermaid@12.0.0/dist/mermaid.min.js',
+  integrity: 'sha384-xzghz1GQ5u9HCpVskeDPqMsdogD1yvuMQbEK53+wi+G70+6J1AG0L2cfi9PHjDWI',
+};
+let mermaidLoading = null;
+
+function loadMermaid() {
+  mermaidLoading ??= new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = MERMAID_SCRIPT.src;
+    script.integrity = MERMAID_SCRIPT.integrity;
+    script.crossOrigin = 'anonymous';
+    script.onload = () => {
+      try {
+        const config = mermaidConfig();
+        mermaidThemeKey = JSON.stringify(config);
+        mermaid.initialize(config);
+        resolve();
+      } catch (err) {
+        reject(err);
+      }
+    };
+    script.onerror = () => {
+      script.remove();
+      mermaidLoading = null;
+      reject(new Error('mermaid failed to load'));
+    };
+    document.head.appendChild(script);
+  });
+  return mermaidLoading;
+}
+
+let mermaidQueue = Promise.resolve();
+
+// mermaid.run is async, and two runs that overlap draw diagrams over each other.
+function queueMermaid(work) {
+  mermaidQueue = mermaidQueue.then(work).catch((err) => console.warn(err.message));
+}
+
+const MERMAID_PENDING = 'pre.mermaid:not([data-processed])';
 
 function initMermaidBlocks(container) {
-  if (typeof mermaid === 'undefined') return;
-  const blocks = (container || document).querySelectorAll('pre.mermaid:not([data-processed])');
-  if (blocks.length) mermaid.run({ nodes: [...blocks] });
+  const root = container || document;
+  if (!root.querySelector(MERMAID_PENDING)) return;
+  // Stamped here, after DOMPurify: it drops an attribute whose value holds `-->`, as most diagrams do.
+  const stampPending = () =>
+    [...root.querySelectorAll(MERMAID_PENDING)].map((b) => {
+      if (!b.hasAttribute('data-original')) b.setAttribute('data-original', b.textContent);
+      return b;
+    });
+  if (typeof mermaid === 'undefined') {
+    loadMermaid().then(
+      () => initMermaidBlocks(container),
+      (err) => {
+        console.warn(err.message);
+        for (const b of stampPending()) showMermaidError(b, err);
+      },
+    );
+    return;
+  }
+  queueMermaid(async () => {
+    // One block per run, so a bad diagram shows its own error and the others still render.
+    for (const b of stampPending()) {
+      try {
+        await mermaid.run({ nodes: [b] });
+      } catch (err) {
+        showMermaidError(b, err);
+      }
+    }
+  });
+}
+
+function showMermaidError(block, err) {
+  block.setAttribute('data-processed', 'true');
+  block.setAttribute('data-mermaid-error', '');
+  block.textContent = err?.message || String(err);
 }
 
 function reinitMermaidTheme() {
   if (typeof mermaid === 'undefined') return;
-  mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
-  document.querySelectorAll('pre.mermaid[data-processed]').forEach((el) => {
-    el.removeAttribute('data-processed');
-    el.innerHTML = escapeHtml(el.getAttribute('data-original') || '');
+  queueMermaid(() => {
+    const config = mermaidConfig();
+    const key = JSON.stringify(config);
+    if (key === mermaidThemeKey) return;
+    mermaidThemeKey = key;
+    mermaid.initialize(config);
+    document.querySelectorAll('pre.mermaid[data-processed]').forEach((el) => {
+      el.removeAttribute('data-processed');
+      el.removeAttribute('data-mermaid-error');
+      el.innerHTML = escapeHtml(el.getAttribute('data-original') || '');
+    });
+    initMermaidBlocks();
   });
-  initMermaidBlocks();
 }
+
+// Keyed on the colors for the same reason as the terminal theme: under the hub a theme change
+// lands in two steps.
+new MutationObserver(reinitMermaidTheme).observe(document.body, {
+  attributes: true,
+  attributeFilter: ['class', 'data-color-theme', 'style'],
+});
 
 const _agentTabTexts = {};
 
@@ -4816,7 +11363,7 @@ function renderAgentTabs(promptHtml, responseHtml, promptText, responseText) {
   }
   if (!tabs.length) return '';
   const defaultTab = responseHtml ? 'response' : tabs[0].key;
-  const copyBtnHtml = `<button class="agent-tab-copy" title="Copy" onclick="copyAgentTabActive('${id}',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>`;
+  const copyBtnHtml = `<button class="agent-tab-copy" title="Copy" onclick="copyAgentTabActive('${id}',this)">${ICON_COPY}</button>`;
   const tabsHtml = tabs
     .map(
       (t) =>
@@ -4826,7 +11373,7 @@ function renderAgentTabs(promptHtml, responseHtml, promptText, responseText) {
   const panelsHtml = panels
     .map(
       (p) =>
-        `<div class="agent-tab-panel${p.key === defaultTab ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${p.key}"><div class="detail-desc rendered-md" style="font-size:13px;">${p.html}</div></div>`,
+        `<div class="agent-tab-panel${p.key === defaultTab ? ' active' : ''}" data-tab-group="${id}" data-tab-key="${p.key}"><div class="detail-desc rendered-md">${p.html}</div></div>`,
     )
     .join('');
   return `<div class="agent-tabs">${tabsHtml}${copyBtnHtml}</div>${panelsHtml}`;
@@ -4846,44 +11393,17 @@ async function copyAgentTabActive(groupId, btn) {
   copyAgentTab(key, btn);
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-async function copyParallelSubagentTab(groupId, btn) {
-  const activePanel = document.querySelector(`.agent-tab-panel.active[data-tab-group="${groupId}"]`);
-  if (!activePanel) return;
-  const text = activePanel.innerText || activePanel.textContent || '';
-  copyWithFeedback(text.trim(), btn);
-}
-
-const ownerColors = [
-  { bg: 'rgba(37, 99, 235, 0.14)', color: '#1d5bbf' }, // blue
-  { bg: 'rgba(168, 85, 247, 0.14)', color: '#7c3aed' }, // purple
-  { bg: 'rgba(14, 165, 133, 0.14)', color: '#0d7d65' }, // teal
-  { bg: 'rgba(220, 80, 30, 0.14)', color: '#c04a1a' }, // red-orange
-  { bg: 'rgba(202, 138, 4, 0.14)', color: '#92700c' }, // amber
-  { bg: 'rgba(219, 39, 119, 0.14)', color: '#b5246a' }, // pink
-  { bg: 'rgba(22, 163, 74, 0.14)', color: '#15803d' }, // green
-  { bg: 'rgba(99, 102, 241, 0.14)', color: '#4f46e5' }, // indigo
-];
-const namedColorMap = {
-  red: { bg: 'rgba(239, 68, 68, 0.14)', color: '#dc2626' },
-  blue: { bg: 'rgba(37, 99, 235, 0.14)', color: '#1d5bbf' },
-  green: { bg: 'rgba(22, 163, 74, 0.14)', color: '#15803d' },
-  purple: { bg: 'rgba(168, 85, 247, 0.14)', color: '#7c3aed' },
-  orange: { bg: 'rgba(234, 88, 12, 0.14)', color: '#c2410c' },
-  pink: { bg: 'rgba(219, 39, 119, 0.14)', color: '#b5246a' },
-  yellow: { bg: 'rgba(202, 138, 4, 0.14)', color: '#92700c' },
-  teal: { bg: 'rgba(14, 165, 133, 0.14)', color: '#0d7d65' },
-  indigo: { bg: 'rgba(99, 102, 241, 0.14)', color: '#4f46e5' },
-  cyan: { bg: 'rgba(6, 182, 212, 0.14)', color: '#0891b2' },
-};
+const ownerColor = (hue) => ({
+  bg: `color-mix(in srgb, var(--owner-${hue}) 13%, transparent)`,
+  color: `var(--owner-${hue})`,
+});
+const OWNER_HUES = ['blue', 'purple', 'teal', 'orange', 'yellow', 'pink', 'green', 'indigo'];
+const ownerColors = OWNER_HUES.map(ownerColor);
+const namedColorMap = Object.fromEntries([...OWNER_HUES, 'red', 'cyan'].map((h) => [h, ownerColor(h)]));
 const ownerColorCache = {};
 const teamColorMap = {};
 function isInternalTask(task) {
   return task.metadata && task.metadata._internal === true;
-}
-
-function isLiveTask(task) {
-  return task.status !== 'deleted';
 }
 
 function resolveNamedColor(colorName) {
@@ -4891,7 +11411,8 @@ function resolveNamedColor(colorName) {
   return namedColorMap[colorName.toLowerCase()] || null;
 }
 
-function updateTeamColors(agents) {
+function updateTeamColors(agents, colors) {
+  if (colors) Object.assign(teamColorMap, colors);
   for (const a of agents) {
     const name = a.type || a.name;
     if (name && a.color) teamColorMap[name] = a.color;
@@ -4920,36 +11441,275 @@ function getOwnerColor(name) {
 
 //#region FILTERS
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleFilterMenu(e) {
+  // Stops the click reaching .section-header (which would collapse the section) *and*
+  // document (which would immediately close the menu we are opening).
+  e?.stopPropagation();
+  if (closeFilterMenu()) return;
+  document.getElementById('filter-menu').classList.add('open');
+  document.getElementById('filter-menu-btn')?.setAttribute('aria-expanded', 'true');
+  renderFilterState();
+  document.addEventListener('click', closeFilterMenu, { once: true });
+  // Capture phase: the global keydown handler bails out on form fields, and the path box
+  // has focus — Escape would never reach it otherwise.
+  document.addEventListener('keydown', filterMenuKeydown, true);
+  pfIdx = -1;
+  renderProjectOptions();
+  const input = document.getElementById('project-filter');
+  input?.focus();
+  input?.select();
+}
+
+function filterMenuKeydown(e) {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    if (closeFilterMenu()) document.getElementById('filter-menu-btn')?.focus();
+    return;
+  }
+  if (e.target.id !== 'project-filter') return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const n = pfOptions.length;
+    if (!n) return;
+    pfIdx = e.key === 'ArrowDown' ? (pfIdx + 1) % n : (pfIdx - 1 + n) % n;
+    renderProjectOptions();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (pfIdx >= 0 && pfOptions[pfIdx]) pickProject(pfOptions[pfIdx].path);
+    else closeFilterMenu();
+  }
+}
+
+// The menu's project list: projects the path box matches, newest activity first.
+const PF_MAX = 7;
+let pfOptions = [];
+let pfIdx = -1;
+
+function renderProjectOptions() {
+  const list = document.getElementById('project-filter-options');
+  const input = document.getElementById('project-filter');
+  if (!list || !input) return;
+  const text = projectFilterText();
+  const q = normalizeProjectPath(text.trim());
+  const partial = !!q && !isExactProjectPath(q);
+  const needle = partial ? q : '';
+  const selected = q && !partial ? q : null;
+  const byRecent = (a, b) => (b.modifiedAt || '').localeCompare(a.modifiedAt || '');
+  pfOptions = (projectsCache || [])
+    .map((p) => ({ ...p, norm: normalizeProjectPath(p.path) }))
+    .filter((p) => !needle || p.norm.includes(needle))
+    .sort(byRecent)
+    .slice(0, PF_MAX);
+  if (pfIdx >= pfOptions.length) pfIdx = pfOptions.length - 1;
+  list.innerHTML = pfOptions.length
+    ? pfOptions
+        .map((p, i) => {
+          const cut = Math.max(p.path.lastIndexOf('/'), p.path.lastIndexOf('\\')) + 1;
+          const at = needle ? p.norm.indexOf(needle) : -1;
+          const range = at >= 0 ? [at, at + needle.length] : null;
+          const isSel = p.norm === selected;
+          return `<li id="pf-opt-${i}" role="option" class="pf-opt${i === pfIdx ? ' hl' : ''}" aria-selected="${isSel ? 'true' : 'false'}" data-path="${escapeHtml(p.path)}" title="${escapeHtml(p.path)}">
+            <span class="pf-name">${markRange(p.path, cut, p.path.length, range)}</span>
+            <span class="pf-dir"><bdi>${markRange(p.path, 0, cut, range)}</bdi></span>
+            <span class="pf-age">${p.modifiedAt ? shortAge(p.modifiedAt) : ''}</span>
+          </li>`;
+        })
+        .join('')
+    : `<li class="pf-empty">${
+        partial ? `No project path contains “${escapeHtml(text.trim())}”` : 'No projects yet'
+      }</li>`;
+  if (pfIdx >= 0) input.setAttribute('aria-activedescendant', `pf-opt-${pfIdx}`);
+  else input.removeAttribute('aria-activedescendant');
+  list.querySelector('.pf-opt.hl')?.scrollIntoView({ block: 'nearest' });
+}
+
+function shortAge(iso) {
+  const min = Math.max(0, (Date.now() - new Date(iso).getTime()) / 60000);
+  if (min < 60) return `${Math.floor(min)}m`;
+  if (min < 1440) return `${Math.floor(min / 60)}h`;
+  if (min < 60 * 24 * 60) return `${Math.floor(min / 1440)}d`;
+  return `${Math.floor(min / (1440 * 30))}mo`;
+}
+
+// The slice [from, to) of text, with the part inside range marked.
+function markRange(text, from, to, range) {
+  if (!range || range[1] <= from || range[0] >= to) return escapeHtml(text.slice(from, to));
+  const a = Math.max(from, range[0]);
+  const b = Math.min(to, range[1]);
+  return `${escapeHtml(text.slice(from, a))}<mark>${escapeHtml(text.slice(a, b))}</mark>${escapeHtml(text.slice(b, to))}`;
+}
+
+function pickProject(path) {
+  filterByProject(path);
+  closeFilterMenu();
+  document.getElementById('filter-menu-btn')?.focus();
+}
+
+document.getElementById('project-filter-options')?.addEventListener('click', (e) => {
+  const opt = e.target.closest('.pf-opt');
+  if (opt) pickProject(opt.dataset.path);
+});
+
+function closeFilterMenu() {
+  const menu = document.getElementById('filter-menu');
+  if (!menu?.classList.contains('open')) return false;
+  menu.classList.remove('open');
+  document.getElementById('filter-menu-btn')?.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('keydown', filterMenuKeydown, true);
+  return true;
+}
+
+// One row per filter: whether it differs from the default, and two label forms — terse tokens for the header strip (which has ~15 characters
+// before the sidebar's width ellipsises it) and long form for its tooltip.
+const FILTERS = [
+  {
+    active: () => filterProject !== FILTER_DEFAULTS.project,
+    short: () => {
+      if (filterProject === '__recent__') return 'recent';
+      if (!filterProject) return 'all proj';
+      const name = pathBasename(filterProject);
+      return isExactProjectFilter(filterProject) ? name : `*${name}*`;
+    },
+    long: () => {
+      if (filterProject === '__recent__') return 'projects active in the last 24h';
+      if (!filterProject) return 'all projects';
+      return isExactProjectFilter(filterProject)
+        ? `project ${filterProject}`
+        : `project path contains "${filterProject}"`;
+    },
+  },
+  {
+    active: () => sessionFilter !== FILTER_DEFAULTS.session,
+    short: () => 'inactive',
+    long: () => 'including inactive sessions',
+  },
+];
+
+// Keeps the header (summary + funnel tint) and the popover's controls in sync with state.
+// Safe to call on every filter change — it only touches classes, values, and text.
+function renderFilterState() {
+  const short = [];
+  const long = [];
+  for (const f of FILTERS) {
+    if (!f.active()) continue;
+    short.push(f.short());
+    long.push(f.long());
+  }
+  const input = document.getElementById('project-filter');
+  if (input) {
+    const value = projectFilterText();
+    if (input.value !== value) input.value = value;
+  }
+  const recent = document.getElementById('project-recent-btn');
+  recent?.setAttribute('aria-pressed', String(filterProject === '__recent__'));
+  for (const b of document.querySelectorAll('[data-session-filter]')) {
+    b.setAttribute('aria-checked', String(b.dataset.sessionFilter === sessionFilter));
+  }
+  if (document.getElementById('filter-menu')?.classList.contains('open')) renderProjectOptions();
+
+  const summary = document.getElementById('filter-summary');
+  if (summary) {
+    summary.textContent = short.join(' · ');
+    summary.title = long.length ? `Active filters: ${long.join(', ')}` : '';
+  }
+  document.getElementById('filter-menu-btn')?.classList.toggle('has-filters', short.length > 0);
+}
+
+// With the sidebar cursor on a group header, zen shows that group instead of the open session.
+function toggleZenMode() {
+  const leavingSessionZen = zenMode;
+  if (zenMode) zenMode = false;
+  else if (zenGroup) zenGroup = null;
+  else {
+    const header = focusZone === 'sidebar' ? sessionsList.querySelector('.session-group-header.kb-selected') : null;
+    zenGroup = header?.dataset.groupId || null;
+    zenMode = !zenGroup;
+  }
+  store.setItem(ZEN_KEY, String(zenMode));
+  renderZenState();
+  if (zenMode || zenGroup) closeFilterMenu();
+  renderSessions();
+  // The open session or the group's members may be outside the current server page/filter,
+  // and leaving group zen needs the filtered page back.
+  if (!leavingSessionZen) fetchSessions(false);
+}
+
+function applyHubSettings(s) {
+  sessionsList.classList.toggle('zen-centered', s.zenCentered === true);
+  if (s.zenPattern) sessionsList.dataset.zenPattern = s.zenPattern;
+  else delete sessionsList.dataset.zenPattern;
+}
+
+function renderZenState() {
+  const btn = document.getElementById('zen-mode-btn');
+  if (!btn) return;
+  const on = zenMode || !!zenGroup;
+  btn.classList.toggle('active', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'Zen mode on — show all sessions (Ctrl+Shift+Z)' : 'Zen mode: current session only (Ctrl+Shift+Z)';
+}
+
 function filterBySessions(value) {
+  if (value === sessionFilter) return;
+  setSessionFilter(value);
+  resetSessionPage();
+  renderFilterState();
+  updateUrl();
+  // Instant feedback from cached data, then refetch — the cached list was fetched
+  // with the previous filter's server params (e.g. filter=active), so "All Sessions"
+  // needs a server round-trip to actually include inactive sessions.
+  renderSessions();
+  renderActivityChip();
+  fetchSessions(false);
+}
+
+function setSessionFilter(value) {
   sessionFilter = value;
-  updateUrl();
-  renderSessions();
-  syncFilterUI();
+  if (value !== 'active') activityFilter.clear();
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function toggleShowPins(checked) {
-  showPins = checked;
-  localStorage.setItem('show-pins', showPins ? '1' : '0');
-  updateUrl();
-  renderSessions();
-}
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function changeSessionLimit(value) {
-  sessionLimit = value;
-  updateUrl();
-  fetchSessions();
+function projectFilterText() {
+  return filterProject && filterProject !== '__recent__' ? filterProject : '';
 }
 
-function matchesProjectFilter(project) {
+let filterMatcher = { query: null, match: null };
+function matchesProjectFilter(project, repo) {
   if (!filterProject) return true;
   if (filterProject === '__recent__') return recentProjects.has(project);
-  return project === filterProject;
+  if (filterMatcher.query !== filterProject) {
+    filterMatcher = { query: filterProject, match: projectMatcher(filterProject) };
+  }
+  return filterMatcher.match(project, repo);
 }
 
 //#endregion
 
 //#region EVENT_DELEGATION
+// Selecting text inside a dialog and releasing past its edge puts the mouseup on the
+// backdrop, so the synthesized click targets the overlay and the `onclick="close…()"`
+// on every .modal-overlay would dismiss it. Only a press that *started* on the
+// backdrop counts as a dismissal.
+let _overlayPressTarget = null;
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    // Only an overlay is ever compared below, so don't hold a reference to any other node —
+    // that would keep the last-pressed element (and a detached subtree, after a re-render)
+    // alive until the next mousedown anywhere.
+    _overlayPressTarget = e.target.classList?.contains('modal-overlay') ? e.target : null;
+  },
+  true,
+);
+document.addEventListener(
+  'click',
+  (e) => {
+    if (!e.target.classList?.contains('modal-overlay')) return;
+    if (_overlayPressTarget === e.target) return;
+    e.stopPropagation();
+  },
+  true,
+);
+
 document.addEventListener('click', (e) => {
   const pathToggle = e.target.closest('[data-group-action="toggle-path"]');
   if (pathToggle) {
@@ -4965,7 +11725,14 @@ document.addEventListener('click', (e) => {
   if (breadcrumb) {
     e.stopPropagation();
     const path = breadcrumb.dataset.fullPath;
-    if (path) navigator.clipboard.writeText(path).catch(() => {});
+    if (path) copyText(path, 'project path');
+    return;
+  }
+
+  const newBtn = e.target.closest('.project-new-btn');
+  if (newBtn) {
+    e.stopPropagation();
+    openNewSession(newBtn.dataset.projectPath);
     return;
   }
 
@@ -4979,87 +11746,109 @@ document.addEventListener('click', (e) => {
 
   if (e.target.closest('.pinned-ungroup-btn')) {
     e.stopPropagation();
-    localStorage.setItem('groupPinnedSessions', 'false');
+    store.setItem(GROUP_PINNED_KEY, 'false');
     renderSessions();
     return;
   }
 
   if (e.target.closest('.pinned-regroup-banner')) {
-    localStorage.setItem('groupPinnedSessions', 'true');
+    store.setItem(GROUP_PINNED_KEY, 'true');
     renderSessions();
     return;
   }
 
-  const pinnedSubHeader = e.target.closest('.pinned-sub-header');
-  if (pinnedSubHeader) {
-    setGroupCollapsed(pinnedSubHeader, !collapsedProjectGroups.has(pinnedSubHeader.dataset.groupPath));
-    return;
+  const sgHeader = e.target.closest('.session-group-header');
+  if (sgHeader) {
+    if (e.target.closest('.sg-name-input')) return;
+    e.stopPropagation();
+    const groupId = sgHeader.dataset.groupId;
+    const group = sgGroupById(groupId);
+    if (!group) return;
+    if (e.target.closest('.sg-keep')) {
+      sgKeep(group);
+      persistSessionGroups();
+      renderSessions();
+      return;
+    }
+    if (e.target.closest('.sg-rename')) {
+      sgBeginRename(groupId);
+      return;
+    }
+    if (e.target.closest('.sg-delete')) {
+      sgConfirmDelete(group);
+      return;
+    }
   }
 
-  const header = e.target.closest('.project-group-header');
+  const header = e.target.closest(COLLAPSIBLE_HEADER_SELECTOR);
   if (header) {
     setGroupCollapsed(header, !collapsedProjectGroups.has(header.dataset.groupPath));
   }
 });
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+// Used in HTML; also called by the hub project shim, so no biome suppression is needed.
 function filterByProject(project) {
+  clearTimeout(projectFilterTimer);
   filterProject = project || null;
-  updateUrl();
+  resetSessionPage();
+  renderFilterState();
   fetchSessions(false);
-  showAllTasks();
+  showNoSession();
+}
+
+// The sidebar narrows on every key from the rows it has; the server round trip for rows past
+// the limit waits for a pause in typing.
+const PROJECT_FILTER_DEBOUNCE_MS = 250;
+let projectFilterTimer = null;
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function typeProjectFilter(value) {
+  filterProject = value.trim() ? value : null;
+  pfIdx = -1;
+  updateUrl();
+  renderSessions();
+  clearTimeout(projectFilterTimer);
+  projectFilterTimer = setTimeout(() => filterByProject(filterProject), PROJECT_FILTER_DEBOUNCE_MS);
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleRecentProjects() {
+  filterByProject(filterProject === '__recent__' ? null : '__recent__');
 }
 
 let projectsCache = null;
 
-async function updateProjectDropdown() {
-  const dropdown = document.getElementById('project-filter');
+async function loadProjects() {
+  if (!projectsCacheDirty && projectsCache) return projectsCache;
+  const projects =
+    (await getJson('/api/projects')) ??
+    [...new Set(sessions.map((s) => s.project).filter(Boolean))].sort().map((p) => ({ path: p, modifiedAt: null }));
+  projectsCache = projects;
+  projectsCacheDirty = false;
+  return projects;
+}
 
+async function refreshProjectList() {
   if (!projectsCacheDirty && projectsCache) {
-    renderProjectDropdown(dropdown, projectsCache);
+    renderFilterState();
     return;
   }
 
-  let projects;
-  try {
-    const res = await fetch('/api/projects');
-    projects = await res.json();
-  } catch (_e) {
-    projects = [...new Set(sessions.map((s) => s.project).filter(Boolean))]
-      .sort()
-      .map((p) => ({ path: p, modifiedAt: null }));
-  }
-
-  projectsCache = projects;
-  projectsCacheDirty = false;
-
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const projects = await loadProjects();
+  const cutoff = Date.now() - RECENT_PROJECT_HOURS * 60 * 60 * 1000;
   const prevRecent = recentProjects;
   recentProjects = new Set(
-    projects.filter((p) => p.modifiedAt && new Date(p.modifiedAt).getTime() > cutoff).map((p) => p.path),
+    projects
+      .filter((p) => p.modifiedAt && new Date(p.modifiedAt).getTime() > cutoff)
+      .flatMap((p) => [p.path, ...(p.worktrees || [])]),
   );
 
-  renderProjectDropdown(dropdown, projects);
+  renderFilterState();
 
   // recentProjects was empty before — sidebar rendered with __recent__ filter
   // dropping every session. Re-render now that we know which projects qualify.
   if (filterProject === '__recent__' && prevRecent.size === 0 && recentProjects.size > 0) {
     renderSessions();
   }
-}
-
-function renderProjectDropdown(dropdown, projects) {
-  const recentSelected = filterProject === '__recent__' ? ' selected' : '';
-  dropdown.innerHTML =
-    '<option value="">All Projects</option>' +
-    `<option value="__recent__"${recentSelected}>Recent (24h)</option>` +
-    projects
-      .map((p) => {
-        const name = p.path.split(/[/\\]/).pop();
-        const selected = p.path === filterProject ? ' selected' : '';
-        return `<option value="${escapeHtml(p.path)}"${selected} title="${escapeHtml(p.path)}">${escapeHtml(name)}</option>`;
-      })
-      .join('');
 }
 
 function updateThemeColor(isLight) {
@@ -5071,116 +11860,114 @@ function updateThemeColor(isLight) {
 //#endregion
 
 //#region THEME
-const THEME_COLOR_TO_VAR = {
-  bgDeep: '--bg-deep', bgSurface: '--bg-surface', bgElevated: '--bg-elevated', bgHover: '--bg-hover',
-  border: '--border',
-  textPrimary: '--text-primary', textSecondary: '--text-secondary',
-  textTertiary: '--text-tertiary', textMuted: '--text-muted',
-  accent: '--accent', accentText: '--accent-text',
-  success: '--success', warning: '--warning', plan: '--plan',
-};
-
-let _themeCache = { light: null, dark: null };
-
-function _hexToRgb(hex) {
-  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || '');
-  if (!m) return null;
-  return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
-}
-
-function _rgba(hex, a) {
-  const rgb = _hexToRgb(hex);
-  return rgb ? `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${a})` : null;
-}
-
-function applyTheme(theme) {
-  if (!theme || !theme.colors) return;
-  const root = document.documentElement.style;
-  for (const [k, cssVar] of Object.entries(THEME_COLOR_TO_VAR)) {
-    if (theme.colors[k]) root.setProperty(cssVar, theme.colors[k]);
-  }
-  const c = theme.colors;
-  const dimAlpha = theme.mode === 'light' ? 0.15 : 0.18;
-  const accentDimAlpha = theme.mode === 'light' ? 0.18 : 0.22;
-  const accentGlowAlpha = theme.mode === 'light' ? 0.5 : 0.55;
-  const set = (name, val) => val && root.setProperty(name, val);
-  set('--accent-dim', _rgba(c.accent, accentDimAlpha));
-  set('--accent-glow', _rgba(c.accent, accentGlowAlpha));
-  set('--success-dim', _rgba(c.success, dimAlpha));
-  set('--warning-dim', _rgba(c.warning, dimAlpha));
-  set('--plan-dim', _rgba(c.plan, dimAlpha));
-}
-
-async function loadActiveThemes() {
-  try {
-    const res = await fetch('/api/themes');
-    if (res.ok) {
-      const data = await res.json();
-      _themeCache = { light: data.light, dark: data.dark };
-    }
-  } catch {}
-}
-
-function applyCurrentThemeColors() {
-  const t = isLightTheme() ? _themeCache.light : _themeCache.dark;
-  if (t) applyTheme(t);
-}
-
-function toggleTheme() {
-  const isCurrentlyLight = document.body.classList.contains('light');
-  if (isCurrentlyLight) {
-    document.body.classList.remove('light');
-    document.body.classList.add('dark-forced');
-    localStorage.setItem('theme', 'dark');
-  } else {
-    document.body.classList.add('light');
-    document.body.classList.remove('dark-forced');
-    localStorage.setItem('theme', 'light');
-  }
-  applyCurrentThemeColors();
-  updateThemeIcon();
-  updateThemeColor(!isCurrentlyLight);
-  syncHljsTheme();
-  reinitMermaidTheme();
-}
-
-function syncHljsTheme() {
-  const light = isLightTheme();
+function applyTheme(light) {
+  document.body.classList.toggle('light', light);
+  document.body.classList.toggle('dark-forced', !light);
+  document.getElementById('theme-icon-dark').style.display = light ? 'none' : 'block';
+  document.getElementById('theme-icon-light').style.display = light ? 'block' : 'none';
+  updateThemeColor(light);
   const dark$ = document.getElementById('hljs-theme-dark');
   const light$ = document.getElementById('hljs-theme-light');
   if (dark$) dark$.disabled = light;
   if (light$) light$.disabled = !light;
 }
 
-function updateThemeIcon() {
-  const light = isLightTheme();
-  document.getElementById('theme-icon-dark').style.display = light ? 'none' : 'block';
-  document.getElementById('theme-icon-light').style.display = light ? 'block' : 'none';
+function toggleTheme() {
+  const light = !isLightTheme();
+  store.setItem(THEME_KEY, light ? 'light' : 'dark');
+  applyTheme(light);
 }
 
 function loadTheme() {
-  const saved = localStorage.getItem('theme');
-  if (saved === 'light') {
-    document.body.classList.add('light');
-    document.body.classList.remove('dark-forced');
-  } else if (saved === 'dark') {
-    document.body.classList.remove('light');
-    document.body.classList.add('dark-forced');
+  const saved = store.getItem(THEME_KEY);
+  const system = window.matchMedia('(prefers-color-scheme: light)');
+  applyTheme(saved ? saved === 'light' : system.matches);
+  // The prefers-color-scheme CSS only covers the first paint; the class decides after that, so it
+  // follows the system until the user picks a theme.
+  system.addEventListener('change', (e) => {
+    if (!store.getItem(THEME_KEY)) applyTheme(e.matches);
+  });
+  buildThemeMenu();
+  const colorTheme = store.getItem(COLOR_THEME_KEY);
+  if (colorTheme) document.body.dataset.colorTheme = colorTheme;
+  syncColorThemeSelect(colorTheme || 'ember');
+}
+
+const COLOR_THEMES = [
+  ['ember', 'Ember'],
+  ['gruvbox', 'Gruvbox'],
+  ['catppuccin', 'Catppuccin'],
+  ['tokyo-night', 'Tokyo Night'],
+  ['solarized', 'Solarized'],
+  ['dracula', 'Dracula'],
+  ['nord', 'Nord'],
+  ['rose-pine', 'Rosé Pine'],
+  ['everforest', 'Everforest'],
+  ['kanagawa', 'Kanagawa'],
+  ['one-dark', 'One Dark'],
+  ['night-owl', 'Night Owl'],
+  ['monokai', 'Monokai Pro'],
+  ['github', 'GitHub'],
+  ['ayu', 'Ayu'],
+  ['vitesse', 'Vitesse'],
+  ['synthwave', "Synthwave '84"],
+];
+
+function buildThemeMenu(themes = COLOR_THEMES) {
+  const menu = document.getElementById('themeMenu');
+  menu.innerHTML = themes
+    .map(
+      ([id, label]) =>
+        `<button type="button" class="theme-menu-item theme-swatch-${id}" data-theme-id="${id}"
+         onclick="event.stopPropagation(); setColorTheme('${id}'); toggleThemeMenu()">
+         <span class="theme-swatch theme-swatch-${id}"><i class="sw-bg"></i><i class="sw-accent"></i><i class="sw-ink"></i></span>${escapeHtml(label)}
+       </button>`,
+    )
+    .join('');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toggleThemeMenu(e) {
+  e?.stopPropagation();
+  const menu = document.getElementById('themeMenu');
+  const open = menu.classList.toggle('open');
+  if (open) {
+    document.addEventListener('click', () => menu.classList.remove('open'), { once: true });
   }
-  // If no saved preference, system prefers-color-scheme CSS handles it
-  updateThemeIcon();
-  updateThemeColor(document.body.classList.contains('light'));
-  syncHljsTheme();
-  loadActiveThemes().then(applyCurrentThemeColors);
+}
+
+function syncColorThemeSelect(id) {
+  document.querySelectorAll('.theme-menu-item').forEach((el) => {
+    el.classList.toggle('on', el.dataset.themeId === (id || 'ember'));
+  });
+}
+
+// 'ember' (the :root default) has no override block — selecting it clears the attribute.
+function setColorTheme(id) {
+  if (!id || id === 'ember') {
+    delete document.body.dataset.colorTheme;
+    store.removeItem(COLOR_THEME_KEY);
+  } else {
+    document.body.dataset.colorTheme = id;
+    store.setItem(COLOR_THEME_KEY, id);
+  }
+  syncColorThemeSelect(id);
 }
 
 //#endregion
 
 //#region SIDEBAR_LAYOUT
+function expandSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  if (!sidebar.classList.contains('collapsed')) return;
+  sidebar.classList.remove('collapsed');
+  store.setItem(SIDEBAR_COLLAPSED_KEY, false);
+}
+
 function toggleSidebar() {
   const sidebar = document.querySelector('.sidebar');
   const collapsed = sidebar.classList.toggle('collapsed');
-  localStorage.setItem('sidebar-collapsed', collapsed);
+  store.setItem(SIDEBAR_COLLAPSED_KEY, collapsed);
   if (collapsed) {
     sidebar.style.width = '';
     if (focusZone === 'sidebar') setFocusZone('board');
@@ -5192,79 +11979,88 @@ function toggleSidebar() {
 
 function loadSidebarState() {
   const sidebar = document.querySelector('.sidebar');
-  if (localStorage.getItem('sidebar-collapsed') === 'true') {
+  if (store.getItem(SIDEBAR_COLLAPSED_KEY) === 'true') {
     sidebar.classList.add('collapsed');
   }
-  const w = localStorage.getItem('sidebar-width');
+  const w = store.getItem(SIDEBAR_WIDTH_KEY);
   if (w) {
     sidebar.style.setProperty('--sidebar-width', w);
+  }
+}
+
+// Shared drag-session lifecycle for every resize grip (sidebar, panels, modal):
+// the `.dragging` class, text-selection suppression, and document-level
+// listener add/remove live here once. Callers keep only their geometry.
+// onStart may return false to veto the drag.
+function _initDragResize(handle, { onStart, onMove, onEnd }) {
+  let startX, startY;
+
+  handle.addEventListener('mousedown', (e) => {
+    if (onStart && onStart() === false) return;
+    startX = e.clientX;
+    startY = e.clientY;
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+    e.preventDefault();
+  });
+
+  function move(e) {
+    onMove(e.clientX - startX, e.clientY - startY);
+  }
+
+  function up() {
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    onEnd();
   }
 }
 
 function initSidebarResize() {
   const sidebar = document.querySelector('.sidebar');
   const handle = document.getElementById('sidebar-resize');
-  let startX, startWidth;
+  let startWidth;
 
-  handle.addEventListener('mousedown', (e) => {
-    if (sidebar.classList.contains('collapsed')) return;
-    startX = e.clientX;
-    startWidth = sidebar.offsetWidth;
-    sidebar.classList.add('resizing');
-    handle.classList.add('dragging');
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    e.preventDefault();
+  _initDragResize(handle, {
+    onStart() {
+      if (sidebar.classList.contains('collapsed')) return false;
+      startWidth = sidebar.offsetWidth;
+      sidebar.classList.add('resizing');
+    },
+    onMove(dx) {
+      const w = Math.min(600, Math.max(200, startWidth + dx));
+      sidebar.style.setProperty('--sidebar-width', `${w}px`);
+      sidebar.style.width = `${w}px`;
+    },
+    onEnd() {
+      sidebar.classList.remove('resizing');
+      store.setItem(SIDEBAR_WIDTH_KEY, sidebar.style.getPropertyValue('--sidebar-width'));
+    },
   });
-
-  function onMove(e) {
-    const maxW = Math.floor(window.innerWidth * 0.9);
-    const w = Math.min(maxW, Math.max(200, startWidth + e.clientX - startX));
-    sidebar.style.setProperty('--sidebar-width', `${w}px`);
-    sidebar.style.width = `${w}px`;
-  }
-
-  function onUp() {
-    sidebar.classList.remove('resizing');
-    handle.classList.remove('dragging');
-    document.body.style.userSelect = '';
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    localStorage.setItem('sidebar-width', sidebar.style.getPropertyValue('--sidebar-width'));
-  }
 }
 
-function initPanelResize(panelId, handleId, cssVar, storageKey) {
-  const panel = document.getElementById(panelId);
-  const handle = document.getElementById(handleId);
-  let startX, startWidth;
+function initPanelResize(panelId, handleId, cssVar) {
+  initResize(document.getElementById(panelId), document.getElementById(handleId), cssVar, panelWidthKey(panelId), 200);
+}
 
-  handle.addEventListener('mousedown', (e) => {
-    startX = e.clientX;
-    startWidth = panel.offsetWidth;
-    panel.classList.add('resizing');
-    handle.classList.add('dragging');
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    e.preventDefault();
+function initResize(panel, handle, cssVar, key, min) {
+  let startWidth;
+  _initDragResize(handle, {
+    onStart() {
+      startWidth = panel.offsetWidth;
+      panel.classList.add('resizing');
+    },
+    onMove(dx) {
+      panel.style.setProperty(cssVar, `${Math.max(min, startWidth - dx)}px`);
+    },
+    onEnd() {
+      panel.classList.remove('resizing');
+      store.setItem(key, panel.style.getPropertyValue(cssVar));
+    },
   });
-
-  function onMove(e) {
-    const maxW = Math.floor(window.innerWidth * 0.9);
-    const w = Math.min(maxW, Math.max(320, startWidth - (e.clientX - startX)));
-    panel.style.setProperty(cssVar, `${w}px`);
-  }
-
-  function onUp() {
-    panel.classList.remove('resizing');
-    handle.classList.remove('dragging');
-    document.body.style.userSelect = '';
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    localStorage.setItem(storageKey, panel.style.getPropertyValue(cssVar));
-  }
 }
 
 function loadPanelWidths() {
@@ -5272,24 +12068,9 @@ function loadPanelWidths() {
     ['detail-panel', '--detail-panel-width'],
     ['message-panel', '--message-panel-width'],
   ].forEach(([id, cssVar]) => {
-    const w = localStorage.getItem(`${id}-width`);
+    const w = store.getItem(panelWidthKey(id));
     if (w) document.getElementById(id).style.setProperty(cssVar, w);
   });
-}
-
-//#endregion
-
-//#region PREFERENCES
-function syncFilterUI() {
-  const pinsLabel = document.getElementById('show-pins-label');
-  if (pinsLabel) pinsLabel.style.display = sessionFilter === 'active' ? '' : 'none';
-  const pinsChk = document.getElementById('show-pins');
-  if (pinsChk) pinsChk.checked = showPins;
-}
-function loadPreferences() {
-  document.getElementById('session-filter').value = sessionFilter;
-  document.getElementById('session-limit').value = sessionLimit;
-  syncFilterUI();
 }
 
 //#endregion
@@ -5299,32 +12080,51 @@ async function showSessionInfoModal(sessionId) {
   const session = sessions.find((s) => s.id === sessionId);
   if (!session) return;
 
+  // Open modal immediately with session metadata (cwd / path / branch are
+  // already in-memory). Plan / team / tasks are fetched in the background
+  // and re-rendered when they arrive, so the modal doesn't block on network.
   _planSessionId = sessionId;
   const cachedTasks = currentSessionId === sessionId ? currentTasks : [];
-  showInfoModal(session, cachedTasks, null);
+  showInfoModal(session, null, cachedTasks, null, null);
+  artifactsSection.load(sessionId);
+  // The modal reaches any card's session, not just the open one, so this is the second
+  // place a pad can first be seen. Linking belongs on the two open events rather than
+  // in renderLinkedDocsHtml, which only builds a string and runs on every repaint.
+  loadSessionPads(sessionId);
 
-  const rerender = (tasks, planContent) => {
-    if (_planSessionId !== sessionId) return;
-    const modal = document.getElementById('session-info-modal');
-    if (!modal?.classList.contains('visible')) return;
-    showInfoModal(session, tasks, planContent);
+  const rerender = (teamConfig, tasks, planContent, parentInfo) => {
+    if (_planSessionId !== sessionId) return; // user opened a different modal
+    const modal = document.getElementById('team-modal');
+    if (!modal?.classList.contains('visible')) return; // user closed modal — don't reopen
+    showInfoModal(session, teamConfig, tasks, planContent, parentInfo);
   };
 
-  const planPromise = fetchPlanContent(sessionId).then((data) => data?.content || null);
+  const teamPromise = session.isTeam
+    ? getJson(apiPath`/api/teams/${session.teamName || sessionId}`)
+    : Promise.resolve(null);
+
+  const planPromise = getJson(apiPath`/api/sessions/${sessionId}/plan`).then((data) => {
+    if (data?.content) _pendingPlanPath = data.path || null;
+    return data?.content || null;
+  });
 
   const tasksPromise =
-    cachedTasks.length > 0
-      ? Promise.resolve(cachedTasks)
-      : fetch(`/api/sessions/${sessionId}`)
-          .then((r) => (r.ok ? r.json() : []))
-          .catch(() => []);
+    cachedTasks.length > 0 ? Promise.resolve(cachedTasks) : getJson(apiPath`/api/sessions/${sessionId}`, []);
 
-  const [planContent, tasks] = await Promise.all([planPromise, tasksPromise]);
-  rerender(tasks, planContent);
+  const parentPromise = getJson(apiPath`/api/sessions/${sessionId}/parent`);
+
+  const [teamConfig, planContent, tasks, parentInfo] = await Promise.all([
+    teamPromise,
+    planPromise,
+    tasksPromise,
+    parentPromise,
+  ]);
+  rerender(teamConfig, tasks, planContent, parentInfo);
 }
 
 let _infoModalSessionId = null;
 let _pendingPlanContent = null;
+let _pendingPlanPath = null;
 
 function updateStickyBtnState() {
   const stickyBtn = document.getElementById('session-info-sticky-btn');
@@ -5332,17 +12132,41 @@ function updateStickyBtnState() {
   const isSticky = stickySessionIds.has(_infoModalSessionId);
   stickyBtn.style.display = '';
   stickyBtn.classList.toggle('active', isSticky);
-  stickyBtn.title = isSticky ? 'Remove sticky pin' : 'Sticky pin — always show at top';
+  stickyBtn.title = isSticky ? 'Remove sticky pin' : 'Sticky pin — always show in the list';
   const svg = stickyBtn.querySelector('svg');
   if (svg) svg.setAttribute('fill', isSticky ? 'currentColor' : 'none');
 }
 
-function showInfoModal(session, tasks, planContent) {
-  const modal = document.getElementById('session-info-modal');
-  const titleEl = document.getElementById('session-info-modal-title');
-  const bodyEl = document.getElementById('session-info-modal-body');
+// Purely cosmetic: the tmp root is identical for every session and the encoded
+// project segment is already shown in the Path row, so only the last two segments
+// carry information. The full path stays in the tooltip and the copy button.
+function abbreviateScratchpadDir(dir) {
+  const sep = dir.includes('\\') ? '\\' : '/';
+  return dir.split(/[/\\]/).slice(-2).join(sep);
+}
 
-  const titleText = session.name || session.slug || session.id;
+function renderScratchpadRow(session) {
+  const dir = session?.scratchpadDir;
+  if (!dir) return '';
+  return `<div class="zen-scratchpad">
+    <span class="zen-scratchpad-label">Scratchpad</span>
+    <span class="zen-scratchpad-path" title="${escapeHtml(dir)}">${escapeHtml(abbreviateScratchpadDir(dir))}</span>
+    <span class="row-actions">
+      <button onclick="copyWithFeedback('${escAttrJs(dir)}', this)" title="Copy">${ICON_COPY}</button>
+      <button data-folder="${escapeHtml(dir)}" onclick="openFolderInEditor(this.dataset.folder)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>
+    </span>
+  </div>
+  ${renderScratchFilesHtml(session.id)}`;
+}
+
+function showInfoModal(session, teamConfig, tasks, planContent, parentInfo) {
+  const modal = document.getElementById('team-modal');
+  const titleEl = document.getElementById('team-modal-title');
+  const bodyEl = document.getElementById('team-modal-body');
+
+  const titleText = teamConfig
+    ? `Team: ${teamConfig.team_name || teamConfig.name || 'Unknown'}`
+    : session.name || session.slug || session.id;
   titleEl.innerHTML =
     escapeHtml(titleText) +
     (session.modifiedAt
@@ -5352,9 +12176,20 @@ function showInfoModal(session, tasks, planContent) {
   let html = '';
 
   // Session & project details as compact key-value rows
-  // Each row: [label, displayValue, { openPath?, copyValue? }]
+  // Each row: [label, value, { openPath?, abbrev?, copy? }] — `value` is authoritative
+  // (tooltip + copy); `abbrev` only replaces the rendered text, `copy` the copied text.
   const infoRows = [];
   infoRows.push(['Session', session.id, { openClaudeDir: true, openFile: session.jsonlPath }]);
+  if (session.peerName) {
+    infoRows.push(['Peer name', session.peerName, { copy: sendMessageAddress(session.peerName) }]);
+  }
+  if (parentInfo?.parentSessionId) {
+    infoRows.push([
+      parentInfo.relation === 'compact' ? 'Continued from' : 'Forked from',
+      parentInfo.parentSessionId,
+      { openClaudeDir: true, openFile: parentInfo.parentJsonlPath, openSession: parentInfo.parentSessionId },
+    ]);
+  }
   if (session.slug && session.hasPlan) {
     infoRows.push(['Slug', session.slug, { openClaudeDir: true, openFile: session.planPath }]);
   }
@@ -5375,116 +12210,153 @@ function showInfoModal(session, tasks, planContent) {
   if (session.tasksDir) {
     infoRows.push(['Tasks Dir', session.tasksDir, { openPath: session.tasksDir }]);
   }
+  if (session.scratchpadDir) {
+    infoRows.push([
+      'Scratchpad',
+      session.scratchpadDir,
+      { openPath: session.scratchpadDir, abbrev: abbreviateScratchpadDir(session.scratchpadDir) },
+    ]);
+  }
   if (session.sharedTaskList) {
     infoRows.push(['Shared Tasks', session.sharedTaskList]);
   }
+  if (teamConfig?.configPath) {
+    const configDir = teamConfig.configPath.replace(/[/\\][^/\\]+$/, '');
+    infoRows.push(['Team Config', teamConfig.configPath, { openPath: configDir, openFile: teamConfig.configPath }]);
+  }
   const clickableStyle =
-    "font-family: 'IBM Plex Mono', monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--accent-text); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;";
+    'font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--accent-text); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;';
   const plainStyle =
-    "font-family: 'IBM Plex Mono', monospace; font-size: 12px; user-select: all; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;";
-  html += `<div class="session-info-modal-meta" style="margin-bottom: 16px; display: grid; grid-template-columns: auto 1fr auto; gap: 6px 12px; align-items: center;">`;
+    'font-family: var(--mono); font-size: 12px; color: var(--text-primary); user-select: all; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+  html += `<div class="team-modal-meta info-grid">`;
   infoRows.forEach(([label, value, opts]) => {
-    const copyVal = escapeHtml(value).replace(/"/g, '&quot;');
     html += `<span style="font-weight: 500; color: var(--text-secondary); font-size: 12px; white-space: nowrap;">${label}</span>`;
-    if (opts?.openClaudeDir || opts?.openPath) {
-      const folder = opts.openClaudeDir ? '' : escapeHtml(opts.openPath).replace(/"/g, '&quot;');
-      const file = opts.openFile ? escapeHtml(opts.openFile).replace(/"/g, '&quot;') : '';
-      html += `<span data-folder="${folder}" data-file="${file}" data-claude-dir="${opts.openClaudeDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.claudeDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" style="${clickableStyle}" title="Open in editor">${escapeHtml(value)}</span>`;
+    if (opts?.openSession) {
+      html += `<span onclick="openSessionFromInfo('${escAttrJs(opts.openSession)}')" style="${clickableStyle}" title="Open session in app">${escapeHtml(value)}</span>`;
     } else {
-      html += `<span style="${plainStyle}" title="${copyVal}">${escapeHtml(value)}</span>`;
+      html += `<span style="${plainStyle}" title="${escapeHtml(value)}">${escapeHtml(opts?.abbrev || value)}</span>`;
     }
-    const jsCopyVal = _escapeForJsAttr(copyVal);
-    html += `<button onclick="navigator.clipboard.writeText('${jsCopyVal}'); this.textContent='✓'; setTimeout(() => this.textContent='Copy', 1000)" style="padding: 2px 8px; font-size: 11px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 4px; color: var(--text-secondary); cursor: pointer; white-space: nowrap;">Copy</button>`;
+    const copyBtn = `<button onclick="copyWithFeedback('${escAttrJs(opts?.copy || value)}', this)" title="Copy">${ICON_COPY}</button>`;
+    let openBtn = '';
+    if (opts?.openClaudeDir || opts?.openPath) {
+      const folder = opts.openClaudeDir ? '' : escapeHtml(opts.openPath);
+      const file = opts.openFile ? escapeHtml(opts.openFile) : '';
+      openBtn = `<button data-folder="${folder}" data-file="${file}" data-claude-dir="${opts.openClaudeDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.claudeDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>`;
+    }
+    html += `<span class="row-actions">${copyBtn}${openBtn}</span>`;
   });
   html += `</div>`;
 
-  if (session.contextStatus) {
+  const contextHtml = renderContextDetail(session);
+  if (contextHtml) {
     html += `<hr style="border: none; border-top: 1px solid var(--border); margin: 12px 0;">`;
-    html += renderContextDetail(session.contextStatus);
+    html += contextHtml;
   }
 
   if (planContent) {
     _pendingPlanContent = planContent;
     const titleMatch = planContent.match(/^#\s+(.+)$/m);
     const planTitle = titleMatch ? titleMatch[1].trim() : null;
-    html += `<div data-plan-card="1" onclick="openPlanModal()" style="margin-bottom: 16px; padding: 10px 14px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; display: flex; align-items: center; gap: 10px; transition: all 0.15s ease;" onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg-hover)'" onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg-elevated)'">
-          <span style="font-size: 14px;">📋</span>
-          <div style="flex: 1; min-width: 0;">
-            <div style="font-size: 11px; font-weight: 500; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Plan</div>
-            ${planTitle ? `<div style="font-size: 13px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(planTitle)}</div>` : ''}
+    html += `<div class="plan-card" data-plan-card="1" onclick="openPlanModal()">
+          <span class="plan-card-icon">📋</span>
+          <div class="plan-card-text">
+            <div class="plan-card-label">Plan</div>
+            ${planTitle ? `<div class="plan-card-title">${escapeHtml(planTitle)}</div>` : ''}
           </div>
-          <svg viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" style="width: 16px; height: 16px; flex-shrink: 0;"><path d="M9 18l6-6-6-6"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" class="plan-card-chevron"><path d="M9 18l6-6-6-6"/></svg>
         </div>`;
   }
 
   html += renderLinkedDocsHtml(session.id);
+  html += renderArtifactsHtml(session.id);
+
+  // Team info section
+  if (teamConfig) {
+    const ownerCounts = {};
+    const memberDescriptions = {};
+    tasks.forEach((t) => {
+      if (isInternalTask(t) && t.subject) {
+        memberDescriptions[t.subject] = t.description;
+      } else if (t.owner) {
+        ownerCounts[t.owner] = (ownerCounts[t.owner] || 0) + 1;
+      }
+    });
+
+    const members = teamConfig.members || [];
+    const description = teamConfig.description || '';
+    const lead = members.find((m) => m.agentType === 'team-lead' || m.name === 'team-lead');
+
+    if (description) {
+      html += `<div class="team-modal-desc">"${escapeHtml(description)}"</div>`;
+    }
+
+    html += `<div style="font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-bottom: 10px;">Members (${members.length})</div>`;
+
+    members.forEach((member) => {
+      const taskCount = ownerCounts[member.name] || 0;
+      const memberDesc = memberDescriptions[member.name];
+      const mc = resolveNamedColor(member.color);
+      const borderStyle = mc ? ` style="border-left:3px solid ${mc.color}"` : '';
+      const nameStyle = mc ? ` style="color:${mc.color}"` : '';
+      html += `
+            <div class="team-member-card"${borderStyle}>
+              <div class="member-name"${nameStyle}>${escapeHtml(member.name)}</div>
+              ${member.model ? `<div class="member-detail">Model: ${escapeHtml(member.model)}</div>` : ''}
+              ${memberDesc ? `<div class="member-detail" style="margin-top: 4px; font-style: italic; color: var(--text-secondary);">${escapeHtml(memberDesc.split('\n')[0])}</div>` : ''}
+              <div class="member-tasks">Tasks: ${taskCount} assigned</div>
+            </div>
+          `;
+    });
+
+    const metaParts = [];
+    if (teamConfig.created_at) {
+      metaParts.push(`Created: ${new Date(teamConfig.created_at).toLocaleString()}`);
+    }
+    if (lead) {
+      metaParts.push(`Lead: ${lead.name}`);
+    }
+    if (teamConfig.working_dir) {
+      metaParts.push(`Working dir: ${teamConfig.working_dir}`);
+    }
+    if (metaParts.length > 0) {
+      html += `<div class="team-modal-meta">${metaParts.map((p) => escapeHtml(p)).join('<br>')}</div>`;
+    }
+  }
 
   bodyEl.innerHTML = html;
-  bindLinkedDocsHandlers(bodyEl, session.id);
-  const alreadyVisible = modal.classList.contains('visible');
+  // Bind to the section, not bodyEl: bodyEl outlives the modal, so listeners on it
+  // would stack up once per open and fire the click handler N times.
+  bindLinkedDocsHandlers(bodyEl.querySelector('.linked-docs-section'), session.id);
   _infoModalSessionId = session.id;
   updateStickyBtnState();
   updateDismissBtnState();
+  const costBtn = document.getElementById('session-info-cost-btn');
+  if (costBtn) costBtn.style.display = hub.can('session.cost') ? '' : 'none';
+  const mkBtn = document.getElementById('session-info-marketplace-btn');
+  const memBtn = document.getElementById('session-info-memory-btn');
+  const proj = session.project;
+  if (mkBtn) mkBtn.style.display = proj && hub.can('project.plugins') ? '' : 'none';
+  if (memBtn) memBtn.style.display = proj && hub.can('project.memory') ? '' : 'none';
   modal.classList.add('visible');
-
-  if (alreadyVisible) return; // re-render during deferred hydration — key handler already attached
-
-  const keyHandler = (e) => {
-    if (e.key === 'Escape') {
-      if (document.getElementById('plan-modal').classList.contains('visible')) return;
-      e.preventDefault();
-      closeSessionInfoModal();
-      document.removeEventListener('keydown', keyHandler);
-    }
-  };
-  document.addEventListener('keydown', keyHandler);
 }
 
-function closeSessionInfoModal() {
-  document.getElementById('session-info-modal').classList.remove('visible');
+function closeTeamModal() {
+  document.getElementById('team-modal').classList.remove('visible');
   _planSessionId = null;
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function dismissAndAdvance(sessionId) {
-  if (!sessionId) return;
-  if (dismissedSessionIds.has(sessionId)) {
-    dismissedSessionIds.delete(sessionId);
-    updateDismissBtnState();
-    renderSessions();
-    return;
-  }
-
-  const items = Array.from(sessionsList.querySelectorAll('.session-item'));
-  const idx = items.findIndex((el) => el.dataset.sessionId === sessionId);
-  const nextEl = idx >= 0 ? items[idx + 1] || items[idx - 1] || null : null;
-  const nextId = nextEl ? nextEl.dataset.sessionId : null;
-
-  dismissedSessionIds.add(sessionId);
-  updateDismissBtnState();
-  renderSessions();
-
-  if (sessionId !== currentSessionId) return;
-  if (nextId) {
-    const newEl = sessionsList.querySelector(`.session-item[data-session-id="${CSS.escape(nextId)}"]`);
-    if (newEl) newEl.click();
-  } else {
-    currentSessionId = null;
-    currentTasks = [];
-    renderSession();
-    updateUrl();
-  }
+function openSessionFromInfo(sessionId) {
+  closeTeamModal();
+  fetchTasks(sessionId);
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function toggleDismissSession(sessionId) {
-  if (dismissedSessionIds.has(sessionId)) {
-    dismissedSessionIds.delete(sessionId);
-  } else {
-    dismissedSessionIds.add(sessionId);
-  }
-  updateDismissBtnState();
-  renderSessions();
+async function toggleDismissSession(sessionId) {
+  const dismiss = !dismissedSessionIds.has(sessionId);
+  if (dismiss && !(await confirmDismissBlockers(sessionId))) return;
+  if (dismiss) dismissSessionFromList(sessionId);
+  else setSessionDismissed(sessionId, false);
 }
 
 function updateDismissBtnState() {
@@ -5499,84 +12371,736 @@ let _planSessionId = null;
 
 //#endregion
 
-// Plan binding lives in localStorage (key: `kanban:plan:<sessionId>` → {path, title}).
-// Server is stateless for plan bindings — it only validates + broadcasts via SSE
-// and serves file content via GET ?path=. The browser is the source of truth.
-const PLAN_STORAGE_PREFIX = 'kanban:plan:';
+//#region SESSION_PICKER
+// Snapshot of what the sidebar is showing, taken once per open: the picker only ever offers
+// sessions already on screen, and the recency order cannot change while it is up.
+let spSource = [];
+let spRows = [];
+let spIdx = 0;
+let spPeekTimer = null;
+let spPeekToken = 0;
+let spPeekedId = null;
+let spFromTerminal = false;
+let spRenderedQuery = null;
+// Per-open cache: spSource is frozen while the picker is up, so a fetched log stays valid.
+const spPeekCache = new Map();
+// 'board' offers the sidebar's sessions plus a short tail of the newest others; 'all' offers
+// every session, newest first, paged like the sidebar's All filter. Each open starts on 'board'.
+let spScope = 'board';
+let spRecent = { rows: [], limit: 0, hasMore: true, loading: false };
+let spRowEls = [];
+const SP_RECENT_PAGE = 50;
+const SP_RECENT_TAIL = 5;
 
-function getStoredPlan(sessionId) {
-  if (!sessionId) return null;
+// The first load asks for the board's count plus the tail, so the tail is there even when
+// the newest sessions are all on the board.
+async function spLoadRecent() {
+  const state = spRecent;
+  if (state.loading || !state.hasMore) return;
+  state.loading = true;
+  state.limit = state.limit ? state.limit + SP_RECENT_PAGE : spSource.length + SP_RECENT_TAIL;
   try {
-    const raw = localStorage.getItem(PLAN_STORAGE_PREFIX + sessionId);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+    const res = await api('/api/sessions', { query: { limit: state.limit, pins: 'off' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+    if (state !== spRecent) return;
+    state.rows = rows;
+    state.hasMore = res.headers.get('X-Has-More') === 'true';
+  } catch (error) {
+    console.error('Failed to load recent sessions:', error);
+    state.hasMore = false;
+  } finally {
+    state.loading = false;
   }
+  if (!isSessionPickerOpen()) return;
+  renderSessionPicker();
+  spLoadMoreNearEnd();
 }
 
-function setStoredPlan(sessionId, plan) {
-  if (!sessionId) return;
-  try {
-    if (plan && plan.path) {
-      localStorage.setItem(PLAN_STORAGE_PREFIX + sessionId, JSON.stringify({ path: plan.path, title: plan.title || null }));
-    } else {
-      localStorage.removeItem(PLAN_STORAGE_PREFIX + sessionId);
+function spSetScope(scope) {
+  spScope = scope;
+  for (const el of document.querySelectorAll('#session-picker-scope [data-scope]')) {
+    el.setAttribute('aria-checked', String(el.dataset.scope === scope));
+  }
+  renderSessionPicker();
+  spLoadMoreNearEnd();
+}
+
+// Also run after each load: a page too short to scroll gives no scroll event.
+function spLoadMoreNearEnd() {
+  if (spScope === 'all') loadMoreIfNearEnd(document.getElementById('session-picker-list'), spLoadRecent);
+}
+
+const spSearch = sessionSearch(() => {
+  if (document.getElementById('session-picker-modal').classList.contains('visible')) renderSessionPicker();
+});
+
+function openSessionPicker() {
+  spFromTerminal = terminalPaneFocused();
+  const input = document.getElementById('session-picker-input');
+  input.value = '';
+  spSource = getFilteredSessions().sort((a, b) => Date.parse(b.modifiedAt) - Date.parse(a.modifiedAt));
+  spPeekCache.clear();
+  spRenderedQuery = null;
+  spRecent = { rows: [], limit: 0, hasMore: true, loading: false };
+  document.getElementById('session-picker-modal').classList.add('visible');
+  spSetScope('board');
+  input.focus();
+  spLoadRecent();
+}
+
+// refocus: false when a session is being opened, which moves the terminal focus itself.
+function closeSessionPicker({ refocus = true } = {}) {
+  spSetPeeking(false);
+  hideModalOverlay('session-picker-modal');
+  if (refocus && spFromTerminal && wantsTerminal()) focusTerminalPane();
+}
+
+function isSessionPickerOpen() {
+  return document.getElementById('session-picker-modal').classList.contains('visible');
+}
+
+function toggleSessionPicker() {
+  if (isSessionPickerOpen()) closeSessionPicker();
+  else openSessionPicker();
+}
+
+function spIsPeeking() {
+  return _modalEl('session-picker-modal').classList.contains('peeking');
+}
+
+function spSetPeeking(on) {
+  clearTimeout(spPeekTimer);
+  spPeekToken++;
+  spPeekedId = null;
+  _modalEl('session-picker-modal').classList.toggle('peeking', on);
+  if (on) spSchedulePeek();
+  else document.getElementById('session-picker-peek').innerHTML = '';
+}
+
+function spSchedulePeek() {
+  if (!spIsPeeking() || spRows[spIdx]?.id === spPeekedId) return;
+  clearTimeout(spPeekTimer);
+  spPeekTimer = setTimeout(spLoadPeek, 120);
+}
+
+function spRenderPeek(session, messages, note) {
+  const pane = document.getElementById('session-picker-peek');
+  const body =
+    messages === null
+      ? ''
+      : messages.length
+        ? `<div class="sp-peek-items">${renderMessageList(messages, { readOnly: true })}</div>`
+        : '<div class="msg-empty">No messages in this session</div>';
+  pane.innerHTML = `<div class="sp-peek-title"><span>${escapeHtml(sessionDisplayName(session))}</span><span>${note}</span></div>${body}`;
+  pane.scrollTop = pane.scrollHeight;
+}
+
+async function spLoadPeek() {
+  const session = spRows[spIdx];
+  if (!session) {
+    document.getElementById('session-picker-peek').innerHTML = '<div class="msg-empty">No session selected</div>';
+    return;
+  }
+  spPeekedId = session.id;
+  let messages = spPeekCache.get(session.id);
+  if (!messages) {
+    const token = ++spPeekToken;
+    spRenderPeek(session, null, 'loading…');
+    try {
+      messages = (await fetchSessionMessagesPage(session.id))?.messages || [];
+    } catch (_) {
+      messages = [];
     }
-  } catch (e) {
-    console.warn('plan storage write failed:', e);
+    if (token !== spPeekToken) return;
+    spPeekCache.set(session.id, messages);
   }
+  spRenderPeek(session, messages, `last ${messages.length} entries`);
 }
 
-function applyStoredPlan(session) {
-  if (!session) return session;
-  const stored = getStoredPlan(session.id);
-  if (stored?.path) {
-    session.hasPlan = true;
-    session.planPath = stored.path;
-    session.planTitle = stored.title || session.planTitle || null;
-  }
-  return session;
+function spMatches(session, query) {
+  return (
+    fuzzyMatch(session.name, query) ||
+    fuzzyMatch(session.id, query) ||
+    fuzzyMatch(session.project, query) ||
+    fuzzyMatch(session.gitBranch, query)
+  );
 }
 
-function fetchPlanContent(sessionId) {
-  const stored = getStoredPlan(sessionId);
-  if (!stored?.path) return Promise.resolve(null);
-  const qs = `?path=${encodeURIComponent(stored.path)}`;
-  return fetch(`/api/sessions/${encodeURIComponent(sessionId)}/plan${qs}`)
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null);
+// Spelled out rather than interpolated so the class never comes from a variable.
+const SP_STATES = {
+  waiting: '<span class="sp-state waiting">',
+  live: '<span class="sp-state live">',
+  active: '<span class="sp-state active">',
+  justFinished: '<span class="sp-state just-finished">',
+  recent: '<span class="sp-state recent">',
+  idle: '<span class="sp-state idle">',
+};
+
+const SP_DOT = '<span class="activity-dot"></span>';
+const SP_TERMINAL = `<span class="sp-terminal" title="${TERMINAL_TITLE}">${ICON_TERMINAL}</span>`;
+
+function spState(session) {
+  if (isWaitingSession(session)) return 'waiting';
+  if (isSessionLive(session)) return 'live';
+  if (isActiveSession(session)) return 'active';
+  if (isJustFinished(session)) return 'justFinished';
+  return session.hasRecentActivity || session.inProgress > 0 ? 'recent' : 'idle';
 }
 
-function handleSessionPlanEvent(data) {
-  if (!data?.id) return;
-  setStoredPlan(data.id, { path: data.path, title: data.title });
-  for (const s of sessions) {
-    if (s.id === data.id) applyStoredPlan(s);
-  }
-  renderSessions();
-  if (_planSessionId === data.id) refreshOpenPlan();
-  if (_infoModalSessionId === data.id) {
-    // Re-run the entry point to pull fresh plan content into the info modal.
-    showSessionInfoModal(data.id).catch(() => {});
-  }
+function spDotHtml(session) {
+  return `${SP_STATES[spState(session)]}${runningTerminals.has(session.id) ? SP_TERMINAL : SP_DOT}</span>`;
 }
+
+function spPinHtml(session) {
+  const state = getSessionPinState(session.id);
+  if (state === 'sticky') return `<span class="sp-pin sticky" title="Sticky">${SESSION_STAR_SVG}</span>`;
+  if (state === 'pinned') return `<span class="sp-pin pinned" title="Pinned">${SESSION_PIN_SVG}</span>`;
+  return '<span class="sp-pin"></span>';
+}
+
+function renderSessionPicker() {
+  const list = document.getElementById('session-picker-list');
+  const query = document.getElementById('session-picker-input').value.trim();
+  // Rows that arrive for the same query and scope append below, so the cursor stays on its row.
+  const renderKey = `${spScope}\n${query}`;
+  const selectedId = renderKey === spRenderedQuery ? spRows[spIdx]?.id : null;
+  spRenderedQuery = renderKey;
+  const all = spScope === 'all';
+  const board = new Set(spSource.map((s) => s.id));
+  const local = (all ? spRecent.rows : spSource).filter((s) => spMatches(s, query));
+  const found = spSearch.rows(query, local);
+  const tail = !all && !query ? spRecent.rows.filter((s) => !board.has(s.id)).slice(0, SP_RECENT_TAIL) : [];
+  const extra = [...found.rows, ...tail];
+  spRows = [...local, ...extra];
+  if (!spRows.length) {
+    spIdx = -1;
+    spRowEls = [];
+    const empty =
+      found.pending || (all && spRecent.loading)
+        ? 'Searching all sessions…'
+        : all || spSource.length || query.length >= SESSION_SEARCH_MIN
+          ? 'No session matches'
+          : 'No sessions in the current sidebar filter';
+    list.innerHTML = `<div class="sp-empty">${empty}</div>`;
+    return;
+  }
+
+  // Rows not on the board show their full project path; in the board scope they also sit below
+  // the board's rows, under a label.
+  const section = !all && extra.length ? '<div class="sp-section">Not on board</div>' : '';
+  list.innerHTML = spRows
+    .map((s, i) => {
+      const outside = !board.has(s.id);
+      const below = !all && i >= local.length;
+      const project = s.project ? (outside ? s.project : pathBasename(s.project)) : '';
+      return `${below && i === local.length ? section : ''}<button class="sp-row${s.id === currentSessionId ? ' current' : ''}${below ? ' outside' : ''} ${sessionBarClass(s)}" data-idx="${i}" title="${escapeHtml(s.project ? `${s.id}\n${s.project}` : s.id)}">
+        ${spDotHtml(s)}
+        <span class="sp-name">${escapeHtml(sessionDisplayName(s))}</span>
+        <span class="sp-project">${escapeHtml(project)}</span>
+        ${s.gitBranch ? `<span class="sp-branch">${escapeHtml(s.gitBranch)}</span>` : ''}
+        <span class="sp-count">${s.completed}/${s.taskCount}</span>
+        <span class="sp-time">${formatDate(s.modifiedAt)}</span>
+        ${spPinHtml(s)}
+      </button>`;
+    })
+    .join('');
+  // The section label sits between rows, so row index and child index differ.
+  spRowEls = list.querySelectorAll('.sp-row');
+  spIdx = -1;
+  const keep = spRows.findIndex((s) => s.id === selectedId);
+  spSelect(Math.max(0, keep));
+}
+
+function spSelect(idx) {
+  spRowEls[spIdx]?.classList.remove('selected');
+  spIdx = Math.min(Math.max(idx, 0), spRows.length - 1);
+  const row = spRowEls[spIdx];
+  row?.classList.add('selected');
+  row?.scrollIntoView({ block: 'nearest' });
+  spSchedulePeek();
+  if (spScope === 'all' && spIdx >= spRows.length - 5) spLoadRecent();
+}
+
+async function spOpen(idx) {
+  const session = spRows[idx];
+  if (!session) return;
+  closeSessionPicker({ refocus: false });
+  if (spFromTerminal) termState.focusNext = true;
+  await revealSession(session.id);
+}
+
+function initSessionPicker() {
+  const input = document.getElementById('session-picker-input');
+  input.addEventListener('input', renderSessionPicker);
+  // Bound on the input: the global handler returns early on INPUT targets.
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSessionPicker();
+    else if (matchKey(e, 'ArrowDown') || (e.ctrlKey && e.key === 'n')) spSelect(spIdx + 1);
+    else if (matchKey(e, 'ArrowUp') || (e.ctrlKey && !e.shiftKey && e.key === 'p')) spSelect(spIdx - 1);
+    else if (e.key === 'Enter') spOpen(spIdx);
+    else if (e.ctrlKey && e.code === 'Space') spSetPeeking(!spIsPeeking());
+    else if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) spSetScope(spScope === 'all' ? 'board' : 'all');
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  const list = document.getElementById('session-picker-list');
+  list.addEventListener('click', (e) => {
+    const row = e.target.closest('.sp-row');
+    if (row) spOpen(Number(row.dataset.idx));
+  });
+  list.addEventListener('scroll', spLoadMoreNearEnd, { passive: true });
+  document.getElementById('session-picker-scope').addEventListener('click', (e) => {
+    const scope = e.target.closest('[data-scope]')?.dataset.scope;
+    if (scope) spSetScope(scope);
+    input.focus();
+  });
+  // Vimium eats Escape inside a text input and only blurs it, so the page never sees the key.
+  // A blur that no click in the picker caused, while the window keeps focus, is that Escape.
+  const modal = document.getElementById('session-picker-modal');
+  let pointerDown = false;
+  modal.addEventListener('mousedown', () => {
+    pointerDown = true;
+  });
+  document.addEventListener('mouseup', () => {
+    pointerDown = false;
+  });
+  input.addEventListener('blur', () => {
+    if (!pointerDown && modal.classList.contains('visible') && document.hasFocus()) closeSessionPicker();
+  });
+}
+//#endregion
+
+//#region PROJECT_PICKER
+// Sets only this board's project filter; a later hub project.changed replaces it.
+let ppRows = [];
+let ppIdx = 0;
+let ppSource = null;
+let ppRecentOnly = false;
+
+async function openProjectPicker() {
+  const input = document.getElementById('project-picker-input');
+  input.value = '';
+  renderProjectPicker();
+  document.getElementById('project-picker-modal').classList.add('visible');
+  input.focus();
+  await refreshProjectList();
+  ppSource = (projectsCache || [])
+    .filter((p) => !p.temp)
+    .map((p) => ({ ...p, norm: normalizeProjectPath(p.path) }))
+    .sort((a, b) => (b.modifiedAt || '').localeCompare(a.modifiedAt || ''));
+  renderProjectPicker();
+}
+
+function ppToggleRecentOnly() {
+  ppRecentOnly = !ppRecentOnly;
+  document.getElementById('pp-recent-chip').setAttribute('aria-pressed', String(ppRecentOnly));
+  renderProjectPicker();
+  document.getElementById('project-picker-input').focus();
+}
+
+// One fetch for both filters: two in a row could land out of order.
+function ppSetFilters(project, session) {
+  closeProjectPicker();
+  if (project === filterProject) return filterBySessions(session);
+  setSessionFilter(session);
+  filterByProject(project);
+}
+
+function closeProjectPicker() {
+  hideModalOverlay('project-picker-modal');
+}
+
+function renderProjectPicker() {
+  const list = document.getElementById('project-picker-list');
+  const query = document.getElementById('project-picker-input').value.trim();
+  const source = ppSource || [];
+  const pool = ppRecentOnly ? source.filter((p) => recentProjects.has(p.path)) : source;
+  ppRows = query ? pool.filter((p) => fuzzyMatch(p.path, query)) : pool;
+  if (!ppRows.length) {
+    ppIdx = -1;
+    const empty = ppRecentOnly ? `No project active in the last ${RECENT_PROJECT_HOURS}h` : 'No project matches';
+    list.innerHTML = `<div class="sp-empty">${ppSource ? empty : 'Loading projects…'}</div>`;
+    return;
+  }
+  const current = filterProject && normalizeProjectPath(filterProject);
+  list.innerHTML = ppRows
+    .map((p, i) => {
+      return `<button class="sp-row${p.norm === current ? ' current' : ''}${recentProjects.has(p.path) ? ' recent' : ''}" data-idx="${i}">
+        <span class="sp-name">${escapeHtml(pathBasename(p.path))}</span>
+        <span class="sp-project">${escapeHtml(p.path)}</span>
+        ${p.modifiedAt ? `<span class="sp-time">${formatDate(p.modifiedAt)}</span>` : ''}
+      </button>`;
+    })
+    .join('');
+  const currentIdx = ppRows.findIndex((p) => p.norm === current);
+  ppSelect(query ? 0 : Math.max(0, currentIdx));
+}
+
+function ppSelect(idx) {
+  const list = document.getElementById('project-picker-list');
+  list.children[ppIdx]?.classList.remove('selected');
+  ppIdx = Math.min(Math.max(idx, 0), ppRows.length - 1);
+  const row = list.children[ppIdx];
+  row?.classList.add('selected');
+  row?.scrollIntoView({ block: 'nearest' });
+}
+
+function ppApply(idx) {
+  const row = ppRows[idx];
+  if (!row) return;
+  ppSetFilters(row.path, ppRecentOnly ? 'active' : 'all');
+}
+
+function initProjectPicker() {
+  const input = document.getElementById('project-picker-input');
+  input.addEventListener('input', renderProjectPicker);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeProjectPicker();
+    else if (matchKey(e, 'ArrowDown') || (e.ctrlKey && e.key === 'n')) ppSelect(ppIdx + 1);
+    else if (matchKey(e, 'ArrowUp') || (e.ctrlKey && !e.shiftKey && e.key === 'p')) ppSelect(ppIdx - 1);
+    else if (e.key === 'Enter') ppApply(ppIdx);
+    else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyR') {
+      if (!e.repeat) ppToggleRecentOnly();
+    } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyC')
+      ppSetFilters(FILTER_DEFAULTS.project, FILTER_DEFAULTS.session);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  document.getElementById('project-picker-list').addEventListener('click', (e) => {
+    const row = e.target.closest('.sp-row');
+    if (row) ppApply(Number(row.dataset.idx));
+  });
+  // Vimium's Escape only blurs the input; see initSessionPicker.
+  const modal = document.getElementById('project-picker-modal');
+  let pointerDown = false;
+  modal.addEventListener('mousedown', () => {
+    pointerDown = true;
+  });
+  document.addEventListener('mouseup', () => {
+    pointerDown = false;
+  });
+  input.addEventListener('blur', () => {
+    if (!pointerDown && modal.classList.contains('visible') && document.hasFocus()) closeProjectPicker();
+  });
+}
+//#endregion
 
 //#region PLAN
 function refreshOpenPlan() {
   if (!_planSessionId || !document.getElementById('plan-modal').classList.contains('visible')) return;
-  fetchPlanContent(_planSessionId).then((data) => {
-    if (data?.content) {
+  getJson(apiPath`/api/sessions/${_planSessionId}/plan`).then((data) => {
+    if (data?.content && (data.content !== _pendingPlanContent || data.path !== _pendingPlanPath)) {
       _pendingPlanContent = data.content;
-      const body = document.getElementById('plan-modal-body');
-      body.innerHTML = renderMarkdown(_pendingPlanContent);
+      _pendingPlanPath = data.path || null;
+      document.getElementById('plan-modal-body').innerHTML = renderMarkdown(_pendingPlanContent);
+      mountPlanReview();
+      syncPlanPaneBtn();
     }
   });
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function showLoopModal(sessionId) {
+  const body = document.getElementById('loop-modal-body');
+  body.innerHTML = '<div class="modal-status">Loading…</div>';
+  document.getElementById('loop-modal').classList.add('visible');
+  getJson(apiPath`/api/sessions/${sessionId}/loop`, { wakeups: [], crons: [] }).then(renderLoopModalBody);
+}
+
+function fmtLoopDelay(s) {
+  if (s == null) return '';
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+
+function fmtLoopFireTime(timestamp, delaySeconds) {
+  if (!timestamp || delaySeconds == null) return { abs: '', rel: '', status: '' };
+  const fireMs = new Date(timestamp).getTime() + delaySeconds * 1000;
+  const fireDate = new Date(fireMs);
+  const diff = fireMs - Date.now();
+  const abs = fireDate.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const absSec = Math.abs(Math.round(diff / 1000));
+  const rel =
+    absSec < 60 ? `${absSec}s` : absSec < 3600 ? `${Math.round(absSec / 60)}m` : `${(absSec / 3600).toFixed(1)}h`;
+  if (diff > 0) return { abs, rel: `in ${rel}`, status: 'pending' };
+  return { abs, rel: `${rel} ago`, status: 'fired' };
+}
+
+const LOOP_CLOCK_SVG =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+const LOOP_CRON_SVG =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>';
+
+function loopField(label, value, mono = false) {
+  if (!value) return '';
+  const inner = mono ? `<code>${escapeHtml(value)}</code>` : escapeHtml(value);
+  return `<div class="loop-field"><div class="loop-field-label">${label}</div><div class="loop-field-val">${inner}</div></div>`;
+}
+
+function renderLoopRow(item, kind) {
+  const when = item.timestamp ? formatDate(item.timestamp) : '';
+  let headline = '';
+  let footer = '';
+  let fields = '';
+  if (kind === 'wakeup') {
+    const fire = fmtLoopFireTime(item.timestamp, item.delaySeconds);
+    const delayLbl = item.delaySeconds != null ? `delay ${fmtLoopDelay(item.delaySeconds)}` : '';
+    if (fire.abs) {
+      headline = `<div class="loop-headline loop-fire-${fire.status}">${LOOP_CLOCK_SVG}<span class="loop-headline-rel">${fire.status === 'pending' ? 'Fires' : 'Fired'} ${escapeHtml(fire.rel)}</span><span class="loop-headline-abs">${escapeHtml(fire.abs)}</span></div>`;
+    }
+    fields = loopField('Reason', item.reason) + loopField('Prompt', item.prompt, true);
+    footer = `<div class="loop-foot">scheduled ${escapeHtml(when)}${delayLbl ? ` · ${delayLbl}` : ''}</div>`;
+  } else {
+    if (item.cron) {
+      headline = `<div class="loop-headline">${LOOP_CRON_SVG}<span class="loop-headline-rel"><code>${escapeHtml(item.cron)}</code></span></div>`;
+    }
+    fields = loopField('Description', item.description) + loopField('Prompt', item.prompt, true);
+    footer = `<div class="loop-foot">created ${escapeHtml(when)}</div>`;
+  }
+  return `<div class="loop-row">${headline}${fields}${footer}</div>`;
+}
+
+function renderLoopModalBody(data) {
+  const body = document.getElementById('loop-modal-body');
+  const wakeups = data.wakeups || [];
+  const crons = data.crons || [];
+  if (!wakeups.length && !crons.length) {
+    body.innerHTML = '<div class="modal-empty">No scheduled wakeups or cron jobs.</div>';
+    return;
+  }
+  const section = (title, items, kind) =>
+    items.length
+      ? `<h4 class="loop-section-title">${title} <span class="loop-count">${items.length}</span></h4>${items.map((i) => renderLoopRow(i, kind)).join('')}`
+      : '';
+  body.innerHTML = section('Wakeups', wakeups, 'wakeup') + section('Cron jobs', crons, 'cron');
+}
+
+function renderLoopBadge(session) {
+  const li = session.loopInfo;
+  const total = (li?.wakeupCount || 0) + (li?.cronCount || 0);
+  if (total === 0) return '';
+  let tip = `${li.wakeupCount} wakeup${li.wakeupCount === 1 ? '' : 's'}, ${li.cronCount} cron${li.cronCount === 1 ? '' : 's'}`;
+  if (li.latest?.timestamp && li.latest.delaySeconds != null) {
+    const f = fmtLoopFireTime(li.latest.timestamp, li.latest.delaySeconds);
+    if (f.abs) tip += ` — latest ${f.status === 'pending' ? 'fires' : 'fired'} ${f.rel} (${f.abs})`;
+  }
+  return `<span class="loop-badge" onclick="event.stopPropagation(); showLoopModal('${escAttrJs(session.id)}')" title="${escapeHtml(tip)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>`;
+}
+
+function closeLoopModal() {
+  document.getElementById('loop-modal').classList.remove('visible');
+}
+
+const WORKFLOW_GEAR_SVG =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
+// Standard "open in editor" glyph — matches the message-detail / plan modals.
+const ICON_OPEN_EDITOR =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+
+function renderWorkflowBadge(session) {
+  if (!session.hasWorkflow) return '';
+  const n = session.workflowCount || 0;
+  const tip = `${n} workflow${n === 1 ? '' : 's'}`;
+  return `<span class="workflow-badge" onclick="event.stopPropagation(); showWorkflowModal('${escAttrJs(session.id)}')" title="${escapeHtml(tip)}">${WORKFLOW_GEAR_SVG}</span>`;
+}
+
+let _workflowSessionId = null;
+let _workflowHeaderId = null;
+let _workflowList = [];
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function showWorkflowModal(sessionId) {
+  _workflowSessionId = sessionId;
+  setWorkflowHeader('Workflows', null);
+  const body = document.getElementById('workflow-modal-body');
+  body.innerHTML = '<div class="modal-status">Loading…</div>';
+  document.getElementById('workflow-modal').classList.add('visible');
+  getJson(apiPath`/api/sessions/${sessionId}/workflows`, { workflows: [] }).then((data) => {
+    _workflowList = data.workflows || [];
+    if (!_workflowList.length) {
+      setWorkflowHeader('Workflows', null);
+      body.innerHTML = '<div class="modal-empty">No workflow scripts for this session.</div>';
+    } else if (_workflowList.length === 1) {
+      showWorkflowRun(_workflowList[0].id);
+    } else {
+      renderWorkflowPicker(_workflowList);
+    }
+  });
+}
+
+function setWorkflowHeader(name, wfId) {
+  const titleText = document.getElementById('workflow-modal-title-text');
+  const headerBtn = document.getElementById('workflow-modal-open-btn');
+  _workflowHeaderId = wfId || null;
+  if (titleText) {
+    titleText.textContent = name;
+    titleText.title = wfId ? name : '';
+  }
+  if (headerBtn) headerBtn.style.display = wfId ? '' : 'none';
+}
+
+// Multiple workflows: pick one to drill into (we show a single run at a time).
+function renderWorkflowPicker(workflows) {
+  setWorkflowHeader('Workflows', null);
+  const body = document.getElementById('workflow-modal-body');
+  body.innerHTML = workflows
+    .map((w) => {
+      const when = w.modifiedAt ? formatDate(w.modifiedAt) : '';
+      return `<div class="workflow-row" onclick="showWorkflowRun('${escAttrJs(w.id)}')">
+        <div class="workflow-row-head">
+          <span class="workflow-row-name">${escapeHtml(w.name || w.id)}</span>
+          <span class="workflow-row-id"><code>${escapeHtml(w.id)}</code></span>
+          <button class="icon-btn workflow-open-icon" aria-label="Open in editor" title="Open in editor" onclick="event.stopPropagation(); openWorkflowInEditor('${escAttrJs(w.id)}')">${ICON_OPEN_EDITOR}</button>
+        </div>
+        ${w.description ? `<div class="workflow-row-desc">${escapeHtml(w.description)}</div>` : ''}
+        ${when ? `<div class="workflow-row-meta">${escapeHtml(when)}</div>` : ''}
+      </div>`;
+    })
+    .join('');
+}
+
+function showWorkflowRun(wfId) {
+  const name = _workflowList.find((w) => w.id === wfId)?.name || wfId;
+  setWorkflowHeader(name, wfId);
+  const body = document.getElementById('workflow-modal-body');
+  body.innerHTML = '<div class="modal-status">Loading…</div>';
+  getJson(apiPath`/api/sessions/${_workflowSessionId}/workflows/${wfId}/run`).then((run) => {
+    if (!run) {
+      body.innerHTML = '<div class="modal-status">Failed to load run state.</div>';
+      return;
+    }
+    renderWorkflowRun(run);
+  });
+}
+
+function fmtTokens(t) {
+  return t >= 1000 ? `${(t / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${t}`;
+}
+
+function shortModelName(model) {
+  return model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : '';
+}
+
+function agentModel(agent) {
+  return agent.model || agent.modelAlias || '';
+}
+
+function renderWorkflowRun(run) {
+  const body = document.getElementById('workflow-modal-body');
+  const allDone = run.startedCount > 0 && run.doneCount >= run.startedCount;
+  const wall =
+    run.startedAt && run.stoppedAt ? formatDuration(new Date(run.stoppedAt) - new Date(run.startedAt)) : null;
+
+  const back =
+    _workflowList.length > 1
+      ? `<div class="wf-back" onclick="renderWorkflowPicker(_workflowList)">‹ All workflows</div>`
+      : '';
+
+  const stats = [`${run.doneCount}/${run.startedCount} agents`, wall ? escapeHtml(wall) : null]
+    .filter(Boolean)
+    .join(' · ');
+
+  const desc = run.description ? `<div class="wf-run-desc">${escapeHtml(run.description)}</div>` : '';
+
+  const phases = (run.phases || [])
+    .map(
+      (p) => `<div class="wf-phase">
+        <span class="wf-phase-mark${allDone ? ' done' : ''}">${allDone ? '✓' : ''}</span>
+        <span class="wf-phase-title">${escapeHtml(p.title)}</span>
+        ${p.detail ? `<span class="wf-phase-detail">${escapeHtml(p.detail)}</span>` : ''}
+      </div>`,
+    )
+    .join('');
+  const phasesBlock = phases ? `<div class="wf-section-title">Phases</div><div class="wf-phases">${phases}</div>` : '';
+
+  const agents = (run.agents || [])
+    .map((a) => {
+      const dur = a.durationMs != null ? formatDuration(a.durationMs) : '';
+      const running = a.status !== 'done';
+      return `<div class="wf-agent" onclick="showAgentModal('${escAttrJs(a.agentId)}')" title="${escapeHtml(a.agentId)}">
+        <span class="wf-agent-type">${escapeHtml(a.type || 'agent')}</span>
+        <span class="wf-agent-model">${escapeHtml(shortModelName(a.model))}</span>
+        <span class="wf-agent-tok">${a.outputTokens ? `${fmtTokens(a.outputTokens)} tok` : ''}</span>
+        <span class="wf-agent-dur">${escapeHtml(dur)}</span>
+        <span class="wf-agent-status ${running ? 'running' : 'done'}">${running ? '●' : '✓'}</span>
+      </div>`;
+    })
+    .join('');
+  const agentsBlock = run.agents?.length
+    ? `<div class="wf-section-title">Agents · ${run.agents.length}</div><div class="wf-agents">${agents}</div>`
+    : '<div class="wf-section-title">Agents</div><div class="wf-empty">No agent runs recorded yet.</div>';
+
+  body.innerHTML = `<div class="workflow-run">
+    ${back}
+    ${desc}
+    <div class="wf-run-stats">${stats} · <code>${escapeHtml(run.id)}</code></div>
+    ${phasesBlock}
+    ${agentsBlock}
+    <details class="wf-source">
+      <summary>Source</summary>
+      <div class="workflow-row-code"></div>
+    </details>
+  </div>`;
+
+  const details = body.querySelector('.wf-source');
+  details.addEventListener(
+    'toggle',
+    () => {
+      if (details.open) loadWorkflowCode(run.id, details.querySelector('.workflow-row-code'));
+    },
+    { once: true },
+  );
+}
+
+function loadWorkflowCode(wfId, codeEl) {
+  if (!codeEl) return;
+  codeEl.innerHTML = '<div class="modal-status-tight">Loading…</div>';
+  getJson(apiPath`/api/sessions/${_workflowSessionId}/workflows/${wfId}`).then((data) => {
+    if (!data?.content) {
+      codeEl.innerHTML = '<div class="modal-status-tight">Failed to load script.</div>';
+      return;
+    }
+    let highlighted;
+    if (typeof hljs !== 'undefined' && hljs.getLanguage('javascript')) {
+      highlighted = hljs.highlight(data.content, { language: 'javascript' }).value;
+    } else {
+      highlighted = escapeHtml(data.content);
+    }
+    codeEl.innerHTML = `<pre><code class="hljs language-javascript">${highlighted}</code></pre>`;
+  });
+}
+
+function openWorkflowInEditor(wfId) {
+  postAndToast(apiPath`/api/sessions/${_workflowSessionId}/workflows/${wfId}/open`, {}, 'in editor');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openWorkflowHeaderScript() {
+  if (_workflowHeaderId) openWorkflowInEditor(_workflowHeaderId);
+}
+
+function closeWorkflowModal() {
+  document.getElementById('workflow-modal').classList.remove('visible');
+  _workflowSessionId = null;
+  _workflowList = [];
+  setWorkflowHeader('Workflows', null);
+}
+
 function openPlanForSession(sid) {
-  fetchPlanContent(sid).then((data) => {
+  getJson(apiPath`/api/sessions/${sid}/plan`).then((data) => {
     if (data?.content) {
       _pendingPlanContent = data.content;
+      _pendingPlanPath = data.path || null;
       _planSessionId = sid;
       openPlanModal();
     }
@@ -5587,11 +13111,23 @@ function openPlanModal() {
   if (!_pendingPlanContent) return;
   const body = document.getElementById('plan-modal-body');
   body.innerHTML = renderMarkdown(_pendingPlanContent);
+  // A saved plan opened while its approval ask is still pending (sidebar
+  // click, 'p') is the same review moment — offer Approve/Reject here too.
+  document.getElementById('plan-approval-footer')?.remove();
+  if (currentWaiting?.kind === 'plan' && isWaitingAnswerable() && _planSessionId === currentSessionId) {
+    const controls = document.createElement('div');
+    controls.id = 'plan-approval-footer';
+    controls.innerHTML = planApprovalControlsHtml('plan-modal-reject-feedback');
+    document.querySelector('#plan-modal .modal-footer').prepend(controls);
+  }
+  syncPlanPaneBtn();
   document.getElementById('plan-modal').classList.add('visible');
+  mountPlanReview();
   const keyHandler = (e) => {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
+      if (reviewPopMode) return closeReviewPop();
       closePlanModal();
       document.removeEventListener('keydown', keyHandler, true);
     }
@@ -5599,14 +13135,27 @@ function openPlanModal() {
   document.addEventListener('keydown', keyHandler, true);
 }
 
+function mountPlanReview() {
+  if (!_pendingPlanPath || !_planSessionId) return;
+  mountReview({
+    contentEl: document.getElementById('plan-modal-body'),
+    panelEl: document.getElementById('plan-review-panel'),
+    hostEl: document.querySelector('#plan-modal .modal'),
+    source: { kind: 'file', label: pathBasename(_pendingPlanPath), path: _pendingPlanPath },
+    sessionId: _planSessionId,
+    onSent: closePlanModal,
+  });
+}
+
 function closePlanModal() {
-  resetModalFullscreen('plan-modal');
+  unmountReview(document.getElementById('plan-review-panel'));
+  hideModalOverlay('plan-modal');
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function openPlanInEditor() {
   if (!_planSessionId) return;
-  postAndToast(`/api/sessions/${_planSessionId}/plan/open`, {}, 'in editor');
+  postAndToast(apiPath`/api/sessions/${_planSessionId}/plan/open`, {}, 'in editor');
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
@@ -5617,15 +13166,4857 @@ function openFolderInEditor(folder, file) {
   postAndToast('/api/open-folder', body, 'folder');
 }
 
+// Opens the app in a pane of `sid` and brings the pane into view. With no session, or `pane: false`
+// (a Shift-click), the hub switches to the app's tab instead.
+async function openAppAction(action, params, sid, { pane = true, label }) {
+  if (!sid || !pane) return hub.invoke(action, params);
+  const { url } = await hub.invoke(action, params, { open: 'pane' });
+  if (!url) return;
+  const onScreen = await postPane(sid, { target: url, title: label });
+  if (onScreen !== null) revealPane(sid, onScreen);
+}
+
+function openCost(sid, { agent, pane } = {}) {
+  const opts = { pane, label: 'Cost' };
+  if (sid && agent && hub.can('agent.cost')) return openAppAction('agent.cost', { session: sid, agent }, sid, opts);
+  return openAppAction('session.cost', sid ? { session: sid } : {}, sid, opts);
+}
+
+function openProjectApp(action, label, sid, { pane } = {}) {
+  const project = sessions.find((s) => s.id === sid)?.project;
+  return openAppAction(action, project ? { project } : {}, sid, { pane, label });
+}
+const openMarketplace = (sid, opts) => openProjectApp('project.plugins', 'Marketplace', sid, opts);
+const openMemory = (sid, opts) => openProjectApp('project.memory', 'Memory', sid, opts);
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openAppForInfoModal(open, e) {
+  closeTeamModal();
+  open(_infoModalSessionId, { pane: !e.shiftKey });
+}
+
 //#endregion
 
-//#region LAYOUT_SYNC
-const sidebarHeader = document.querySelector('.sidebar-header');
-const viewHeader = document.querySelector('.view-header');
-new ResizeObserver(() => {
-  sidebarHeader.style.height = `${viewHeader.offsetHeight}px`;
-}).observe(viewHeader);
+//#region TOOL_STATS_MODAL
+let _toolStatsSortCol = 'count';
+let _toolStatsSortDir = 'desc';
+let _toolStatsData = null;
 
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function showToolStatsModal(sessionId) {
+  if (!sessionId) return;
+  const body = document.getElementById('tool-stats-modal-body');
+  body.innerHTML = '<div class="modal-status">Loading…</div>';
+  document.getElementById('tool-stats-modal').classList.add('visible');
+
+  getJson(apiPath`/api/sessions/${sessionId}/tool-stats`).then((data) => {
+    if (!data) {
+      body.innerHTML = '<div class="modal-status">Failed to load tool statistics.</div>';
+      return;
+    }
+    _toolStatsSortCol = 'count';
+    _toolStatsSortDir = 'desc';
+    _toolStatsData = data;
+    body.innerHTML = renderToolStatsBody(data);
+  });
+}
+
+function renderToolStatsBody(data) {
+  const { totalCalls, uniqueTools, totalFailed, totalRejected, tools } = data;
+
+  const summary = `
+    <div class="tool-stats-summary">
+      <div class="tool-stats-chip"><span class="tool-stats-chip-val">${totalCalls}</span><span class="tool-stats-chip-lbl">Total calls</span></div>
+      <div class="tool-stats-chip"><span class="tool-stats-chip-val">${uniqueTools}</span><span class="tool-stats-chip-lbl">Unique tools</span></div>
+      <div class="tool-stats-chip"><span class="tool-stats-chip-val${totalFailed > 0 ? ' failed' : ''}">${totalFailed}</span><span class="tool-stats-chip-lbl">Failed</span></div>
+      <div class="tool-stats-chip"><span class="tool-stats-chip-val${totalRejected > 0 ? ' rejected' : ''}">${totalRejected}</span><span class="tool-stats-chip-lbl">Rejected</span></div>
+    </div>`;
+
+  if (!tools?.length) {
+    return (
+      summary +
+      '<div class="modal-empty" style="color:var(--text-tertiary)">No tool calls recorded in this session.</div>'
+    );
+  }
+
+  const sorted = [...tools].sort((a, b) => {
+    if (_toolStatsSortCol === 'name')
+      return _toolStatsSortDir === 'asc' ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
+    return _toolStatsSortDir === 'asc'
+      ? a[_toolStatsSortCol] - b[_toolStatsSortCol]
+      : b[_toolStatsSortCol] - a[_toolStatsSortCol];
+  });
+  const arrow = (col) => (col === _toolStatsSortCol ? (_toolStatsSortDir === 'asc' ? ' ▲' : ' ▼') : '');
+
+  const table = `<table class="tool-stats-table">
+    <thead><tr>
+      <th onclick="toolStatsSortBy('name')">Tool${arrow('name')}</th>
+      <th onclick="toolStatsSortBy('count')">Calls${arrow('count')}</th>
+      <th onclick="toolStatsSortBy('success')">✓ Success${arrow('success')}</th>
+      <th onclick="toolStatsSortBy('failed')">✗ Failed${arrow('failed')}</th>
+      <th onclick="toolStatsSortBy('rejected')">⊘ Rejected${arrow('rejected')}</th>
+      <th onclick="toolStatsSortBy('impact')" title="Share of total tool output by character count">Impact${arrow('impact')}</th>
+    </tr></thead>
+    <tbody>${sorted
+      .map(
+        (t) => `<tr>
+      <td class="tool-name">${escapeHtml(t.name)}</td>
+      <td>${t.count}</td>
+      <td>${t.success > 0 ? `<span class="badge-success">${t.success}</span>` : '—'}</td>
+      <td>${t.failed > 0 ? `<span class="badge-failed">${t.failed}</span>` : '—'}</td>
+      <td>${t.rejected > 0 ? `<span class="badge-rejected">${t.rejected}</span>` : '—'}</td>
+      <td class="impact-cell">${
+        t.impact != null
+          ? `<div class="impact-cell-inner"><div class="impact-bar-wrap"><div class="impact-bar-fill" style="width:${t.impact}%"></div></div><span class="impact-pct">${t.impact < 1 ? '<1' : t.impact}%</span></div>`
+          : '—'
+      }</td>
+    </tr>`,
+      )
+      .join('')}</tbody>
+  </table>`;
+
+  return summary + table;
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function toolStatsSortBy(col) {
+  if (_toolStatsSortCol === col) {
+    _toolStatsSortDir = _toolStatsSortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _toolStatsSortCol = col;
+    _toolStatsSortDir = col === 'name' ? 'asc' : 'desc';
+  }
+  if (!_toolStatsData) return;
+  const body = document.getElementById('tool-stats-modal-body');
+  body.innerHTML = renderToolStatsBody(_toolStatsData);
+}
+
+function closeToolStatsModal() {
+  document.getElementById('tool-stats-modal').classList.remove('visible');
+}
+//#endregion
+
+//#region OWNER_FILTER
+function updateOwnerFilter() {
+  const bar = document.getElementById('owner-filter-bar');
+  const select = document.getElementById('owner-filter');
+
+  const session = sessions.find((s) => s.id === currentSessionId);
+  if (!session?.isTeam) {
+    bar.classList.remove('visible');
+    return;
+  }
+
+  bar.classList.add('visible');
+  const owners = [
+    ...new Set(
+      currentTasks
+        .filter((t) => !isInternalTask(t))
+        .map((t) => t.owner)
+        .filter(Boolean),
+    ),
+  ].sort();
+  select.innerHTML =
+    '<option value="">All Members</option>' +
+    owners
+      .map((o) => {
+        const c = getOwnerColor(o);
+        return `<option value="${escapeHtml(o)}" style="color:${c.color};background:${c.bg}"${o === ownerFilter ? ' selected' : ''}>${escapeHtml(o)}</option>`;
+      })
+      .join('');
+  const current = ownerFilter ? getOwnerColor(ownerFilter) : null;
+  select.style.color = current ? current.color : '';
+  select.style.backgroundColor = current ? current.bg : '';
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function filterByOwner(value) {
+  ownerFilter = value;
+  const select = document.getElementById('owner-filter');
+  const c = value ? getOwnerColor(value) : null;
+  select.style.color = c ? c.color : '';
+  select.style.backgroundColor = c ? c.bg : '';
+  updateUrl();
+  renderKanban();
+}
+
+//#endregion
+
+//#region PANES
+// Layouts come from /api/panes and `pane:changed` (the pane contract, lib/panes.js). Every write
+// bumps the layout's rev and the event carries the whole layout, so a copy is replaced only by
+// a higher rev: the echo of this tab's own write and a late GET both lose to what it holds.
+// Which tab is on screen is this browser tab's own state, never the server's.
+const PANE_EMPTY_LAYOUT = { panes: [] };
+const paneLayouts = new Map();
+let paneLayoutSid = null;
+
+// Targets the server's probe found refusing framing, kept for the page's life; a reload asks again.
+const paneRefused = new Set();
+
+// Every origin above a pane's frame. Firefox has no ancestorOrigins, so under the hub there it
+// names the board only; a refused frame then shows the browser's own error.
+function paneAncestors() {
+  return [location.origin, ...(location.ancestorOrigins || [])];
+}
+
+function paneFrameable(pane) {
+  return pane.kind !== 'url' || !paneRefused.has(pane.target);
+}
+
+// allow-scripts with allow-same-origin on the board's or the hub's origin would lift the sandbox.
+// The server refuses the board's own names, but under the hub the page is served from the
+// hub's proxy port, which only the page knows. Any loopback name reaches the same port.
+const PANE_LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function paneOwnOrigin(pane) {
+  if (pane.kind !== 'url') return false;
+  const u = new URL(pane.target);
+  const loopback = PANE_LOOPBACK.has(u.hostname);
+  return paneAncestors().some((origin) => {
+    const a = new URL(origin);
+    const host = a.hostname === u.hostname || (loopback && PANE_LOOPBACK.has(a.hostname));
+    return a.protocol === u.protocol && a.port === u.port && host;
+  });
+}
+
+async function probePaneFraming(sid, pane) {
+  const q = new URLSearchParams({ ancestors: paneAncestors().join(',') });
+  const { frameable } = await paneRequest('GET', `${apiPath`/api/panes/${sid}/${pane.id}/framing`}?${q}`);
+  if (frameable === false) paneRefused.add(pane.target);
+  return frameable;
+}
+
+function paneLayout(sid) {
+  return paneLayouts.get(sid) || PANE_EMPTY_LAYOUT;
+}
+
+function applyPaneLayout(sid, layout) {
+  const held = paneLayouts.get(sid);
+  if (!layout || (held && layout.rev <= held.rev)) return;
+  paneLayouts.set(sid, layout);
+  const targets = new Map(layout.panes.map((p) => [p.id, p.target]));
+  for (const p of held?.panes || []) {
+    if (targets.get(p.id) !== p.target) unmountPane(sid, p.id);
+  }
+  if (!targets.has(getActivePaneId(sid))) setActivePaneId(sid, 'board');
+  if (sid !== paneSessionId()) return;
+  syncPanes();
+  autoRevealLog(sid);
+}
+
+async function fetchPaneLayout(sid) {
+  const layout = await getJson(apiPath`/api/panes/${sid}`);
+  if (layout) applyPaneLayout(sid, layout);
+}
+
+function refetchPaneLayout() {
+  const sid = paneSessionId();
+  if (sid) fetchPaneLayout(sid);
+}
+
+async function paneRequest(method, path, body) {
+  try {
+    const r = await api(path, { method, body });
+    const data = await r.json().catch(() => ({}));
+    return r.ok ? data : { error: data.error || `${method} failed (${r.status})`, code: data.code };
+  } catch {
+    return { error: 'The board is not reachable', code: 'network' };
+  }
+}
+
+// Per-session pane state in sessionStorage, {[sessionId]: value} in recency order.
+const PANE_STATE_CAP = 20;
+
+function loadPaneState(key) {
+  const map = tabStore.readJson(key);
+  return map && typeof map === 'object' ? map : {};
+}
+
+// Puts `sid` last, so the cap drops the least recent session. A null value removes it.
+function savePaneState(key, map, sid, value) {
+  delete map[sid];
+  if (value != null) map[sid] = value;
+  const capped = Object.fromEntries(Object.entries(map).slice(-PANE_STATE_CAP));
+  tabStore.writeJson(key, capped);
+  return capped;
+}
+
+// {[sessionId]: paneId}.
+const PANE_ACTIVE_KEY = 'pane-active';
+let paneActive = loadPaneState(PANE_ACTIVE_KEY);
+
+function getActivePaneId(sid) {
+  return paneActive[sid] || 'board';
+}
+
+function setActivePaneId(sid, id) {
+  if (getActivePaneId(sid) === id) return;
+  paneActive = savePaneState(PANE_ACTIVE_KEY, paneActive, sid, id === 'board' ? null : id);
+  notePairFocus(sid, id);
+  noteGroupFocus(sid, id);
+}
+
+// {[sessionId]: [{l, r, f}]}; sides are pane ids or 'board', `f` the side focused
+// last. A tab is in one pair at most, and the pair that holds the active tab is the split on
+// screen. Clicks never change a pair; only the split keys and drags do.
+const PANE_PAIRS_KEY = 'pane-pairs';
+const PANE_SPLIT_RATIO_KEY = 'pane-split-ratio';
+let panePairs = loadPaneState(PANE_PAIRS_KEY);
+const clampSplitRatio = (r) => Math.min(0.85, Math.max(0.15, r));
+let paneSplitRatio = clampSplitRatio(Number.parseFloat(store.getItem(PANE_SPLIT_RATIO_KEY)) || 0.5);
+
+const paneTabIds = (sid) => ['board', ...paneLayout(sid).panes.map((p) => p.id)];
+const splitSideOf = (split, id) => (split.l === id ? 'l' : split.r === id ? 'r' : null);
+const otherSide = (side) => (side === 'l' ? 'r' : 'l');
+
+// Pairs whose tabs are gone, or taken by an earlier pair, drop out.
+function getPanePairs(sid) {
+  if (!panePairs[sid]) return [];
+  const ids = new Set(paneTabIds(sid));
+  const taken = new Set();
+  return panePairs[sid].filter((p) => {
+    const ok = p.l !== p.r && ids.has(p.l) && ids.has(p.r) && !taken.has(p.l) && !taken.has(p.r);
+    if (ok) taken.add(p.l).add(p.r);
+    return ok;
+  });
+}
+
+function setPanePairs(sid, pairs) {
+  panePairs = savePaneState(PANE_PAIRS_KEY, panePairs, sid, pairs.length ? pairs : null);
+}
+
+const withoutTabs = (pairs, ...ids) => pairs.filter((p) => !ids.some((id) => splitSideOf(p, id)));
+const pairOf = (sid, id) => getPanePairs(sid).find((p) => splitSideOf(p, id)) || null;
+
+function getPaneSplit(sid) {
+  return pairOf(sid, getActivePaneId(sid));
+}
+
+function notePairFocus(sid, id) {
+  const pairs = getPanePairs(sid);
+  const pair = pairs.find((p) => splitSideOf(p, id));
+  const side = pair && splitSideOf(pair, id);
+  if (!side || pair.f === side) return;
+  pair.f = side;
+  setPanePairs(sid, pairs);
+}
+
+// Tabs that are not in a pair, plus `id`.
+function freePaneTabs(sid, id, pairs) {
+  return paneTabIds(sid).filter((t) => t === id || !pairs.some((p) => splitSideOf(p, t)));
+}
+
+// The free tab before it, else the one after it.
+function neighborPair(sid, id, pairs) {
+  const free = freePaneTabs(sid, id, pairs);
+  const i = free.indexOf(id);
+  if (i < 0 || free.length < 2) return null;
+  return i > 0 ? { l: free[i - 1], r: id } : { l: id, r: free[1] };
+}
+
+// {[sessionId]: [{id, name, color, ids, closed, last}]}; `ids` are pane ids, `last` the one shown
+// last. Like pairs, groups live in this browser tab only. A group shows at the place of its first
+// tab, so grouping leaves the server's order alone; a drag saves the order on screen.
+const PANE_GROUPS_KEY = 'pane-groups';
+const PANE_GROUP_COLORS = ['blue', 'purple', 'teal', 'orange', 'yellow', 'pink', 'green', 'red'];
+let paneGroups = loadPaneState(PANE_GROUPS_KEY);
+
+// Tabs that are gone, or in an earlier group, drop out, and so do groups left empty.
+function getPaneGroups(sid) {
+  if (!paneGroups[sid]) return [];
+  const live = new Set(paneLayout(sid).panes.map((p) => p.id));
+  const taken = new Set();
+  const groups = [];
+  for (const g of paneGroups[sid]) {
+    const ids = g.ids.filter((id) => live.has(id) && !taken.has(id));
+    for (const id of ids) taken.add(id);
+    const color = PANE_GROUP_COLORS.includes(g.color) ? g.color : PANE_GROUP_COLORS[0];
+    if (ids.length) groups.push({ id: g.id, name: g.name || '', color, ids, closed: !!g.closed, last: g.last });
+  }
+  return groups;
+}
+
+function setPaneGroups(sid, groups) {
+  paneGroups = savePaneState(PANE_GROUPS_KEY, paneGroups, sid, groups.length ? groups : null);
+}
+
+// A pair is in the group of either side, and the board is in none.
+function groupOfTabs(groups, ids) {
+  return ids.includes('board') ? null : groups.find((g) => ids.some((t) => g.ids.includes(t))) || null;
+}
+
+function noteGroupFocus(sid, id) {
+  const pair = pairOf(sid, id);
+  const group = groupOfTabs(getPaneGroups(sid), pair ? [pair.l, pair.r] : [id]);
+  if (group && (group.closed || group.last !== id)) updatePaneGroup(sid, group.id, { closed: false, last: id });
+}
+
+// The strip as the number keys count it, {group, items}: a group is one stop, open or collapsed.
+// An item is {ids, pair, group}: a lone tab, or a pair at the place of its first tab. A group's
+// items follow its first one.
+function paneStripStops(sid) {
+  const pairs = getPanePairs(sid);
+  const groups = getPaneGroups(sid);
+  const stops = [];
+  const groupStops = new Map();
+  const seen = new Set();
+  for (const id of paneTabIds(sid)) {
+    const pair = pairs.find((p) => splitSideOf(p, id)) || null;
+    if (pair && seen.has(pair)) continue;
+    if (pair) seen.add(pair);
+    const ids = pair ? [pair.l, pair.r] : [id];
+    const group = groupOfTabs(groups, ids);
+    const item = { ids, pair, group };
+    const stop = group && groupStops.get(group);
+    if (stop) stop.items.push(item);
+    else {
+      stops.push({ group, items: [item] });
+      if (group) groupStops.set(group, stops.at(-1));
+    }
+  }
+  return stops;
+}
+
+const paneStripItems = (sid) => paneStripStops(sid).flatMap((s) => s.items);
+
+// The items a click or a key can reach: a collapsed group hides its tabs.
+const isOpenItem = (it) => !it.group?.closed;
+const openStripItems = (sid) => paneStripItems(sid).filter(isOpenItem);
+
+function unpairPanes(sid, pair, keep) {
+  setPanePairs(sid, withoutTabs(getPanePairs(sid), pair.l));
+  if (keep) setActivePaneId(sid, keep);
+  syncPanes();
+}
+
+// Returns false when the panes are not on screen, so the key keeps its other meaning.
+function togglePaneSplit() {
+  const sid = paneSessionId();
+  if (!sid || wantsTerminal()) return false;
+  const active = getActivePaneId(sid);
+  const split = getPaneSplit(sid);
+  if (split) {
+    unpairPanes(sid, split, active);
+    return true;
+  }
+  const pairs = getPanePairs(sid);
+  const pair = neighborPair(sid, active, pairs);
+  if (!pair) {
+    showToast(paneLayout(sid).panes.length ? 'No free tab to split with' : 'Add a pane to split the board with');
+    return true;
+  }
+  setPanePairs(sid, [...pairs, { ...pair, f: splitSideOf(pair, active) }]);
+  syncPanes();
+  return true;
+}
+
+function shownPaneSplit() {
+  const sid = paneSessionId();
+  return sid && !wantsTerminal() && getPaneSplit(sid);
+}
+
+function focusPaneSide(side) {
+  const sid = paneSessionId();
+  const split = shownPaneSplit();
+  if (!split) return false;
+  if (getActivePaneId(sid) !== split[side]) {
+    setActivePaneId(sid, split[side]);
+    syncPanes();
+  }
+  return true;
+}
+
+function dropPaneOnSide(id, side) {
+  const sid = paneSessionId();
+  if (!sid) return;
+  const split = getPaneSplit(sid);
+  const other = otherSide(side);
+  const pairs = getPanePairs(sid);
+  const shownId = getActivePaneId(sid);
+  let partner;
+  if (split) partner = split[other] === id ? split[side] : split[other];
+  else if (shownId !== id) partner = shownId;
+  else {
+    const pair = neighborPair(sid, id, pairs);
+    partner = pair && (pair.l === id ? pair.r : pair.l);
+  }
+  if (!partner) return;
+  setPanePairs(sid, [...withoutTabs(pairs, id, partner), { [side]: id, [other]: partner, f: side }]);
+  setActivePaneId(sid, id);
+  syncPanes();
+}
+
+const PANE_FRAME_LIMIT = 3;
+const PANE_URL_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-downloads';
+const PANE_ICONS = {
+  board:
+    '<svg class="kind" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 5v14"/><path d="M12 5v8"/><path d="M18 5v11"/></svg>',
+  url: '<svg class="kind" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg>',
+  file: '<svg class="kind" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  message:
+    '<svg class="kind" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  warning:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12" y2="17"/></svg>',
+};
+// Map order is recency: the first entry is the one evicted. Keys are `${sessionId}/${paneId}`,
+// and the limit spans sessions, so a session switch cannot pile up frames.
+const paneFrames = new Map();
+const paneReviews = new WeakMap();
+// Off-screen views whose file changed; they reload when shown.
+const stalePaneViews = new WeakSet();
+const paneReloads = new Map();
+const paneViews = document.getElementById('pane-views');
+const paneSplitBox = document.getElementById('pane-split');
+const paneDivider = document.getElementById('pane-divider');
+const paneDrop = document.getElementById('pane-drop');
+const paneSplitBtn = document.getElementById('pane-split-btn');
+const paneBoard = document.getElementById('board-side');
+const paneLog = document.getElementById('message-panel');
+const paneLogHome = { parent: paneLog.parentNode, next: paneLog.nextSibling };
+const paneTabs = document.getElementById('pane-tabs');
+const panePin = document.getElementById('pane-pin');
+const paneStrip = document.getElementById('pane-strip');
+const panePop = document.getElementById('pane-pop');
+const panePopInput = document.getElementById('pane-pop-input');
+const panePopDocs = document.getElementById('pane-pop-docs');
+const panePopDetect = document.getElementById('pane-pop-detect');
+let paneTabsHtml = '';
+let paneDragId = null;
+applyAgentFooterCollapsed();
+
+function paneSessionId() {
+  return viewMode === 'session' ? currentSessionId : null;
+}
+
+function activePane(sid) {
+  const id = getActivePaneId(sid);
+  return paneLayout(sid).panes.find((p) => p.id === id) || null;
+}
+
+function syncPanes() {
+  const sid = paneSessionId();
+  if (sid !== paneLayoutSid) {
+    paneLayoutSid = sid;
+    if (sid) fetchPaneLayout(sid);
+  }
+  const layout = sid ? paneLayout(sid) : null;
+  const pane = sid ? activePane(sid) : null;
+  const split = sid ? getPaneSplit(sid) : null;
+  sessionView.classList.toggle('has-panes', !!layout);
+  const boardSide = split ? splitSideOf(split, 'board') : null;
+  sessionView.classList.toggle('pane-mode', split ? !boardSide : !!pane);
+  sessionView.classList.toggle('split-mode', !!split);
+  const term = wantsTerminal();
+  if (!layout || term) closePanePop();
+  // key → side ('' unsplit). The focused side mounts last, so the frame limit evicts it last.
+  const sides = new Map();
+  if (split) {
+    const focusSide = splitSideOf(split, pane?.id || 'board');
+    for (const side of [otherSide(focusSide), focusSide]) {
+      if (side !== boardSide) sides.set(mountPane(sid, paneById(split[side])), side);
+    }
+    applySplitRatio();
+  } else if (pane) {
+    sides.set(mountPane(sid, pane), '');
+  }
+  const focusKey = pane ? `${sid}/${pane.id}` : null;
+  for (const el of paneViews.children) {
+    const side = sides.get(el.dataset.key);
+    el.classList.toggle('on', side !== undefined);
+    markPaneSide(el, side, el.dataset.key === focusKey);
+    if (paneLineWanted.size && side !== undefined) applyPaneLine(el);
+    restorePaneFrameScroll(el, side !== undefined && !term);
+  }
+  const boardWasSplit = boardInSplit();
+  markPaneSide(paneBoard, boardSide, !!boardSide && !pane);
+  if (boardWasSplit !== !!boardSide) applyAgentFooterCollapsed();
+  placeSessionLog(term ? null : boardSide);
+  // Off screen, a framed page keeps focus and takes keys the user aims at the board.
+  const focused = document.activeElement;
+  if (paneViews.contains(focused) && (term || !focused.closest('.pane-view.on'))) focused.blur();
+  syncPaneReview();
+  if (!layout) return;
+  for (const b of document.querySelectorAll('.pane-tool')) b.disabled = !pane;
+  paneSplitBtn.disabled = !layout.panes.length;
+  paneSplitBtn.classList.toggle('on', !!split);
+  paneSplitBtn.setAttribute('aria-pressed', String(!!split));
+  paneSplitBtn.title = split ? 'Unsplit (|)' : 'Split with the tab before it (|)';
+  renderPaneTabs(sid, layout, split);
+}
+
+// With the board in a split, the session log docks in the board's side instead of the window.
+function placeSessionLog(boardSide) {
+  const parent = boardSide ? paneSplitBox : paneLogHome.parent;
+  if (paneLog.parentNode !== parent) {
+    const content = document.getElementById('message-panel-content');
+    const top = content.scrollTop;
+    parent.insertBefore(paneLog, boardSide ? null : paneLogHome.next);
+    content.scrollTop = top;
+  }
+  paneLog.classList.toggle('log-l', boardSide === 'l');
+  paneLog.classList.toggle('log-r', boardSide === 'r');
+}
+
+function markPaneSide(el, side, focused) {
+  el.classList.toggle('side-l', side === 'l');
+  el.classList.toggle('side-r', side === 'r');
+  el.classList.toggle('pane-focus', focused);
+}
+
+const paneLabel = (p) => (p.kind === 'message' ? p.title : p.target);
+
+function paneMenuLabel(pane, label) {
+  const cut =
+    pane.kind !== 'url' && pane.kind !== 'message' ? Math.max(label.lastIndexOf('/'), label.lastIndexOf('\\')) + 1 : 0;
+  if (!cut || cut === label.length) {
+    return `<div class="pane-menu-label" title="${escapeHtml(label)}">${escapeHtml(label)}</div>`;
+  }
+  return `<div class="pane-menu-label pane-menu-path" title="${escapeHtml(label)}"><span class="pane-menu-dir">&lrm;${escapeHtml(label.slice(0, cut))}&lrm;</span><span class="pane-menu-name">${escapeHtml(label.slice(cut))}</span></div>`;
+}
+
+function renderPaneTabs(sid, layout, split) {
+  // A rebuild mid-drag removes the dragged tab, and then no dragend fires. Mid-rename it drops the input.
+  if (paneDragId || stripRename) return;
+  const active = getActivePaneId(sid);
+  const state = (id) => (active === id ? ' on' : split && splitSideOf(split, id) ? ' shown' : '');
+  const tab = (id, cls, inner, tip) =>
+    `<div class="pane-tab ${escapeHtml(cls)}${state(id)}" role="tab" draggable="true" data-pane="${escapeHtml(id)}" title="${escapeHtml(tip)}">${inner}</div>`;
+  const byId = new Map(layout.panes.map((p) => [p.id, p]));
+  const tabHtml = (id) => {
+    if (id === 'board') {
+      return tab(
+        'board',
+        'pinned',
+        `${PANE_ICONS.board}<span class="pane-title">Board</span><span class="pin-meta">${currentTasks.length}</span>`,
+        'Board',
+      );
+    }
+    const p = byId.get(id);
+    const frame = !paneFrameable(p) ? 'blocked' : paneFrames.has(`${sid}/${p.id}`) ? 'loaded' : '';
+    const frameTip = frame === 'blocked' ? 'Site refuses framing' : frame ? 'Loaded' : 'Unloaded (loads on open)';
+    return tab(
+      p.id,
+      '',
+      `${PANE_ICONS[p.kind] || PANE_ICONS.file}<span class="pane-title">${escapeHtml(p.title)}</span><span class="state ${escapeHtml(frame)}" title="${escapeHtml(frameTip)}"></span><button class="pane-x" data-close="${escapeHtml(p.id)}" title="Close pane (Alt+W)" aria-label="Close pane">×</button>`,
+      paneLabel(p),
+    );
+  };
+  const itemHtml = ({ ids, pair }) =>
+    pair
+      ? `<div class="pane-pair${pair === split ? ' on' : ''}">${ids.map(tabHtml).join('<span class="pane-pair-sep"></span>')}</div>`
+      : tabHtml(ids[0]);
+  const groupHtml = (g, items) => {
+    const n = items.flatMap((it) => it.ids).length;
+    const tip = g.closed ? `Expand group (${n} tabs)` : 'Collapse group';
+    const label =
+      (g.name ? `<span>${escapeHtml(g.name)}</span>` : '') +
+      (g.closed ? `<span class="pane-group-count">${n}</span>` : '');
+    return `<div class="pane-group${g.closed ? ' closed' : ''}" style="${paneGroupStyle(g.color)}"><button class="pane-group-chip" data-group="${escapeHtml(g.id)}" title="${escapeHtml(tip)}">${label}</button>${g.closed ? '' : items.map(itemHtml).join('')}</div>`;
+  };
+  const [first, ...rest] = paneStripStops(sid);
+  const pin = itemHtml(first.items[0]) + (rest.length ? '<span class="pane-sep"></span>' : '');
+  const html = rest.map(({ group, items }) => (group ? groupHtml(group, items) : itemHtml(items[0]))).join('');
+  // syncPanes runs on every task refresh and search keystroke; skip the rebuild and the reflows.
+  if (pin + html === paneTabsHtml) return;
+  paneTabsHtml = pin + html;
+  panePin.innerHTML = pin;
+  paneTabs.innerHTML = html;
+  paneTabs.querySelector('.pane-tab.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  updatePaneFades();
+}
+
+function updatePaneFades() {
+  const { scrollLeft, scrollWidth, clientWidth } = paneTabs;
+  paneTabs.classList.toggle('fade-l', scrollLeft > 1);
+  paneTabs.classList.toggle('fade-r', scrollLeft + clientWidth < scrollWidth - 1);
+}
+
+// A URL pane's page is on another origin, so its key presses never reach the board: the zoom
+// keys zoom the whole window and the pane keys do nothing. The bar zooms without keys and
+// says when the page has the keyboard; a click on it gives the keys back.
+function paneUrlBarHtml() {
+  return `<div class="pane-url-bar"><button class="icon-btn pane-keys" title="The page has keyboard focus. Click to turn the board shortcuts back on">Board shortcuts off · click to turn on</button><button class="icon-btn" data-pane-zoom="-0.1" title="Smaller" aria-label="Smaller">−</button><button class="icon-btn pane-zoom-val" data-pane-zoom="0" title="Reset size">${modalZoomLabel()}</button><button class="icon-btn" data-pane-zoom="0.1" title="Larger" aria-label="Larger">+</button></div>`;
+}
+
+function markPaneFrameFocus() {
+  const el = document.activeElement;
+  const view = el?.classList.contains('pane-url-frame') ? el.parentElement : null;
+  for (const v of paneViews.querySelectorAll('.pane-view.frame-focus')) v.classList.remove('frame-focus');
+  view?.classList.add('frame-focus');
+}
+
+function paneCardHtml(title, text, button) {
+  const btn = button ? `<button class="btn btn-primary" data-pane-open>${escapeHtml(button)}</button>` : '';
+  return `<div class="pane-card"><div class="pane-card-box">${PANE_ICONS.warning}<h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p>${btn}</div></div>`;
+}
+
+// Returns the key of the view to show.
+function mountPane(sid, pane) {
+  const key = `${sid}/${pane.id}`;
+  const existing = paneFrames.get(key);
+  if (existing) {
+    paneFrames.delete(key);
+    paneFrames.set(key, existing);
+    if (stalePaneViews.delete(existing)) autoReloadPaneView(sid, pane, existing);
+    return key;
+  }
+  const view = document.createElement('div');
+  view.className = 'pane-view';
+  view.dataset.key = key;
+  paneViews.appendChild(view);
+  paneFrames.set(key, view);
+  loadPaneView(sid, pane, view).then(() => {
+    if (paneFocusWanted === key && activePaneView() === view) focusActivePane();
+  });
+  while (paneFrames.size > PANE_FRAME_LIMIT) {
+    const [oldKey, oldView] = paneFrames.entries().next().value;
+    paneFrames.delete(oldKey);
+    oldView.remove();
+  }
+  return key;
+}
+
+async function loadPaneView(sid, pane, view, scroll) {
+  if (paneOwnOrigin(pane)) {
+    view.insertAdjacentHTML(
+      'beforeend',
+      paneCardHtml('A pane cannot show the board or the hub', pane.target, 'Open in new tab'),
+    );
+    return;
+  }
+  if (!paneFrameable(pane)) {
+    view.insertAdjacentHTML(
+      'beforeend',
+      paneCardHtml(
+        `${new URL(pane.target).host} does not allow framing`,
+        'The site sends X-Frame-Options or a frame-ancestors policy. The pane keeps the link with the session.',
+        'Open in new tab',
+      ),
+    );
+    return;
+  }
+  if (pane.kind === 'url') {
+    const frame = document.createElement('iframe');
+    frame.className = 'pane-frame pane-url-frame modal-zoomable';
+    frame.setAttribute('sandbox', PANE_URL_SANDBOX);
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.title = pane.title;
+    frame.src = pane.target;
+    frame.addEventListener('load', () => {
+      view.classList.remove('keys-bridged');
+      frame.hostKeysSig = null;
+      pushTerminalClaims();
+    });
+    view.appendChild(frame);
+    view.insertAdjacentHTML('beforeend', paneUrlBarHtml());
+    // Framed at once; a refusal found by the probe swaps the frame for the card.
+    if ((await probePaneFraming(sid, pane)) === false) {
+      frame.remove();
+      loadPaneView(sid, pane, view);
+      if (sid === paneSessionId()) syncPanes();
+    }
+    return;
+  }
+  if (pane.kind === 'message') {
+    await loadMessagePaneView(sid, pane, view);
+    return;
+  }
+  const data = await getJson('/api/preview', null, { query: { path: pane.target } });
+  if (data?.kind === 'html') {
+    // A show card's own zoom follows the text zoom (showBridge), so its frame is not .modal-zoomable.
+    const [cls, doc] = pane.show
+      ? ['pane-frame show-pane-frame', showSrcdoc(data.content, scroll?.y)]
+      : ['pane-frame modal-zoomable themed-frame', themedSrcdoc(data.content)];
+    const frame = createPreviewFrame(cls, doc);
+    frame.title = pane.title;
+    // Focus given before the document loads stays on the frame element, out of the document's keys.
+    frame.addEventListener('load', () => {
+      if (document.activeElement === frame) frame.contentWindow?.focus();
+      if (scroll && !pane.show) postPaneScroll(frame, scroll);
+    });
+    view.appendChild(frame);
+    attachPaneReview(view, sid, fileReviewOpts(data.path, data.kind, frame, frame));
+    return;
+  }
+  if (data?.kind) {
+    const body = appendPaneDoc(view);
+    body.parentElement.dataset.path = data.path;
+    renderPreviewContent(body, data.path, data.content, data.kind);
+    attachPaneReview(view, sid, fileReviewOpts(data.path, data.kind, body, null));
+    applyPaneLine(view);
+    return;
+  }
+  const [title, text] = !data
+    ? ['Preview unavailable', 'The server could not read this file.']
+    : data.exists === false
+      ? ['File not found', pane.target]
+      : ['Nothing to preview', 'cck cannot render this file.'];
+  const button = data && data.exists !== false ? 'Open in editor' : 'Try in preview';
+  view.insertAdjacentHTML('beforeend', paneCardHtml(title, text, button));
+}
+
+// The target is the message's pin id, `type|timestamp|text`. The log holds only the latest pages,
+// so a message not loaded comes from the page that ends at its timestamp.
+async function findPaneMessage(sid, target) {
+  const own = (list) => list.find((m) => getPinId(m) === target);
+  if (sid === currentSessionId && !agentLogMode) {
+    const loaded = own(currentMessages);
+    if (loaded) return loaded;
+  }
+  const ts = Date.parse(target.split('|')[1]);
+  if (Number.isFinite(ts)) {
+    try {
+      // Parallel tool calls share one timestamp, so the page is wider than one message.
+      const page = await fetchSessionMessagesPage(sid, { before: new Date(ts + 1).toISOString(), limit: 50 });
+      const found = page && own(page.messages);
+      if (found) return found;
+    } catch {}
+  }
+  return sid === currentSessionId ? own(currentPins) || null : null;
+}
+
+function appendPaneDoc(view) {
+  const doc = document.createElement('div');
+  doc.className = 'pane-doc';
+  const body = document.createElement('div');
+  body.className = 'pane-doc-body rendered-md modal-zoomable';
+  body.tabIndex = -1;
+  doc.append(body, paneDocGrip(doc));
+  view.appendChild(doc);
+  return body;
+}
+
+async function loadMessagePaneView(sid, pane, view) {
+  const m = await findPaneMessage(sid, pane.target);
+  if (!m) {
+    view.insertAdjacentHTML(
+      'beforeend',
+      paneCardHtml('Message not found', 'The session log no longer has this message.'),
+    );
+    return;
+  }
+  const meta = [msgDetailTitle(m), ...msgDetailMeta(m)].join(' · ');
+  const body = appendPaneDoc(view);
+  body.innerHTML = `<div class="pane-msg-meta">${escapeHtml(meta)}</div>${msgDetailContent(m)}`;
+  attachPaneReview(view, sid, replyReviewOpts(m, body, sid));
+}
+
+function onPaneFileChanged(filePath) {
+  for (const [key, view] of paneFrames) {
+    const [sid, paneId] = key.split('/');
+    const pane = paneLayout(sid).panes.find((p) => p.id === paneId);
+    if (pane?.target !== filePath) continue;
+    if (view.classList.contains('on')) autoReloadPaneView(sid, pane, view);
+    else stalePaneViews.add(view);
+  }
+}
+
+let paneUpdatedToastTimer = 0;
+
+// An editor save can fire several change events, so one toast follows the last reload.
+async function autoReloadPaneView(sid, pane, view) {
+  if (!(await reloadPaneView(sid, pane, view))) return;
+  clearTimeout(paneUpdatedToastTimer);
+  paneUpdatedToastTimer = setTimeout(() => {
+    if (!document.getElementById('toast').classList.contains('has-action')) showToast('Pane updated', 'info');
+  }, 1000);
+}
+
+// Builds the new view hidden over the old one and swaps them once it has loaded and scrolled,
+// so a reload shows no blank frame and no jump. The newest reload of a view wins; the others
+// resolve false.
+async function reloadPaneView(sid, pane, view) {
+  const key = view.dataset.key;
+  const token = {};
+  paneReloads.set(key, token);
+  const live = () => {
+    const ok = paneReloads.get(key) === token && paneFrames.get(key) === view;
+    if (!ok && paneReloads.get(key) === token) paneReloads.delete(key);
+    return ok;
+  };
+  const frame = view.querySelector(':scope > .pane-frame');
+  const fresh = document.createElement('div');
+  fresh.dataset.key = key;
+  await loadPaneView(sid, pane, fresh, frame && paneFrameScroll.get(frame));
+  if (!live()) return false;
+  fresh.className = view.className;
+  fresh.style.visibility = 'hidden';
+  view.after(fresh);
+  const newBody = fresh.querySelector('.pane-doc-body');
+  if (newBody) newBody.scrollTop = view.querySelector('.pane-doc-body')?.scrollTop || 0;
+  const newFrame = fresh.querySelector(':scope > .pane-frame');
+  if (newFrame) {
+    await new Promise((resolve) => {
+      newFrame.addEventListener('load', resolve, { once: true });
+      setTimeout(resolve, 3000);
+    });
+    // The page scrolls itself one frame after its load.
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+  if (!live()) {
+    fresh.remove();
+    return false;
+  }
+  paneReloads.delete(key);
+  fresh.className = view.className;
+  fresh.style.visibility = '';
+  const hadFocus = view.contains(document.activeElement);
+  view.remove();
+  paneFrames.set(key, fresh);
+  const target = hadFocus && paneFocusTarget(fresh);
+  if (target) focusPaneTarget(target);
+  syncPaneReview();
+  return true;
+}
+
+// One reading width for every pane, kept apart from the modals': a modal's saved size
+// includes its padding and review panel.
+const PANE_DOC_W_KEY = 'pane-doc-width';
+
+function applyPaneDocWidth(w) {
+  if (w) document.documentElement.style.setProperty('--pane-doc-w', w);
+  else document.documentElement.style.removeProperty('--pane-doc-w');
+}
+applyPaneDocWidth(store.getItem(PANE_DOC_W_KEY));
+
+// The drag sizes only this sheet; the shared width lands once on release, so a
+// drag does not restyle the whole page on every move.
+function paneDocGrip(doc) {
+  let startW;
+  return createResizeGrip({
+    onStart() {
+      startW = doc.offsetWidth;
+    },
+    // The sheet is centered, so both edges move: double the delta to keep the grip under the cursor.
+    onMove(dx) {
+      doc.style.maxWidth = `${Math.max(MODAL_MIN_W, startW + dx * 2)}px`;
+    },
+    onEnd() {
+      const w = doc.style.maxWidth;
+      if (!w) return;
+      doc.style.maxWidth = '';
+      store.setItem(PANE_DOC_W_KEY, w);
+      applyPaneDocWidth(w);
+    },
+    onReset() {
+      store.removeItem(PANE_DOC_W_KEY);
+      applyPaneDocWidth(null);
+    },
+  });
+}
+
+function activePaneView() {
+  return wantsTerminal() ? null : paneViews.querySelector('.pane-view.on.pane-focus');
+}
+
+// A URL page is on another origin and would keep every key from the board, so it gets no focus.
+function paneFocusTarget(view) {
+  return view?.querySelector(':scope > .pane-doc > .pane-doc-body, :scope > .pane-frame:not(.pane-url-frame)');
+}
+
+let paneFocusWanted = null;
+
+// The key that switches panes also moves focus into the pane, so its content takes the scroll keys.
+function focusActivePane() {
+  const view = activePaneView();
+  const target = paneFocusTarget(view);
+  paneFocusWanted = view && !view.firstElementChild ? view.dataset.key : null;
+  if (target) focusPaneTarget(target);
+  else if (paneViews.contains(document.activeElement)) document.activeElement.blur();
+}
+
+function focusPaneTarget(target) {
+  target.focus({ preventScroll: true });
+  target.contentWindow?.focus();
+}
+
+function isPaneDocOnScreen() {
+  return !!activePaneView()?.querySelector('.modal-zoomable');
+}
+
+function attachPaneReview(view, sessionId, opts) {
+  if (!opts) return;
+  const panelEl = document.createElement('aside');
+  panelEl.className = 'review-panel';
+  panelEl.hidden = true;
+  view.appendChild(panelEl);
+  paneReviews.set(view, { ...opts, panelEl, hostEl: view, sessionId });
+  syncPaneReview();
+}
+
+function syncPaneReview() {
+  const view = activePaneView();
+  setBaseReview((view && paneReviews.get(view)) || (wantsTerminal() && showState.review) || null);
+}
+
+function unmountPane(sid, paneId) {
+  const key = `${sid}/${paneId}`;
+  const view = paneFrames.get(key);
+  const hadFocus = view?.contains(document.activeElement);
+  view?.remove();
+  paneFrames.delete(key);
+  // Chrome leaves the window without focus when a focused frame is removed, so no key reaches
+  // the board until a click. Only when it had focus: under the hub, cck may be off screen.
+  if (hadFocus) window.focus();
+}
+
+function selectPane(id) {
+  const sid = paneSessionId();
+  if (!sid) return;
+  setActivePaneId(sid, id);
+  closePanePop();
+  syncPanes();
+}
+
+// Flips the focused side of the split through the free tabs. Returns false with no split on
+// screen, so the key keeps its other meaning.
+function cyclePane(step) {
+  const sid = paneSessionId();
+  const split = sid && !wantsTerminal() && getPaneSplit(sid);
+  if (!split) return false;
+  const active = getActivePaneId(sid);
+  const pairs = getPanePairs(sid);
+  const ids = freePaneTabs(sid, active, pairs);
+  if (ids.length < 2) return true;
+  const next = ids[(ids.indexOf(active) + step + ids.length) % ids.length];
+  const side = splitSideOf(split, active);
+  setPanePairs(
+    sid,
+    pairs.map((p) => (p === split ? { ...p, [side]: next } : p)),
+  );
+  selectPane(next);
+  return true;
+}
+
+function selectStripItem({ ids, pair }) {
+  selectPane(pair ? pair[pair.f || 'l'] : ids[0]);
+}
+
+function selectPaneByNumber(n) {
+  const sid = paneSessionId();
+  if (!sid || wantsTerminal()) return false;
+  const stop = paneStripStops(sid)[n - 1];
+  if (stop) selectStripItem(stop.items.find((it) => it.ids.includes(stop.group?.last)) || stop.items[0]);
+  return true;
+}
+
+function cyclePaneStrip(step) {
+  const sid = paneSessionId();
+  if (!sid || wantsTerminal()) return false;
+  const active = getActivePaneId(sid);
+  const items = openStripItems(sid);
+  const i = items.findIndex((it) => it.ids.includes(active));
+  selectStripItem(items[(i + step + items.length) % items.length]);
+  return true;
+}
+
+function updatePaneGroup(sid, groupId, change) {
+  const groups = getPaneGroups(sid);
+  const group = groups.find((g) => g.id === groupId);
+  if (!group) return;
+  Object.assign(group, change);
+  setPaneGroups(sid, groups);
+}
+
+// `to` is a group id, 'new', or null to take the tab out of its group. A split moves as one.
+function groupPaneTab(id, to) {
+  const sid = paneSessionId();
+  const item = sid && paneStripItems(sid).find((it) => it.ids.includes(id));
+  if (!item || item.ids.includes('board')) return;
+  const groups = getPaneGroups(sid);
+  for (const g of groups) g.ids = g.ids.filter((t) => !item.ids.includes(t));
+  let target = groups.find((g) => g.id === to);
+  if (to === 'new') {
+    const used = new Set(groups.filter((g) => g.ids.length).map((g) => g.color));
+    const color =
+      PANE_GROUP_COLORS.find((c) => !used.has(c)) || PANE_GROUP_COLORS[groups.length % PANE_GROUP_COLORS.length];
+    target = { id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name: '', color, ids: [] };
+    groups.push(target);
+  }
+  if (target) Object.assign(target, { ids: [...target.ids, ...item.ids], closed: false });
+  setPaneGroups(sid, groups);
+  syncPanes();
+  if (to === 'new') beginPaneGroupRename(target.id);
+}
+
+// A collapsed group cannot hold the tab on screen, so collapsing it moves to the next open item.
+function togglePaneGroup(groupId) {
+  const sid = paneSessionId();
+  const group = sid && getPaneGroups(sid).find((g) => g.id === groupId);
+  if (!group) return;
+  const closing = !group.closed;
+  updatePaneGroup(sid, groupId, { closed: closing });
+  const items = paneStripItems(sid);
+  const i = items.findIndex((it) => it.ids.includes(getActivePaneId(sid)));
+  if (!closing || items[i]?.group?.id !== groupId) {
+    syncPanes();
+    return;
+  }
+  selectStripItem(items.slice(i).find(isOpenItem) || items.slice(0, i).findLast(isOpenItem));
+}
+
+function ungroupPanes(groupId) {
+  const sid = paneSessionId();
+  if (!sid) return;
+  setPaneGroups(
+    sid,
+    getPaneGroups(sid).filter((g) => g.id !== groupId),
+  );
+  syncPanes();
+}
+
+function colorPaneGroup(groupId, color) {
+  const sid = paneSessionId();
+  if (!sid) return;
+  updatePaneGroup(sid, groupId, { color });
+  syncPanes();
+}
+
+function isMenuKey(e) {
+  return e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey);
+}
+
+function focusedPaneId() {
+  const sid = paneSessionId();
+  return sid && !wantsTerminal() && getActivePaneId(sid);
+}
+
+function openFocusedPaneMenu() {
+  const id = focusedPaneId();
+  const tab = id && paneStrip.querySelector(`.pane-tab[data-pane="${CSS.escape(id)}"]`);
+  if (!tab?.offsetParent) return false;
+  const rect = tab.getBoundingClientRect();
+  return openPaneMenu(rect.left + 16, rect.bottom, id);
+}
+
+function closeFocusedPane() {
+  const id = focusedPaneId();
+  if (!id || id === 'board') return false;
+  closePane(id);
+  focusActivePane();
+  return true;
+}
+
+async function closePane(paneId) {
+  const sid = paneSessionId();
+  if (!sid) return;
+  const split = getPaneSplit(sid);
+  const side = split && splitSideOf(split, paneId);
+  // The layout keeps the pane until the server answers, so its pair goes now.
+  setPanePairs(sid, withoutTabs(getPanePairs(sid), paneId));
+  if (side) {
+    setActivePaneId(sid, split[otherSide(side)]);
+  } else if (getActivePaneId(sid) === paneId) {
+    const panes = paneLayout(sid).panes;
+    const i = panes.findIndex((p) => p.id === paneId);
+    setActivePaneId(sid, (panes[i + 1] || panes[i - 1])?.id || 'board');
+  }
+  unmountPane(sid, paneId);
+  syncPanes();
+  const res = await paneRequest('DELETE', apiPath`/api/panes/${sid}/${paneId}`);
+  if (res.layout) applyPaneLayout(sid, res.layout);
+  else if (res.code === 'no_pane') fetchPaneLayout(sid);
+  else showToast(res.error, 'error');
+}
+
+// With no id, the active pane.
+function paneById(id) {
+  const sid = paneSessionId();
+  if (!sid) return null;
+  return id == null ? activePane(sid) : paneLayout(sid).panes.find((p) => p.id === id) || null;
+}
+
+async function reloadPane(id) {
+  const pane = paneById(id);
+  if (!pane) return;
+  const sid = paneSessionId();
+  const view = paneFrames.get(`${sid}/${pane.id}`);
+  if (pane.kind !== 'url' && view) {
+    await reloadPaneView(sid, pane, view);
+  } else {
+    unmountPane(sid, pane.id);
+    paneRefused.delete(pane.target);
+    syncPanes();
+  }
+  showToast('Pane reloaded', 'success');
+}
+
+function openPaneExternally(id) {
+  const pane = paneById(id);
+  if (!pane) return;
+  if (pane.kind === 'message') {
+    openPaneMessageDetail(pane);
+    return;
+  }
+  openLinkedDoc(pane.target, getSessionBaseDir(paneSessionId()));
+}
+
+async function openPaneMessageDetail(pane) {
+  const sid = paneSessionId();
+  const m = await findPaneMessage(sid, pane.target);
+  if (sid !== paneSessionId()) return;
+  if (!m) {
+    showToast('Message not found');
+    return;
+  }
+  const idx = currentMessages.indexOf(m);
+  if (idx >= 0) showMsgDetail(idx);
+  else showUnloadedMsgDetail(m);
+}
+
+function copyPaneTarget(id) {
+  const pane = paneById(id);
+  if (!pane) return;
+  copyText(pane.target, pane.kind === 'url' ? 'URL' : 'path');
+}
+
+function closePaneMenu(restore) {
+  document.removeEventListener('keydown', paneMenuKeydown, true);
+  const menu = document.getElementById('pane-menu');
+  if (menu) {
+    menu.remove();
+    takeMenuFocus(restore);
+  }
+}
+
+function paneMenuKeydown(e) {
+  const menu = document.getElementById('pane-menu');
+  if (!menu || e.ctrlKey || e.altKey || e.metaKey) return;
+  menuKeydown(e, [...menu.querySelectorAll('.pane-menu-item')], closePaneMenu);
+}
+
+async function deleteBoardTasks(onlyCompleted) {
+  const sid = paneSessionId();
+  if (!sid) return;
+  const doomed = currentTasks.filter((t) => !onlyCompleted || t.status === 'completed');
+  const count = doomed.length;
+  if (!count) {
+    showToast(onlyCompleted ? 'No completed tasks' : 'No tasks', 'info');
+    return;
+  }
+  const noun = `${count} ${onlyCompleted ? 'completed ' : ''}task${count === 1 ? '' : 's'}`;
+  const shown = doomed.slice(0, 3).map((t) => ({ label: t.subject, meta: t.status.replace('_', ' ') }));
+  if (doomed.length > shown.length) shown.push({ label: `+ ${doomed.length - shown.length} more`, meta: '' });
+  const ok = await confirmModal({
+    title: `Delete ${noun}?`,
+    message: onlyCompleted
+      ? 'Every completed task in this session. This cannot be undone.'
+      : 'Every task in this session. This cannot be undone.',
+    items: shown,
+    okLabel: `Delete ${noun}`,
+  });
+  if (!ok) return;
+  const q = onlyCompleted ? '?status=completed' : '';
+  const res = await paneRequest('DELETE', `${apiPath`/api/tasks/${sid}`}${q}`);
+  if (res.error) {
+    showToast(`Failed to delete tasks: ${res.error}`, 'error');
+    return;
+  }
+  if (detailPanel.classList.contains('visible')) closeDetailPanel();
+  showToast(`Deleted ${res.deleted.length} task${res.deleted.length === 1 ? '' : 's'}`, 'success');
+  await refreshCurrentView();
+}
+
+// The save function of the tab or group name being edited.
+let stripRename = null;
+
+function beginStripRename(el, { className, value, label, maxLength, save }) {
+  stripRename = save;
+  const input = document.createElement('input');
+  input.className = `strip-rename ${className}`;
+  input.value = value;
+  if (maxLength) input.maxLength = maxLength;
+  input.setAttribute('aria-label', label);
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+async function endStripRename(input, save) {
+  const onSave = stripRename;
+  if (!onSave) return;
+  stripRename = null;
+  paneTabsHtml = '';
+  if (save) await onSave(input.value.trim());
+  syncPanes();
+}
+
+function beginPaneRename(id) {
+  const pane = paneById(id);
+  const tab = paneStrip.querySelector(`.pane-tab[data-pane="${CSS.escape(id)}"]`);
+  const title = tab?.querySelector('.pane-title');
+  if (!pane || !title) return;
+  tab.draggable = false;
+  beginStripRename(title, {
+    className: 'pane-title-input',
+    value: pane.title,
+    label: 'Pane title',
+    save: async (text) => {
+      const sid = paneSessionId();
+      if (!sid || !paneById(id) || text === paneById(id).title) return;
+      const res = await paneRequest('PATCH', apiPath`/api/panes/${sid}/${id}`, { title: text });
+      if (res.error) showToast(res.error, 'error');
+      else applyPaneLayout(sid, res.layout);
+    },
+  });
+}
+
+const PANE_GROUP_NAME_MAX = 40;
+
+function beginPaneGroupRename(groupId) {
+  const sid = paneSessionId();
+  const group = sid && getPaneGroups(sid).find((g) => g.id === groupId);
+  const chip = paneStrip.querySelector(`[data-group="${CSS.escape(groupId)}"]`);
+  if (!group || !chip) return;
+  beginStripRename(chip, {
+    className: 'pane-group-input',
+    value: group.name,
+    label: 'Group name',
+    maxLength: PANE_GROUP_NAME_MAX,
+    save: (name) => updatePaneGroup(sid, groupId, { name: name.slice(0, PANE_GROUP_NAME_MAX) }),
+  });
+}
+
+const paneMenuItem = (act, label, arg) =>
+  `<button class="pane-menu-item" role="menuitem" data-pane-act="${escapeHtml(act)}"${arg == null ? '' : ` data-arg="${escapeHtml(arg)}"`}>${label}</button>`;
+const paneGroupStyle = (color) => escapeHtml(`--g: var(--owner-${color})`);
+const paneGroupDot = (g) => `<span class="pane-menu-dot" style="${paneGroupStyle(g.color)}"></span>`;
+
+function paneGroupMenuItems(id) {
+  const sid = paneSessionId();
+  const item = paneStripItems(sid).find((it) => it.ids.includes(id));
+  if (!item || item.ids.includes('board')) return '';
+  const others = getPaneGroups(sid).filter((g) => g.id !== item.group?.id);
+  return (
+    paneMenuItem('group', 'Add to new group', 'new') +
+    others
+      .map((g) => paneMenuItem('group', `Add to ${paneGroupDot(g)}${escapeHtml(g.name || 'unnamed group')}`, g.id))
+      .join('') +
+    (item.group ? paneMenuItem('group', 'Remove from group', '') : '')
+  );
+}
+
+function openPaneGroupMenu(x, y, groupId) {
+  const sid = paneSessionId();
+  const group = sid && getPaneGroups(sid).find((g) => g.id === groupId);
+  if (!group) return;
+  const swatches = PANE_GROUP_COLORS.map(
+    (c) =>
+      `<button class="pane-menu-item pane-menu-swatch${c === group.color ? ' on' : ''}" role="menuitemradio" aria-checked="${escapeHtml(String(c === group.color))}" aria-label="${escapeHtml(c)}" title="${escapeHtml(c)}" data-pane-act="groupColor" data-arg="${escapeHtml(c)}" style="${paneGroupStyle(c)}"></button>`,
+  ).join('');
+  showPaneMenu(
+    x,
+    y,
+    group.id,
+    'Group actions',
+    `<div class="pane-menu-label">${escapeHtml(group.name || 'Unnamed group')}</div>` +
+      paneMenuItem('groupRename', 'Rename') +
+      paneMenuItem('groupToggle', group.closed ? 'Expand' : 'Collapse') +
+      `<div class="pane-menu-swatches">${swatches}</div>` +
+      paneMenuItem('ungroup', 'Ungroup'),
+  );
+}
+
+function openPaneMenu(x, y, id) {
+  if (id === 'board') {
+    showPaneMenu(
+      x,
+      y,
+      id,
+      'Board actions',
+      '<div class="pane-menu-label">Board</div>' +
+        paneMenuItem('deleteCompleted', 'Delete completed tasks') +
+        paneMenuItem('deleteAll', 'Delete all tasks'),
+    );
+    return true;
+  }
+  const pane = paneById(id);
+  if (!pane) return false;
+  const url = pane.kind === 'url';
+  const message = pane.kind === 'message';
+  const label = paneLabel(pane);
+  showPaneMenu(
+    x,
+    y,
+    pane.id,
+    'Pane actions',
+    paneMenuLabel(pane, label) +
+      (message ? '' : paneMenuItem('copy', url ? 'Copy URL' : 'Copy path')) +
+      paneMenuItem('open', url ? 'Open in new tab' : message ? 'Open in message dialog' : 'Open in preview') +
+      (message
+        ? ''
+        : paneMenuItem('link', paneIsLinked(pane) ? 'Remove from linked documents' : 'Add to linked documents')) +
+      paneMenuItem('rename', 'Rename') +
+      paneMenuItem('reload', 'Reload') +
+      paneGroupMenuItems(pane.id) +
+      paneMenuItem('close', 'Close pane'),
+  );
+  return true;
+}
+
+function paneIsLinked(pane) {
+  const key = canonicalPath(pane.target);
+  return getSessionPreviewPaths(paneSessionId()).some((p) => canonicalPath(p) === key);
+}
+
+function togglePaneLink(id) {
+  const pane = paneById(id);
+  const sid = paneSessionId();
+  if (!pane || !sid) return;
+  const unlink = paneIsLinked(pane);
+  setSessionDocLink(sid, pane.target, unlink);
+  if (unlink) forgetServerLinkedDoc(sid, pane.target);
+  showToast(unlink ? 'Unlinked from session' : 'Linked to session', 'success');
+}
+
+function showPaneMenu(x, y, id, ariaLabel, html) {
+  closePaneMenu();
+  sgCloseMenu();
+  const menu = document.createElement('div');
+  menu.id = 'pane-menu';
+  menu.className = 'pane-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', ariaLabel);
+  menu.dataset.pane = id;
+  menu.innerHTML = html;
+  placeMenu(menu, x, y);
+  document.addEventListener('keydown', paneMenuKeydown, true);
+  menu.querySelector('.pane-menu-item').focus();
+}
+
+const PANE_MENU_ACTIONS = {
+  copy: copyPaneTarget,
+  open: openPaneExternally,
+  link: togglePaneLink,
+  rename: beginPaneRename,
+  reload: reloadPane,
+  close: closePane,
+  group: (id, to) => groupPaneTab(id, to || null),
+  groupRename: beginPaneGroupRename,
+  groupToggle: togglePaneGroup,
+  groupColor: colorPaneGroup,
+  ungroup: ungroupPanes,
+  deleteCompleted: () => deleteBoardTasks(true),
+  deleteAll: () => deleteBoardTasks(false),
+};
+
+// The server takes only absolute paths, and linked docs can be relative to the session's folder.
+function paneTargetFrom(raw) {
+  const value = raw.trim().replace(/^(["'])(.*)\1$/, '$2');
+  if (!value) return null;
+  const url = linkUrl(value);
+  if (!url) return { kind: 'file', target: value };
+  if (paneOwnOrigin({ kind: 'url', target: url })) return { error: 'A pane cannot show the board or the hub' };
+  return { kind: 'url', target: url };
+}
+
+// The same target again answers the existing pane, so this also switches to it.
+async function addPane(raw) {
+  const sid = paneSessionId();
+  const t = sid && paneTargetFrom(raw);
+  if (!t) return;
+  if (t.error) {
+    showToast(t.error, 'error');
+    return;
+  }
+  if (!(await postPane(sid, { target: t.target, base: getSessionBaseDir(sid) || undefined }))) return;
+  closePanePop();
+  syncPanes();
+}
+
+// Shows the added pane. True when its session is still on screen, null when the add failed.
+async function postPane(sid, body) {
+  const res = await paneRequest('POST', apiPath`/api/panes/${sid}`, body);
+  if (!res.pane) {
+    showToast(res.error, 'error');
+    return null;
+  }
+  setActivePaneId(sid, res.pane.id);
+  applyPaneLayout(sid, res.layout);
+  return sid === paneSessionId();
+}
+
+// Pane key → line to show once the pane's source is rendered and on screen. Not stored with the pane.
+const paneLineWanted = new Map();
+
+function applyPaneLine(view) {
+  const line = paneLineWanted.get(view.dataset.key);
+  const body = view.querySelector('.pane-doc-body');
+  if (!line || !body || !view.offsetParent) return;
+  paneLineWanted.delete(view.dataset.key);
+  markSourceLine(body, line);
+}
+
+async function openPaneAtLine(sid, { path, line }, base) {
+  const onScreen = await postPane(sid, { target: path, base });
+  if (onScreen === null) return;
+  paneLineWanted.set(`${sid}/${getActivePaneId(sid)}`, line);
+  if (onScreen) syncPanes();
+  toastPaneAdded(sid, onScreen, pathBasename(path));
+}
+
+async function openPreviewAtLine({ path, line }, base) {
+  await openPreviewByPath(path, base, openFileInEditor);
+  if (currentPreviewPath) markSourceLine(document.getElementById('preview-modal-body'), line);
+}
+
+// A band under the line, so the text stays as it is; past the end it marks the last line.
+function markSourceLine(bodyEl, line) {
+  const pre = bodyEl.querySelector('.preview-source');
+  if (!pre) return;
+  let band = pre.querySelector('.src-line');
+  if (!band) {
+    band = document.createElement('div');
+    band.className = 'src-line';
+    band.setAttribute('aria-hidden', 'true');
+    pre.prepend(band);
+  }
+  band.style.setProperty('--line', Math.min(line, Number(pre.dataset.lines) || 1) - 1);
+  band.scrollIntoView({ block: 'center', inline: 'nearest' });
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openPreviewInPane() {
+  if (!currentPreviewPath || !previewSessionId) return;
+  const sid = previewSessionId;
+  const target = currentPreviewPath;
+  closePreviewModal();
+  addPaneToSession(sid, target, pathBasename(target));
+}
+
+// The plan modal also opens other sessions' plans; the pane goes to the plan's session, wherever it is.
+const planPaneAllowed = () => !!_pendingPlanPath && !!_planSessionId;
+
+function syncPlanPaneBtn() {
+  document.getElementById('plan-pane-btn').style.display = planPaneAllowed() ? '' : 'none';
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openPlanInPane() {
+  if (!planPaneAllowed()) return;
+  const sid = _planSessionId;
+  const target = _pendingPlanPath;
+  closePlanModal();
+  addPaneToSession(sid, target, 'Plan');
+}
+
+async function addPaneToSession(sid, target, label) {
+  if (sid === paneSessionId()) return addPane(target);
+  if ((await postPane(sid, { target, base: getSessionBaseDir(sid) || undefined })) !== false) return;
+  const s = sessions.find((x) => x.id === sid);
+  showToast(`${label} added to ${s ? sessionDisplayName(s) : 'its session'}`, 'success', {
+    label: 'Open',
+    onClick: () => openSession(sid),
+  });
+}
+
+function msgDetailPaneSource() {
+  if (agentLogMode || !paneSessionId()) return null;
+  if (currentMsgDetailIdx != null) return currentMessages[currentMsgDetailIdx] || null;
+  const pin = currentPinDetailId && currentPins.find((p) => p.id === currentPinDetailId);
+  return pin && pin.type !== 'agent' ? pin : null;
+}
+
+function syncMsgDetailPaneBtn() {
+  document.getElementById('msg-detail-pane-btn').style.display = msgDetailPaneSource()?.timestamp ? '' : 'none';
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function openMsgInPane() {
+  const m = msgDetailPaneSource();
+  if (!m?.timestamp) return;
+  const sid = paneSessionId();
+  const d = new Date(m.timestamp);
+  const title = `${msgDetailTitle(m) || 'Message'} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+  closeMsgDetailModal();
+  if (await postPane(sid, { kind: 'message', target: getPinId(m), title })) syncPanes();
+}
+
+let panePopMatches = [];
+// -1 means Enter adds the typed value.
+let panePopIdx = -1;
+
+function describePaneInput() {
+  const doc = panePopMatches[panePopIdx];
+  const t = doc ? null : paneTargetFrom(panePopInput.value);
+  panePopDetect.classList.toggle('error', !!t?.error);
+  panePopDetect.textContent = doc
+    ? `Enter opens ${linkedDocLabel(doc)}`
+    : !t
+      ? 'Search linked docs · http(s) → url pane · a file path → file pane'
+      : t.error || (t.kind === 'url' ? 'Kind: url · framed live' : 'Kind: file · rendered like the preview');
+}
+
+function renderPanePopDocs() {
+  const docs = getSessionPreviewPaths(paneSessionId());
+  const query = panePopInput.value.trim();
+  panePopMatches = query ? rankFolders(docs, query) : docs;
+  panePopIdx = query && panePopMatches.length ? 0 : -1;
+  panePopDocs.innerHTML = panePopMatches.length
+    ? panePopMatches
+        .map(
+          (d, i) =>
+            `<button class="pane-pop-row${i === panePopIdx ? ' active' : ''}" data-doc="${escapeHtml(d)}" title="${escapeHtml(d)}">${linkUrl(d) ? PANE_ICONS.url : PANE_ICONS.file}<span>${escapeHtml(linkedDocLabel(d))}</span></button>`,
+        )
+        .join('')
+    : `<div class="pane-pop-empty">${docs.length ? 'No linked doc matches. Enter adds what you typed.' : 'This session has no linked docs.'}</div>`;
+  describePaneInput();
+}
+
+function movePanePopHighlight(step) {
+  panePopIdx = Math.max(-1, Math.min(panePopMatches.length - 1, panePopIdx + step));
+  panePopDocs.querySelectorAll('.pane-pop-row').forEach((row, i) => {
+    row.classList.toggle('active', i === panePopIdx);
+    if (i === panePopIdx) row.scrollIntoView({ block: 'nearest' });
+  });
+  describePaneInput();
+}
+
+function openPanePop() {
+  if (!paneSessionId()) return;
+  panePopInput.value = '';
+  renderPanePopDocs();
+  panePop.classList.add('visible');
+  panePopInput.focus();
+}
+
+function closePanePop() {
+  panePop.classList.remove('visible');
+}
+
+paneStrip.addEventListener('keydown', (e) => {
+  const input = e.target.closest?.('.strip-rename');
+  if (input && (e.key === 'Enter' || e.key === 'Escape')) {
+    e.preventDefault();
+    endStripRename(input, e.key === 'Enter');
+  }
+});
+paneStrip.addEventListener('focusout', (e) => {
+  const input = e.target.closest?.('.strip-rename');
+  if (input) endStripRename(input, true);
+});
+paneStrip.addEventListener('click', (e) => {
+  if (e.target.closest('.strip-rename')) return;
+  const chip = e.target.closest('[data-group]');
+  if (chip) {
+    togglePaneGroup(chip.dataset.group);
+    return;
+  }
+  const close = e.target.closest('[data-close]');
+  if (close) {
+    closePane(close.dataset.close);
+    return;
+  }
+  const tab = e.target.closest('.pane-tab');
+  if (!tab) return;
+  selectPane(tab.dataset.pane);
+  focusActivePane();
+});
+paneStrip.addEventListener('auxclick', (e) => {
+  const tab = e.target.closest('.pane-tab');
+  if (e.button === 1 && tab && tab.dataset.pane !== 'board') closePane(tab.dataset.pane);
+});
+paneStrip.addEventListener('contextmenu', (e) => {
+  const chip = e.target.closest('[data-group]');
+  const tab = e.target.closest('.pane-tab');
+  if (!chip && !tab) return;
+  e.preventDefault();
+  if (chip) openPaneGroupMenu(e.clientX, e.clientY, chip.dataset.group);
+  else openPaneMenu(e.clientX, e.clientY, tab.dataset.pane);
+});
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('pane-menu');
+  if (!menu) return;
+  const item = e.target.closest('.pane-menu-item');
+  const act = item?.dataset.paneAct;
+  if (act) PANE_MENU_ACTIONS[act](menu.dataset.pane, item.dataset.arg);
+  if (act) closePaneMenu();
+  else if (!menu.contains(e.target)) closePaneMenu(true);
+});
+function focusSideOf(el) {
+  if (el?.classList.contains('side-l')) focusPaneSide('l');
+  else if (el?.classList.contains('side-r')) focusPaneSide('r');
+}
+
+// A click inside a pane's frame never reaches this document, but it takes focus from the window.
+// That blur is also the only sign that a click in a split moved into a pane's frame.
+window.addEventListener('blur', () => {
+  closePaneMenu();
+  setTimeout(() => {
+    syncPaneFrameFocus();
+    watchPaneFrameFocus();
+  });
+});
+window.addEventListener('focus', () => {
+  clearInterval(paneFrameFocusPoll);
+  markPaneFrameFocus();
+});
+
+function syncPaneFrameFocus() {
+  focusSideOf(document.activeElement?.closest?.('.pane-view.on'));
+  markPaneFrameFocus();
+}
+
+function splitPaneFrameFocused() {
+  const el = document.activeElement;
+  return el?.tagName === 'IFRAME' && paneViews.contains(el) && !!shownPaneSplit();
+}
+
+// A click from one frame into another fires no event in this document, so while a split's frame
+// has focus the board checks which one it is: one pointer compare four times a second.
+let paneFrameFocusPoll = 0;
+function watchPaneFrameFocus() {
+  clearInterval(paneFrameFocusPoll);
+  if (!splitPaneFrameFocused()) return;
+  let last = document.activeElement;
+  paneFrameFocusPoll = setInterval(() => {
+    const el = document.activeElement;
+    if (!splitPaneFrameFocused()) clearInterval(paneFrameFocusPoll);
+    else if (el !== last) {
+      last = el;
+      syncPaneFrameFocus();
+    }
+  }, 250);
+}
+paneSplitBox.addEventListener(
+  'pointerdown',
+  (e) => focusSideOf(paneLog.contains(e.target) ? paneBoard : e.target.closest('.side-l, .side-r')),
+  true,
+);
+
+function endPaneDrag() {
+  if (!paneDragId) return;
+  paneDragId = null;
+  markPaneDrop(null);
+  paneSplitBox.classList.remove('dropping');
+  for (const el of paneDrop.children) el.classList.remove('hot');
+  paneStrip.querySelector('.pane-tab.dragging')?.classList.remove('dragging');
+  syncPanes();
+}
+
+paneStrip.addEventListener('dragstart', (e) => {
+  const tab = e.target.closest('.pane-tab');
+  if (!tab || !paneSessionId() || wantsTerminal()) return;
+  paneDragId = tab.dataset.pane;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', paneDragId);
+  tab.classList.add('dragging');
+  paneSplitBox.classList.add('dropping');
+});
+
+// A split shows as one strip item, so a drop moves the dragged tab's whole item; the first item
+// holds the board and stays put. A moved item joins the group it lands in, and a drop on a
+// group's chip adds it to that group. Elsewhere on the strip, a split tab's drop ends its split.
+function paneDropAction(e) {
+  const sid = paneSessionId();
+  const tab = e.target.closest?.('.pane-tab');
+  const chip = e.target.closest?.('[data-group]');
+  if (!sid || !paneDragId) return null;
+  if (chip || tab) {
+    const [fixed, ...movable] = paneStripItems(sid);
+    const itemOf = (id) => movable.find((it) => it.ids.includes(id));
+    const from = itemOf(paneDragId);
+    if (chip) return from ? { kind: 'group', sid, el: chip, group: chip.dataset.group } : null;
+    const to = itemOf(tab.dataset.pane);
+    if (from && to && from !== to) {
+      const el = to.pair ? tab.closest('.pane-pair') : tab;
+      const box = el.getBoundingClientRect();
+      return { kind: 'move', sid, el, fixed, movable, from, to, after: e.clientX > box.left + box.width / 2 };
+    }
+  }
+  const pair = pairOf(sid, paneDragId);
+  return pair ? { kind: 'unpair', sid, pair } : null;
+}
+
+function markPaneDrop(action) {
+  paneStrip.classList.toggle('drop-hot', action?.kind === 'unpair');
+  for (const el of paneStrip.querySelectorAll('.pane-tab, .pane-pair, .pane-group-chip')) {
+    const on = el === action?.el;
+    el.classList.toggle('drop-in', on && action.kind === 'group');
+    el.classList.toggle('drop-before', on && action.kind === 'move' && !action.after);
+    el.classList.toggle('drop-after', on && action.kind === 'move' && action.after);
+  }
+}
+
+async function movePaneItem({ sid, fixed, movable, from, to, after }) {
+  const items = movable.filter((it) => it !== from);
+  items.splice(items.indexOf(to) + (after ? 1 : 0), 0, from);
+  const order = [fixed, ...items].flatMap((it) => it.ids).filter((id) => id !== 'board');
+  const res = await paneRequest('PATCH', apiPath`/api/panes/${sid}`, { order });
+  if (res.error) showToast(res.error, 'error');
+  else applyPaneLayout(sid, res.layout);
+}
+
+paneStrip.addEventListener('dragend', endPaneDrag);
+paneStrip.addEventListener('dragover', (e) => {
+  const action = paneDropAction(e);
+  markPaneDrop(action);
+  if (action) e.preventDefault();
+});
+paneStrip.addEventListener('dragleave', (e) => {
+  if (!paneStrip.contains(e.relatedTarget)) markPaneDrop(null);
+});
+paneStrip.addEventListener('drop', (e) => {
+  const action = paneDropAction(e);
+  if (!action) return;
+  e.preventDefault();
+  const { sid, pair } = action;
+  const id = paneDragId;
+  const shown = pair && !!splitSideOf(pair, getActivePaneId(sid));
+  const keep = shown ? pair[otherSide(splitSideOf(pair, id))] : null;
+  endPaneDrag();
+  if (action.kind === 'group') groupPaneTab(id, action.group);
+  else if (action.kind === 'move') {
+    if (action.from.group?.id !== action.to.group?.id) groupPaneTab(id, action.to.group?.id ?? null);
+    movePaneItem(action);
+  } else unpairPanes(sid, pair, keep);
+});
+paneDrop.addEventListener('dragover', (e) => {
+  if (!paneDragId) return;
+  e.preventDefault();
+  const half = e.target.closest('[data-side]');
+  for (const el of paneDrop.children) el.classList.toggle('hot', el === half);
+});
+paneDrop.addEventListener('dragleave', (e) => {
+  if (!paneDrop.contains(e.relatedTarget)) for (const el of paneDrop.children) el.classList.remove('hot');
+});
+paneDrop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const id = paneDragId;
+  const side = e.target.closest('[data-side]')?.dataset.side;
+  endPaneDrag();
+  if (id && side) dropPaneOnSide(id, side);
+});
+
+// syncPanes calls this on every refresh; an unchanged value is not written again.
+function applySplitRatio() {
+  const value = `${paneSplitRatio * 100}%`;
+  if (paneSplitBox.style.getPropertyValue('--pane-split') !== value)
+    paneSplitBox.style.setProperty('--pane-split', value);
+}
+
+{
+  let start;
+  let width;
+  let collapse = null;
+  _initDragResize(paneDivider, {
+    onStart() {
+      start = paneSplitRatio;
+      width = paneSplitBox.clientWidth;
+      paneSplitBox.classList.add('resizing');
+    },
+    onMove(dx) {
+      const raw = start + dx / width;
+      collapse = raw < 0.1 ? 'l' : raw > 0.9 ? 'r' : null;
+      paneSplitBox.classList.toggle('collapse-l', collapse === 'l');
+      paneSplitBox.classList.toggle('collapse-r', collapse === 'r');
+      paneSplitRatio = clampSplitRatio(raw);
+      applySplitRatio();
+    },
+    onEnd() {
+      paneSplitBox.classList.remove('resizing', 'collapse-l', 'collapse-r');
+      const hidden = collapse;
+      collapse = null;
+      const sid = paneSessionId();
+      const split = hidden && sid && getPaneSplit(sid);
+      if (!split) {
+        store.setItem(PANE_SPLIT_RATIO_KEY, String(paneSplitRatio));
+        return;
+      }
+      paneSplitRatio = start;
+      applySplitRatio();
+      unpairPanes(sid, split, split[otherSide(hidden)]);
+    },
+  });
+  paneDivider.addEventListener('dblclick', () => {
+    paneSplitRatio = 0.5;
+    store.removeItem(PANE_SPLIT_RATIO_KEY);
+    applySplitRatio();
+  });
+}
+
+paneViews.addEventListener('click', (e) => {
+  if (e.target.closest('[data-pane-open]')) openPaneExternally();
+  const zoom = e.target.closest('[data-pane-zoom]');
+  if (zoom) adjustModalZoom(Number(zoom.dataset.paneZoom));
+});
+bindPreviewRelativeLinks(paneViews, (a) => a.closest('.pane-doc')?.dataset.path);
+paneTabs.addEventListener('scroll', updatePaneFades, { passive: true });
+paneTabs.addEventListener(
+  'wheel',
+  (e) => {
+    if (!e.deltaY || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    if (paneTabs.scrollWidth <= paneTabs.clientWidth) return;
+    e.preventDefault();
+    paneTabs.scrollLeft += e.deltaY;
+  },
+  { passive: false },
+);
+new ResizeObserver(updatePaneFades).observe(paneTabs);
+document.getElementById('pane-add').addEventListener('click', openPanePop);
+paneSplitBtn.addEventListener('click', togglePaneSplit);
+document.getElementById('pane-reload').addEventListener('click', () => reloadPane());
+document.getElementById('pane-open').addEventListener('click', () => openPaneExternally());
+panePopDocs.addEventListener('click', (e) => {
+  const row = e.target.closest('[data-doc]');
+  if (row) addPane(row.dataset.doc);
+});
+panePopInput.addEventListener('input', renderPanePopDocs);
+panePop.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    closePanePop();
+    return;
+  }
+  if (e.target !== panePopInput) return;
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    addPane(panePopMatches[panePopIdx] ?? panePopInput.value);
+  } else if (matchKey(e, 'ArrowDown', 'ArrowUp')) {
+    e.preventDefault();
+    movePanePopHighlight(e.key === 'ArrowDown' ? 1 : -1);
+  }
+});
+//#endregion
+
+//#region TERMINAL
+// The kanban and the terminal share one slot: terminal mode hides #main-content and shows
+// the pane. The PTY lives on the server (lib/terminal.js) and outlives the pane, so
+// leaving the session view or switching sessions drops only the socket; coming back
+// reattaches and the server replays the screen.
+const TERMINAL_TOKEN_KEY = 'terminal-token';
+const TERMINAL_TOKEN_RE = /^[0-9a-f]{64}$/;
+const TERMINAL_MODES_KEY = 'terminal-sessions';
+const TERMINAL_FONT_KEY = 'terminal-font-size';
+const TERMINAL_FONT_MIN = 8;
+const TERMINAL_FONT_MAX = 32;
+const TERMINAL_FRAME_ISOLATED_MS = 5000;
+const TERMINAL_FRAME_LOAD_MS = 10000;
+const TERMINAL_FRAME_ALIVE_MS = 5000;
+const TERMINAL_MSG = 'cck-term:';
+const TERMINAL_RETRY_MS = [500, 1000, 2000, 4000, 8000];
+const TERMINAL_STABLE_MS = 5000;
+const STALE_TOKEN_MSG = 'The terminal token is out of date. Reload the hub window.';
+// Read at load, before the first updateUrl() rewrites the URL without the fragment.
+let terminalToken = readTerminalToken();
+const termState = {
+  socket: null,
+  sessionId: null,
+  fontSize: null,
+  syncedView: null,
+  panelHidden: false,
+  shown: false,
+  attached: false,
+  closeGuard: false,
+  focusNext: false,
+  openedByUser: null,
+  retryTimer: null,
+};
+const termFrame = {
+  el: null,
+  origin: null,
+  ready: null,
+  resolve: null,
+  inited: false,
+  reload: false,
+  claims: '',
+  theme: '',
+  sameOrigin: false,
+};
+
+function resetTerminalFrame(patch) {
+  Object.assign(termFrame, { inited: false, reload: false, claims: '', theme: '', ...patch });
+}
+let terminalSocketSeq = 0;
+
+// The hub passes the token in the fragment, which is never sent to a server or logged.
+function readTerminalToken() {
+  const m = /[#&]t=([^&]*)/.exec(location.hash);
+  if (m && TERMINAL_TOKEN_RE.test(m[1])) {
+    storeTerminalToken(m[1]);
+    history.replaceState(null, '', location.pathname + location.search);
+    return m[1];
+  }
+  return tabStore.getItem(TERMINAL_TOKEN_KEY);
+}
+
+function storeTerminalToken(token) {
+  tabStore.setItem(TERMINAL_TOKEN_KEY, token);
+}
+
+let tokenRefresh = null;
+
+// The hub mints a new token each run, and this page can outlive a hub restart. Resolves true only
+// for a token that differs from the one that just failed, so a caller retries at most once.
+function refreshTerminalToken() {
+  tokenRefresh ??= hub
+    .terminalToken()
+    .then((token) => {
+      if (!TERMINAL_TOKEN_RE.test(token) || token === terminalToken) return false;
+      terminalToken = token;
+      storeTerminalToken(token);
+      return true;
+    })
+    .finally(() => {
+      tokenRefresh = null;
+    });
+  return tokenRefresh;
+}
+
+function terminalAvailable() {
+  return !!appConfig.terminal?.available && !!terminalToken;
+}
+
+function terminalModes() {
+  return new Set(readStoredList(TERMINAL_MODES_KEY));
+}
+
+function setTerminalMode(sessionId, on) {
+  const modes = terminalModes();
+  if (on) modes.add(sessionId);
+  else modes.delete(sessionId);
+  store.writeJson(TERMINAL_MODES_KEY, [...modes].slice(-50));
+}
+
+function wantsTerminal() {
+  return viewMode === 'session' && wantsTerminalFor(currentSessionId);
+}
+
+function wantsTerminalFor(sessionId) {
+  return terminalAvailable() && !!sessionId && terminalModes().has(sessionId);
+}
+
+function toggleTerminal() {
+  if (!terminalAvailable() || viewMode !== 'session' || !currentSessionId) return;
+  setTerminalMode(currentSessionId, !terminalModes().has(currentSessionId));
+  termState.focusNext = true;
+  syncTerminal();
+  if (!wantsTerminal()) focusActivePane();
+}
+
+// The show card sits in the pane but is not the terminal, so Alt+` from it goes to the terminal.
+function terminalPaneFocused() {
+  const active = document.activeElement;
+  return document.getElementById('terminal-pane').contains(active) && !showCardEl().contains(active);
+}
+
+// Kanban's own session keys (new, resume, swap) use the hub's modifier, so the hub leaves them alone.
+// AltGr reaches the page as Ctrl+Alt; when it types a character (Polish AltGr+S is 'ś'), the press is text.
+function hubModDown(e) {
+  return e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey && !e.getModifierState?.('AltGraph');
+}
+
+function inPageField(e) {
+  const field = e.target?.closest?.(TEXT_FIELD_SELECTOR);
+  return !!field && !document.getElementById('terminal-pane').contains(field);
+}
+
+// `probe` asks which keys the terminal frame hands back, and the frame sees keys only while it has focus.
+function terminalShortcut(e, probe = false) {
+  const ctrlAlt = hubModDown(e);
+  const ctrlShift = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+  // Ctrl+_ is Claude Code's undo, so the zoom keys leave it to the terminal. An open ask card,
+  // which sits in the terminal pane, takes them for its own text zoom.
+  const zoom = e.key === '_' ? undefined : zoomDelta(e);
+  if (zoom !== undefined && termFrame.inited && (probe || (terminalPaneFocused() && !isAskOnScreen()))) {
+    return () => adjustTerminalFontSize(Math.sign(zoom));
+  }
+  if (ctrlAlt && e.code === 'KeyS') return swapToPreviousSession;
+  if (matchKey(e, 'KeyR') && terminalConnectSlow() && wantsTerminal() && !inPageField(e)) return reconnectTerminal;
+  // Cancelling the default also stops Chrome's system print dialog, which this page has no use for.
+  if (ctrlShift && e.code === 'KeyP') return toggleSessionPicker;
+  // Ctrl+Shift+Z is redo in a text field, so only the terminal's own textarea gives it up.
+  if (ctrlShift && e.code === 'KeyZ') return inPageField(e) ? null : toggleZenMode;
+  if (ctrlShift && e.code === 'KeyK') return kanbotAvailable() ? () => toggleKanbot() : null;
+  if (ctrlShift && e.code === 'KeyL') return toggleMessagePanel;
+  if (ctrlShift && e.code === 'KeyM') return toggleLastMessage;
+  if (ctrlShift && e.code === 'KeyD') return dismissContextSession;
+  if (ctrlShift && e.code === 'Period') return currentSessionId ? () => toggleSessionSticky(currentSessionId) : null;
+  if (ctrlAlt && (e.code === 'KeyN' || e.code === 'KeyR') && terminalAvailable()) {
+    return () => openNewSession(null, e.code === 'KeyR');
+  }
+  if (e.code !== 'Backquote' || e.metaKey) return null;
+  if (ctrlAlt) return toggleShowFocus;
+  if (e.ctrlKey && !e.altKey) return e.shiftKey ? openTerminalManager : toggleTerminal;
+  if (e.altKey && !e.ctrlKey && !e.shiftKey) return toggleTerminalFocus;
+  if (!e.altKey || !e.shiftKey || e.ctrlKey) return null;
+  if (termState.attached && wantsTerminal()) return () => closeTerminalSession();
+  if (viewMode === 'session' && runningTerminals.has(currentSessionId)) {
+    return () => closeTerminalSession(currentSessionId);
+  }
+  return null;
+}
+
+function setSwapHistory(ids) {
+  swapHistory = [...new Set(ids.filter(Boolean))].slice(0, SWAP_HISTORY_MAX);
+  store.writeJson(SWAP_KEY, swapHistory);
+}
+
+function pushSwapHistory(id) {
+  if (swapHistory[0] !== id) setSwapHistory([id, ...swapHistory]);
+}
+
+function forgetSwapHistory(id) {
+  if (swapHistory.includes(id)) setSwapHistory(swapHistory.filter((x) => x !== id));
+}
+
+async function swapToPreviousSession() {
+  const target = swapHistory.find((id) => id !== currentSessionId);
+  if (!target) return;
+  if (terminalPaneFocused() || isShowCardFocused()) termState.focusNext = true;
+  await revealSession(target);
+}
+
+// Esc belongs to Claude, so leaving the terminal without hiding it needs its own key.
+function toggleTerminalFocus() {
+  if (!wantsTerminal()) {
+    toggleTerminal();
+    return;
+  }
+  if (terminalPaneFocused()) leaveTerminalPane();
+  else focusTerminalPane();
+}
+
+function toggleShowFocus() {
+  if (isShowCardFocused()) {
+    focusTerminalPane();
+    return;
+  }
+  if (!wantsTerminal() || !showState.posts.length) return;
+  if (showState.closed || showState.collapsed) {
+    showState.closed = false;
+    showState.collapsed = false;
+    renderShow();
+  }
+  focusShowBody();
+}
+
+// Idempotent: runs on every view change, so whichever path changed the view lands here.
+function syncTerminal() {
+  const btn = document.getElementById('terminal-toggle');
+  const on = wantsTerminal();
+  const arrived = viewMode === 'session' ? currentSessionId : null;
+  const view = `${arrived}:${on}`;
+  // Only on a change of session or terminal state, so a panel opened by hand over the terminal stays.
+  if (view !== termState.syncedView) {
+    termState.syncedView = view;
+    // The terminal shows the same conversation, so the log panel only takes width; it comes back when the terminal goes.
+    if (on && logAutoOpened) {
+      setMessagePanelVisible(false);
+      logAutoOpened = false;
+    } else if (on && messagePanelOpen) {
+      toggleMessagePanel();
+      termState.panelHidden = true;
+    } else if (!on && arrived && termState.panelHidden) toggleMessagePanel();
+  }
+  if (btn) {
+    btn.style.display = terminalAvailable() && viewMode === 'session' && currentSessionId ? '' : 'none';
+    btn.classList.toggle('active', on);
+  }
+  sessionView.classList.toggle('terminal-mode', on);
+  syncPanes();
+  syncShowCard();
+  pushTerminalClaims();
+  if (!on) {
+    // A hidden xterm textarea drops focus, but a display:none iframe keeps it and would take keys unseen.
+    if (termState.shown && terminalPaneFocused()) {
+      terminalHadFocus = false;
+      document.activeElement.blur();
+    }
+    termState.shown = false;
+    termState.focusNext = false;
+    termState.openedByUser = null;
+    syncCloseGuard();
+    // Hiding keeps the socket so Ctrl+` back is instant.
+    const keepSocket = termState.sessionId === currentSessionId && viewMode === 'session';
+    if (termState.sessionId && !keepSocket) detachTerminal();
+    return;
+  }
+  const wasShown = termState.shown;
+  termState.shown = true;
+  syncCloseGuard();
+  if (termState.sessionId !== currentSessionId) openTerminal(currentSessionId, terminalOpenMode(currentSessionId));
+  else if (!wasShown) onTerminalShown(takeTerminalFocus(currentSessionId));
+}
+
+// Only paths the user drives call this; restores, deep links and refreshes call fetchTasks, so they never take focus.
+async function openSession(sessionId) {
+  setSessionDismissed(sessionId, false);
+  // Awaited only when missing, so opening a loaded session stays synchronous up to fetchTasks.
+  if (!sessions.some((s) => s.id === sessionId)) await ensureSessionLoaded(sessionId);
+  const alreadyOpen = sessionId === currentSessionId && viewMode === 'session' && termState.shown;
+  if (!alreadyOpen) termState.openedByUser = sessionId;
+  else if (termState.attached && promptAwaitsUser(sessionId)) focusTerminalPane();
+  markSessionRead(sessionId);
+  return fetchTasks(sessionId);
+}
+
+// Selecting a session only shows its terminal; focus follows an explicit toggle, a new session, or
+// the user opening a session that waits on a prompt, since answering it is why they opened it.
+function takeTerminalFocus(sessionId) {
+  const opened = termState.openedByUser === sessionId;
+  termState.openedByUser = null;
+  const focus = termState.focusNext || newSpecs.has(sessionId) || (opened && promptAwaitsUser(sessionId));
+  termState.focusNext = false;
+  return focus;
+}
+
+// The terminal attaches asynchronously; by then the user may be typing elsewhere or reading a modal.
+// A session on the trust dialog has no transcript yet, so it may not be in `sessions`.
+function promptAwaitsUser(sessionId) {
+  if (isAnyModalOpen() || document.activeElement?.matches(TEXT_FIELD_SELECTOR)) return false;
+  if (trustWaiting.has(sessionId)) return true;
+  const session = sessions.find((s) => s.id === sessionId);
+  return !!session && isWaitingSession(session);
+}
+
+function onTerminalShown(focus = true) {
+  requestAnimationFrame(() => {
+    terminalFrameSend('refresh');
+    if (focus) focusTerminalPane();
+  });
+}
+
+function focusTerminalPane() {
+  const prompt = document.getElementById('terminal-prompt');
+  if (prompt.classList.contains('visible')) prompt.querySelector('button')?.focus();
+  else if (termFrame.inited) {
+    termFrame.el.focus();
+    terminalFrameSend('focus');
+  }
+  // After a page load the frame may still be loading; its socket's ready takes the focus then.
+  else termState.focusNext = true;
+}
+
+function leaveTerminalPane() {
+  terminalHadFocus = false;
+  document.activeElement.blur();
+  setFocusZone('sidebar');
+}
+
+// Chrome puts frames in one process per site, and a site ignores the port. Served from another
+// loopback name, the terminal runs in its own renderer, so board work never delays a key or a frame.
+// localhost maps to [::1], not 127.0.0.1: Chrome reaches localhost over IPv6, and some Windows
+// machines drop fresh IPv4 loopback connects in bursts, which stalls a socket for seconds.
+// A board on [::1] keeps the terminal in its process, because frame-ancestors cannot name an IPv6
+// literal; so does any other host, which has no second name.
+function terminalFrameOrigin(loc = location) {
+  const other = { localhost: '[::1]', '127.0.0.1': 'localhost' }[loc.hostname];
+  return other ? `${loc.protocol}//${other}${loc.port ? `:${loc.port}` : ''}` : loc.origin;
+}
+
+function ensureTerminalFrame() {
+  if (termFrame.ready) return termFrame.ready;
+  const isolated = termFrame.sameOrigin ? location.origin : terminalFrameOrigin();
+  // A host that does not answer on the other name (IPv6 turned off) still gets a terminal, in this
+  // process, and later loads skip the wait.
+  const ready = loadTerminalFrame(isolated, TERMINAL_FRAME_ISOLATED_MS).catch(async (err) => {
+    if (isolated === location.origin) throw err;
+    await loadTerminalFrame(location.origin, TERMINAL_FRAME_LOAD_MS);
+    termFrame.sameOrigin = true;
+  });
+  termFrame.ready = ready;
+  ready.catch(() => {
+    if (termFrame.ready === ready) termFrame.ready = null;
+  });
+  return ready;
+}
+
+function loadTerminalFrame(origin, timeoutMs) {
+  termFrame.el?.remove();
+  const el = document.createElement('iframe');
+  el.className = 'terminal-frame';
+  el.title = 'Terminal';
+  el.allow = 'clipboard-read; clipboard-write';
+  el.src = `${origin}/terminal.html#p=${encodeURIComponent(location.origin)}`;
+  resetTerminalFrame({ el, origin });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (termFrame.el !== el || termFrame.inited) return;
+      el.remove();
+      termFrame.el = null;
+      reject(new Error('The terminal did not load.'));
+    }, timeoutMs);
+    termFrame.resolve = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    document.getElementById('terminal-host').appendChild(el);
+  });
+}
+
+function sendTerminalTheme() {
+  const options = terminalThemeOptions();
+  const key = JSON.stringify(options);
+  for (const [frame, post] of [
+    [termFrame, postToTerminalFrame],
+    [kanbotState, postToKanbotFrame],
+  ]) {
+    if (!frame.inited || key === frame.theme) continue;
+    frame.theme = key;
+    post('theme', { options });
+  }
+}
+
+// Keyed on the colors, and style is watched, because under the hub a theme change lands in two
+// steps: the class flips while the old pick's inline vars are still on body, then the SDK swaps them.
+new MutationObserver(sendTerminalTheme).observe(document.body, {
+  attributes: true,
+  attributeFilter: ['class', 'data-color-theme', 'style'],
+});
+
+function postToTerminalFrame(t, data) {
+  termFrame.el.contentWindow?.postMessage({ ...data, type: TERMINAL_MSG + t }, termFrame.origin);
+}
+
+function terminalFrameSend(t, data) {
+  if (termFrame.inited) postToTerminalFrame(t, data);
+}
+
+window.addEventListener('message', (e) => {
+  if (!termFrame.el || e.source !== termFrame.el.contentWindow || e.origin !== termFrame.origin) return;
+  const m = e.data;
+  if (typeof m?.type === 'string' && m.type.startsWith(TERMINAL_MSG))
+    onTerminalFrameMessage(m.type.slice(TERMINAL_MSG.length), m);
+});
+
+function terminalInitOptions(themeOptions) {
+  return {
+    fontFamily:
+      appConfig.terminal.fontFamily ||
+      getComputedStyle(document.body).getPropertyValue('--font-mono').trim() ||
+      'monospace',
+    fontSize: currentTerminalFontSize(),
+    scrollback: appConfig.terminal.scrollback,
+    themeOptions,
+  };
+}
+
+function openTerminalLink(href) {
+  if (typeof href === 'string' && isLocalHref(href)) return openLocalHref(href);
+  const url = linkUrl(href);
+  if (url) hub.openExternal(url);
+}
+
+function onTerminalFrameMessage(t, m) {
+  const socket = termState.socket;
+  const current = socket && m.socketId === socket.id;
+  if (t === 'loaded') {
+    // A second load is the frame reloaded (its context menu), with no terminal and no socket.
+    const themeOptions = terminalThemeOptions();
+    resetTerminalFrame({ reload: termFrame.reload || termFrame.inited, theme: JSON.stringify(themeOptions) });
+    postToTerminalFrame('init', terminalInitOptions(themeOptions));
+  } else if (t === 'term') {
+    termFrame.inited = true;
+    pushTerminalClaims();
+    // A theme change between init and now was dropped.
+    sendTerminalTheme();
+    termFrame.resolve?.();
+    if (termFrame.reload) {
+      termFrame.reload = false;
+      reconnectTerminal();
+    }
+  } else if (t === 'key') replayKey(m, document.getElementById('terminal-key-proxy'));
+  else if (t === 'link') openTerminalLink(m.href);
+  // Chrome does not always fire focusin on the iframe element when its content takes focus.
+  else if (t === 'focused') terminalHadFocus = terminalPaneFocused();
+  else if (t === 'opening') {
+    if (current) clearTimeout(socket.aliveTimer);
+  } else if (t === 'output') {
+    if (current && terminalBootTimer) hideTerminalBoot();
+  } else if (t === 'ws') {
+    if (!current) return;
+    if (m.msg?.t === 'ready') socket.readyAt = Date.now();
+    else if (m.msg?.t === 'error') socket.refused = true;
+    onTerminalMessage(socket.sessionId, m.msg, m.tail);
+  } else if (t === 'close') {
+    if (current) onTerminalSocketClose(socket, m.code);
+  }
+}
+
+// The frame hands back the keys the board acts on. Replaying them on a textarea inside the pane gives
+// the document listeners the target they saw when xterm lived here: the shortcut runs, the SDK
+// forwards a hub key, and the text-field guard keeps the board's own keys out.
+function replayKey(m, target) {
+  target.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: m.key,
+      code: m.code,
+      ctrlKey: !!m.ctrl,
+      altKey: !!m.alt,
+      shiftKey: !!m.shift,
+      metaKey: !!m.meta,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
+// [code, key, key with Shift] on a US layout. Each is probed by code alone and by key alone, so a claim
+// holds on any layout exactly when the shortcut would. Hub keys are not probed: the frame gets the
+// hub's combos and matches them with the SDK's comboOf.
+const TERMINAL_PROBE_KEYS = [
+  ...[...'abcdefghijklmnopqrstuvwxyz'].map((k) => [`Key${k.toUpperCase()}`, k, k.toUpperCase()]),
+  ...[...')!@#$%^&*('].map((s, n) => [`Digit${n}`, String(n), s]),
+  ['Backquote', '`', '~'],
+  ['Equal', '=', '+'],
+  ['Minus', '-', '_'],
+  ['Period', '.', '>'],
+  ['NumpadAdd', '+', '+'],
+  ['NumpadSubtract', '-', '-'],
+  ['Numpad0', '0', '0'],
+  ...['Left', 'Right', 'Up', 'Down'].map((d) => [`Arrow${d}`, `Arrow${d}`, `Arrow${d}`]),
+];
+
+function terminalClaims() {
+  const keys = [];
+  for (let bits = 0; bits < 16; bits++) {
+    const mods = { ctrlKey: !!(bits & 1), altKey: !!(bits & 2), shiftKey: !!(bits & 4), metaKey: !!(bits & 8) };
+    for (const [code, base, shifted] of TERMINAL_PROBE_KEYS) {
+      const key = mods.shiftKey ? shifted : base;
+      for (const probe of [
+        { ...mods, key: 'Unidentified', code },
+        { ...mods, key, code: '' },
+      ]) {
+        if (terminalShortcut(probe, true)) keys.push(probe);
+      }
+    }
+  }
+  return keys;
+}
+
+let terminalClaimsQueued = false;
+
+// The claims depend on state (the hub's welcome, a slow connect, the session), so every change re-sends
+// them. One state change calls this several times, and the probe is about 1,500 shortcut checks.
+function keyClaims() {
+  return { keys: terminalClaims(), forward: hub.forwardCombos() };
+}
+
+function bridgeClaims(claims) {
+  const review = reviewItems().length ? REVIEW_SEND_CLAIMS : [];
+  return { ...claims, keys: [...claims.keys, ...ZOOM_CLAIMS, ...PANE_CLAIMS, ...review] };
+}
+
+function sendBridgeClaimsAll(frames, base) {
+  const rest = frames.filter((f) => f !== showState.frame);
+  sendBridgeClaims(rest, base);
+  if (rest.length < frames.length)
+    sendBridgeClaims([showState.frame], { ...base, keys: [...base.keys, ...SHOW_CLAIMS] });
+}
+
+// A hub app in a URL pane runs the SDK, which hands back these keys (hub protocol §5.2). Only keys with
+// Ctrl, Alt or Meta: the page keeps Escape, brackets and its own letter keys.
+function sendHostKeys(frames, bridged) {
+  const keys = bridged.keys.filter((k) => k.ctrlKey || k.altKey || k.metaKey);
+  const sig = JSON.stringify(keys);
+  for (const f of frames) {
+    const origin = URL.parse(f.src)?.origin;
+    if (!origin || origin === 'null' || f.hostKeysSig === sig) continue;
+    f.hostKeysSig = sig;
+    f.contentWindow?.postMessage({ type: 'hub:hostKeys', keys }, origin);
+  }
+}
+
+const urlPaneFrames = () => [...paneViews.querySelectorAll('.pane-url-frame')];
+
+window.addEventListener('message', (e) => {
+  const type = e.data?.type;
+  if (type !== 'hub:hostKey' && type !== 'hub:hostReady') return;
+  const frame = urlPaneFrames().find((f) => f.contentWindow === e.source);
+  if (!frame || URL.parse(frame.src)?.origin !== e.origin) return;
+  if (type === 'hub:hostReady') frame.parentElement.classList.add('keys-bridged');
+  else replayKey(e.data, frame);
+});
+
+function pushTerminalClaims() {
+  if (terminalClaimsQueued) return;
+  terminalClaimsQueued = true;
+  queueMicrotask(() => {
+    terminalClaimsQueued = false;
+    const bridged = bridgedFrameEls();
+    const urlFrames = urlPaneFrames();
+    if (!termFrame.inited && !kanbotState.inited && !bridged.length && !urlFrames.length) return;
+    const claims = keyClaims();
+    const base = bridgeClaims(claims);
+    sendBridgeClaimsAll(bridged, base);
+    sendHostKeys(urlFrames, base);
+    const sig = JSON.stringify(claims);
+    sendFrameClaims(kanbotState, claims, sig, postToKanbotFrame);
+    sendFrameClaims(termFrame, claims, sig, terminalFrameSend);
+  });
+}
+
+function sendFrameClaims(frameState, claims, sig, send) {
+  if (!frameState.inited || sig === frameState.claims) return;
+  frameState.claims = sig;
+  send('claims', claims);
+}
+
+function terminalTheme() {
+  const css = getComputedStyle(document.body);
+  const v = (name) => css.getPropertyValue(name).trim();
+  const theme = {
+    background: v('--bg-deep'),
+    foreground: v('--text-primary'),
+    cursor: v('--accent'),
+    cursorAccent: v('--bg-deep'),
+    selectionBackground: v('--accent-dim'),
+  };
+  for (const name of ANSI_COLOR_NAMES) {
+    theme[name] = v(`--ansi-${name}`);
+    theme[`bright${name[0].toUpperCase()}${name.slice(1)}`] = v(`--ansi-bright-${name}`);
+  }
+  return theme;
+}
+
+function terminalThemeOptions() {
+  return {
+    theme: terminalTheme(),
+    // Claude Code on a dark theme (pinned, or output from before it saw the OSC 11 reply) draws
+    // fixed 256/truecolor values no palette reaches; 3 keeps them readable and still blue.
+    minimumContrastRatio: isLightTheme() ? 3 : 1,
+  };
+}
+
+function clampTerminalFont(v) {
+  return Math.min(TERMINAL_FONT_MAX, Math.max(TERMINAL_FONT_MIN, v));
+}
+
+function terminalFontSize() {
+  const saved = Number.parseInt(store.getItem(TERMINAL_FONT_KEY), 10);
+  return saved ? clampTerminalFont(saved) : appConfig.terminal.fontSize;
+}
+
+function currentTerminalFontSize() {
+  termState.fontSize ??= terminalFontSize();
+  return termState.fontSize;
+}
+
+function adjustTerminalFontSize(step) {
+  const current = currentTerminalFontSize();
+  const size = step === 0 ? appConfig.terminal.fontSize : clampTerminalFont(current + step);
+  if (size !== current) {
+    if (step === 0) store.removeItem(TERMINAL_FONT_KEY);
+    else store.setItem(TERMINAL_FONT_KEY, String(size));
+    termState.fontSize = size;
+    terminalFrameSend('font', { size });
+    layoutShow();
+  }
+  showToast(`Terminal ${size}px`);
+}
+
+function setTerminalStatus(text) {
+  document.getElementById('terminal-status').textContent = text;
+}
+
+function hideTerminalPrompt() {
+  document.getElementById('terminal-prompt').classList.remove('visible');
+}
+
+const TERMINAL_BOOT_VERBS = ['Waking Claude…', 'Clawding…', 'Warming up the terminal…', 'Summoning the session…'];
+const TERMINAL_BOOT_MAX_MS = 15000;
+// The server answers `ready` as soon as the socket attaches, even before Claude draws, so a wait
+// this long is the connection: under the hub a loopback connect can hang until its timeout.
+const TERMINAL_SLOW_CONNECT_MS = 1500;
+let terminalBootTimer = null;
+let terminalSlowTimer = null;
+
+// A new PTY shows only a blinking cursor until Claude draws its first frame.
+function showTerminalBoot() {
+  document.getElementById('terminal-boot-verb').textContent = pickRandom(TERMINAL_BOOT_VERBS);
+  document.getElementById('terminal-boot').classList.add('visible');
+  clearTimeout(terminalBootTimer);
+  terminalBootTimer = setTimeout(() => {
+    if (!terminalConnectSlow()) hideTerminalBoot();
+  }, TERMINAL_BOOT_MAX_MS);
+}
+
+function hideTerminalBoot() {
+  clearTimeout(terminalBootTimer);
+  terminalBootTimer = null;
+  clearTerminalSlow();
+  document.getElementById('terminal-boot').classList.remove('visible');
+}
+
+function clearTerminalSlow() {
+  clearTimeout(terminalSlowTimer);
+  terminalSlowTimer = null;
+  document.getElementById('terminal-boot').classList.remove('slow');
+  pushTerminalClaims();
+}
+
+function terminalConnectSlow() {
+  return document.getElementById('terminal-boot').classList.contains('slow');
+}
+
+function reconnectTerminal() {
+  const id = termState.sessionId;
+  if (id) openTerminal(id, terminalOpenMode(id));
+}
+
+function showTerminalPrompt(sessionId, title, detail, choices, output = '') {
+  const el = document.getElementById('terminal-prompt');
+  const tail = output ? `<pre class="${TINTED_PRE_CLASS} terminal-prompt-output">${escapeHtml(output)}</pre>` : '';
+  el.innerHTML = `<div class="terminal-prompt-text"><div class="terminal-prompt-title">${escapeHtml(title)}</div><div>${escapeHtml(detail)}</div></div>${tail}<div class="terminal-prompt-actions">${choices
+    .map(
+      ([mode, label]) =>
+        `<button type="button" class="btn btn-secondary" data-mode="${escapeHtml(mode)}">${escapeHtml(label)}</button>`,
+    )
+    .join('')}</div><div class="sp-hint"><kbd>Esc</kbd> hides the terminal</div>`;
+  hideTerminalBoot();
+  el.querySelectorAll('button[data-mode]').forEach((b) => {
+    b.onclick = () => openTerminal(sessionId, b.dataset.mode);
+  });
+  el.classList.add('visible');
+  el.querySelector('button')?.focus();
+}
+
+// Closing the page leaves the PTY running, but Ctrl+W meant for the prompt closes the tab, so ask first.
+// Under the hub the top frame asks: browsers do not reliably show the dialog for a frame.
+function setTerminalAttached(on) {
+  termState.attached = on;
+  syncCloseGuard();
+  pushTerminalClaims();
+}
+
+// A hidden pane stays attached, but Ctrl+W can only be meant for a terminal on screen.
+function syncCloseGuard() {
+  const on = (termState.attached && termState.shown) || kanbotOnScreen();
+  if (termState.closeGuard === on) return;
+  termState.closeGuard = on;
+  hub.closeGuard(on);
+}
+
+window.addEventListener('beforeunload', (e) => {
+  if (termState.closeGuard && !hub.inHub) e.preventDefault();
+});
+
+// A config-dir switch in the hub reloads this page, and coming back should put the cursor where it was.
+// The hub's palette takes focus first and clears activeElement here, so the last focus inside this
+// page is tracked instead; focus leaving the frame keeps it.
+let terminalHadFocus = false;
+let passTerminalZoneOn = false;
+document.addEventListener('focusin', () => {
+  terminalHadFocus = terminalPaneFocused();
+});
+document.addEventListener('focusout', (e) => {
+  if (e.relatedTarget) return;
+  setTimeout(() => {
+    if (document.hasFocus()) terminalHadFocus = terminalPaneFocused();
+  });
+});
+// The hub hands focus back by focusing this frame after a palette closes, and focus does not
+// pass on into the nested terminal frame by itself. The hub makes this frame inert while the
+// palette is open, which can blur the terminal frame, so activeElement no longer says it had focus.
+// Without inert (the app launcher), activeElement stays the frame element while the frame has no focus.
+// Chrome fires this before focusin when a click or a focus() call in this page takes focus from the
+// frame, so it waits a task and gives way to whatever took focus.
+let boardPointerDown = false;
+document.addEventListener(
+  'pointerdown',
+  () => {
+    boardPointerDown = true;
+    passTerminalZoneOn = false;
+  },
+  true,
+);
+for (const type of ['pointerup', 'pointercancel']) {
+  document.addEventListener(type, () => (boardPointerDown = false), true);
+}
+window.addEventListener('focus', () => {
+  if (!terminalHadFocus || boardPointerDown) return;
+  setTimeout(() => {
+    const active = document.activeElement;
+    if (terminalHadFocus && termState.shown && (active === document.body || active === termFrame.el)) {
+      focusTerminalPane();
+    }
+  });
+});
+// A board with no session open passes the zone on, so a stop at an empty config dir keeps it. So does a
+// board whose session has no terminal for an inherited terminal zone, until the user picks a zone here.
+window.addEventListener('pagehide', () => {
+  if (termState.attached && termState.shown && terminalHadFocus) tabStore.setItem(FOCUS_ZONE_KEY, 'terminal');
+  else if (passTerminalZoneOn) return;
+  else if (currentSessionId || focusZone === 'sidebar') tabStore.setItem(FOCUS_ZONE_KEY, focusZone);
+});
+
+// While the hub shows another app this frame cannot take focus, so terminalHadFocus lets the
+// window focus handler finish the restore when the hub focuses this frame.
+function restoreTerminalFocus(zone, sessionId) {
+  if (zone !== 'terminal') return;
+  if (!wantsTerminalFor(sessionId)) {
+    passTerminalZoneOn = true;
+    return;
+  }
+  termState.focusNext = true;
+  terminalHadFocus = true;
+}
+
+// The terminal stands in for the board, so it takes the board zone however focus arrives
+// (Tab, Alt+`, a click); leaveTerminalPane hands it back to the sidebar.
+document.getElementById('terminal-pane').addEventListener('focusin', () => {
+  if (focusZone !== 'sidebar') return;
+  clearKbSelection();
+  focusZone = 'board';
+});
+
+function detachTerminal() {
+  const had = termState.socket;
+  termState.socket = null;
+  termState.sessionId = null;
+  clearTimeout(termState.retryTimer);
+  termState.retryTimer = null;
+  setTerminalAttached(false);
+  if (had) terminalFrameSend('detach');
+  hideTerminalPrompt();
+  hideTerminalBoot();
+}
+
+// The frame owns the socket and xterm; the board picks the session, the mode and when to retry.
+async function openTerminal(sessionId, mode, attempt = 0) {
+  detachTerminal();
+  termState.sessionId = sessionId;
+  const socket = { id: ++terminalSocketSeq, sessionId, mode, attempt, readyAt: 0, refused: false };
+  termState.socket = socket;
+  if (!attempt) setTerminalStatus('');
+  // Even a settled await resumes only after the caller's render, so a loaded frame is used at once.
+  if (!termFrame.inited) {
+    try {
+      await ensureTerminalFrame();
+    } catch (e) {
+      if (termState.socket === socket) setTerminalStatus(e.message);
+      return;
+    }
+    if (termState.socket !== socket) return;
+  }
+  if (!attempt) {
+    showTerminalBoot();
+    terminalSlowTimer = setTimeout(() => {
+      if (termState.socket !== socket) return;
+      document.getElementById('terminal-boot').classList.add('slow');
+      pushTerminalClaims();
+    }, TERMINAL_SLOW_CONNECT_MS);
+  }
+  const spec = newSpecs.get(sessionId);
+  terminalFrameSend('open', {
+    socketId: socket.id,
+    reset: !attempt,
+    hello: {
+      token: terminalToken,
+      id: sessionId,
+      mode,
+      ...(spec?.mode === mode && {
+        cwd: spec.cwd,
+        name: spec.name,
+        worktree: spec.worktree,
+        model: spec.model,
+        effort: spec.effort,
+        prompt: spec.prompt,
+        edit: spec.edit,
+        forkOf: spec.forkOf,
+      }),
+    },
+  });
+  // Chrome shows a crashed frame as a sad face and does not reload it, so a dead frame only shows as silence.
+  socket.aliveTimer = setTimeout(() => {
+    if (termState.socket !== socket) return;
+    dropTerminalFrame();
+    openTerminal(sessionId, mode, attempt);
+  }, TERMINAL_FRAME_ALIVE_MS);
+}
+
+function dropTerminalFrame() {
+  termFrame.el?.remove();
+  resetTerminalFrame({ el: null, ready: null });
+}
+
+function onTerminalSocketClose(socket, code) {
+  termState.socket = null;
+  setTerminalAttached(false);
+  const { sessionId, mode, attempt } = socket;
+  // A refusal already shows the server's reason, and retrying would only repeat it, unless the
+  // reason was a token that the hub has since replaced (4001).
+  if (socket.refused && code === 4001) {
+    refreshTerminalToken().then((ok) => {
+      if (ok && termState.sessionId === sessionId) openTerminal(sessionId, mode, attempt + 1);
+    });
+    return;
+  }
+  if (socket.refused || document.getElementById('terminal-prompt').classList.contains('visible')) return;
+  const stable = socket.readyAt && Date.now() - socket.readyAt > TERMINAL_STABLE_MS;
+  retryTerminal(sessionId, stable ? 0 : attempt);
+}
+
+function terminalOpenMode(sessionId) {
+  return newSpecs.get(sessionId)?.mode ?? 'auto';
+}
+
+// The server moved the PTY to the session picked in `claude --resume`; reattaching under that id
+// replays the same screen, and the placeholder gives way to the real card.
+function adoptPickedSession(oldId, id) {
+  const focused = terminalPaneFocused();
+  setSwapHistory(swapHistory.map((x) => (x === oldId ? id : x)));
+  setTerminalMode(id, true);
+  forgetPlaceholder(oldId);
+  if (currentSessionId !== oldId || viewMode !== 'session') return renderSessions();
+  termState.focusNext = focused;
+  fetchTasks(id);
+}
+
+// The PTY outlives the socket, so a dropped connection (cck restart, sleep, proxy hiccup) reattaches
+// to the same screen. Only a socket that stayed up resets the backoff, so a server that accepts and
+// then drops every socket still runs out of attempts.
+function retryTerminal(sessionId, attempt) {
+  const delay = TERMINAL_RETRY_MS[attempt];
+  if (delay === undefined) {
+    setTerminalStatus('');
+    showTerminalPrompt(sessionId, 'Disconnected', 'The connection to the terminal was lost.', [
+      [terminalOpenMode(sessionId), 'Reconnect'],
+    ]);
+    return;
+  }
+  setTerminalStatus('Reconnecting…');
+  termState.retryTimer = setTimeout(() => {
+    termState.retryTimer = null;
+    if (termState.sessionId === sessionId) openTerminal(sessionId, terminalOpenMode(sessionId), attempt + 1);
+  }, delay);
+}
+
+function onTerminalMessage(sessionId, msg, tail = '') {
+  if (msg.t === 'ready') {
+    // The server has the prompt now; a later start of the same placeholder must not send it again.
+    const spec = newSpecs.get(sessionId);
+    if (spec) spec.prompt = null;
+    clearTerminalSlow();
+    hideTerminalPrompt();
+    setTerminalStatus('');
+    setTerminalAttached(true);
+    if (takeTerminalFocus(sessionId)) focusTerminalPane();
+  } else if (msg.t === 'rekey' && typeof msg.id === 'string') {
+    adoptPickedSession(sessionId, msg.id);
+    if (msg.duplicate) showToast('That session is already open here, so this terminal switched to it', 'info');
+    else if (msg.elsewhere)
+      showToast('That session also runs in another terminal; both write the same transcript', 'error');
+  } else if (msg.t === 'live') {
+    showTerminalPrompt(
+      sessionId,
+      'Running in another terminal',
+      'Resuming it here too makes both processes write to the same transcript.',
+      [
+        ['resume', 'Resume anyway'],
+        ['shell', 'Shell only'],
+      ],
+    );
+  } else if (msg.t === 'exit') {
+    setTerminalAttached(false);
+    // A failed exit shows its last lines in the prompt, so the cause stays readable.
+    const clean = msg.code === 0 || msg.ended;
+    // With no first message there is no transcript to resume, only the same new session to start again.
+    const unsent = newSpecs.has(sessionId);
+    if (unsent && clean) {
+      dropPlaceholder(sessionId);
+      return;
+    }
+    showTerminalPrompt(
+      sessionId,
+      msg.ended ? 'The terminal was ended' : 'The shell exited',
+      clean ? 'Choose how to start again.' : `Exit code ${msg.code}.`,
+      unsent
+        ? [
+            [terminalOpenMode(sessionId), 'Start again'],
+            ['shell', 'Shell'],
+          ]
+        : [
+            ['resume', 'Resume'],
+            ['shell', 'Shell'],
+          ],
+      clean ? '' : tail,
+    );
+  } else if (msg.t === 'error') {
+    hideTerminalBoot();
+    setTerminalStatus(msg.msg || 'Terminal error');
+  }
+}
+
+// Detaching first means no exit message reaches the pane, so no Resume prompt shows before the board.
+// Terminal mode must go too: left on, opening the session again reconnects in 'auto' and resumes claude.
+async function closeTerminalSession(id = termState.sessionId) {
+  exitTerminalMode(id);
+  await terminalFetch(apiPath`/api/terminals/${id}`, 'DELETE').catch(() => {});
+  dropPlaceholder(id);
+}
+
+function exitTerminalMode(id) {
+  if (id === termState.sessionId) {
+    if (terminalPaneFocused()) leaveTerminalPane();
+    detachTerminal();
+  }
+  setTerminalMode(id, false);
+  syncTerminal();
+}
+
+// An end from another tab or `dispatch end` must clear terminal mode here too, or focusing the
+// session reconnects in 'auto' and resumes claude. The mode set is shared by same-origin tabs, so the
+// tab that ended it may have cleared it already while this tab still shows its pane.
+function onTerminalEnded(id) {
+  if (id === termState.sessionId || terminalModes().has(id)) exitTerminalMode(id);
+  dropPlaceholder(id);
+}
+
+function openTerminalManager() {
+  if (!terminalAvailable()) return;
+  // Esc typed in xterm goes to Claude, so the modal would not close on it.
+  if (terminalPaneFocused()) leaveTerminalPane();
+  document.getElementById('terminal-manager-modal').classList.add('visible');
+  renderTerminalManager();
+  clearInterval(terminalProcTimer);
+  pollTerminalProcStats();
+  terminalProcTimer = setInterval(pollTerminalProcStats, TERMINAL_PROC_POLL_MS);
+}
+
+function closeTerminalManager() {
+  clearInterval(terminalProcTimer);
+  hideModalOverlay('terminal-manager-modal');
+}
+
+// Each poll costs one OS process query on the server, so it runs only while the modal is on screen.
+const TERMINAL_PROC_POLL_MS = 5000;
+let terminalProcTimer = 0;
+let terminalProcStats = {};
+
+function formatTerminalProc(s) {
+  if (!s) return '';
+  return `${Math.round(s.rss / 1048576)} MB${s.cpu === null ? '' : ` · ${s.cpu}% CPU`}`;
+}
+
+async function pollTerminalProcStats() {
+  if (!isOnScreen()) return;
+  let cck;
+  let host;
+  const stats = await getJson('/api/terminals/stats', null, { cache: 'no-store' });
+  if (!stats) return;
+  ({ cck, host, terminals: terminalProcStats } = stats);
+  const parts = [cck && `cck ${formatTerminalProc(cck)}`, host && `terminal host ${formatTerminalProc(host)}`];
+  document.getElementById('terminal-manager-stats').textContent = parts.filter(Boolean).join(' · ');
+  for (const el of document.querySelectorAll('#terminal-manager-body [data-proc]')) {
+    el.textContent = formatTerminalProc(terminalProcStats[el.dataset.proc]);
+  }
+}
+
+async function renderTerminalManager() {
+  const body = document.getElementById('terminal-manager-body');
+  let list = [];
+  try {
+    list = await loadTerminals();
+  } catch (e) {
+    body.innerHTML = `<div class="terminal-manager-empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  const max = appConfig.terminal?.maxSessions;
+  document.getElementById('terminal-manager-count').textContent = max
+    ? `${list.length} of ${max} running`
+    : `${list.length} running`;
+  document.getElementById('terminal-manager-end-all').hidden = list.length < 2;
+  if (!list.length) {
+    body.innerHTML = '<div class="terminal-manager-empty">No terminals running</div>';
+    return;
+  }
+  list.sort((a, b) => b.startedAt - a.startedAt);
+  body.innerHTML = list
+    .map((t) => {
+      const session = sessions.find((s) => s.id === t.id);
+      const name = t.kanbot ? 'Kanbot' : session ? sessionDisplayName(session) : t.id.slice(0, 8);
+      const here = t.id === termState.sessionId ? '<span class="terminal-manager-here">this tab</span>' : '';
+      const attached = t.clients ? `${t.clients} attached` : 'detached';
+      return `<div class="terminal-manager-row${t.clients ? ' attached' : ''}">
+        <span class="terminal-manager-dot"></span>
+        <div class="terminal-manager-info">
+          <div class="terminal-manager-name"><span class="terminal-manager-title">${escapeHtml(name)}</span>${here}</div>
+          <div class="terminal-manager-meta">
+            <span class="terminal-manager-mode">${escapeHtml(t.mode)}</span>
+            <span title="${escapeHtml(`pid ${t.pid}`)}">up ${formatDuration(Date.now() - t.startedAt)}</span>
+            <span>${attached}</span>
+            <span class="terminal-manager-proc" data-proc="${escapeHtml(t.id)}" title="Memory and CPU of the claude process. Tools it runs are not counted. 100% CPU is one core.">${escapeHtml(formatTerminalProc(terminalProcStats[t.id]))}</span>
+            <span class="terminal-manager-cwd" title="${escapeHtml(t.cwd)}">${escapeHtml(pathBasename(t.cwd))}</span>
+          </div>
+        </div>
+        <div class="terminal-manager-actions">
+          <button type="button" class="btn btn-secondary" data-open="${escapeHtml(t.id)}"${t.kanbot ? ' data-kanbot' : ''}>Open</button>
+          <button type="button" class="btn btn-secondary terminal-manager-end" data-end="${escapeHtml(t.id)}" data-started="${escapeHtml(String(Number(t.startedAt) || 0))}">End</button>
+        </div>
+      </div>`;
+    })
+    .join('');
+  body.querySelectorAll('[data-open]').forEach((b) => {
+    b.onclick = () => {
+      closeTerminalManager();
+      if ('kanbot' in b.dataset) toggleKanbot(true);
+      else showSessionTerminal(b.dataset.open);
+    };
+  });
+  body.querySelectorAll('[data-end]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      await closeTerminalSession(b.dataset.end);
+      renderTerminalManager();
+    };
+  });
+}
+
+async function terminalFetch(url, method, body) {
+  const send = () => api(url, { method, body, headers: { 'X-Terminal-Token': terminalToken || '' } });
+  const res = await send();
+  return res.status === 401 && (await refreshTerminalToken()) ? send() : res;
+}
+
+const TERMINAL_DOT_STATE = { working: 'busy', waiting: 'wait', idle: 'idle' };
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+async function endAllTerminals() {
+  const items = [...document.querySelectorAll('#terminal-manager-body [data-end]')].map((b) => {
+    const id = b.dataset.end;
+    const session = sessions.find((s) => s.id === id);
+    const label = session ? sessionState(session) : 'idle';
+    const state = TERMINAL_DOT_STATE[label];
+    const started = Number(b.dataset.started);
+    const meta = [
+      label,
+      started && `up ${formatDuration(Date.now() - started)}`,
+      formatTerminalProc(terminalProcStats[id]),
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    return { id, state, label: session ? sessionDisplayName(session) : id.slice(0, 8), meta };
+  });
+  const ids = items.map((i) => i.id);
+  const notIdle = items.filter((i) => i.state !== 'idle').length;
+  if (notIdle) {
+    const ok = await confirmModal({
+      title: `End ${ids.length} terminals?`,
+      message: 'The Claude Code processes stop. Sessions stay on the board and can be resumed.',
+      items,
+      warn: `${notIdle} ${notIdle === 1 ? 'is' : 'are'} not idle. Work in progress is cut off.`,
+      okLabel: `End ${ids.length} terminals`,
+    });
+    if (!ok) return;
+  }
+  await Promise.all(ids.map((id) => closeTerminalSession(id)));
+  renderTerminalManager();
+}
+
+//#endregion
+
+//#region KANBOT
+// The board's own assistant (docs/kanbot.md): a claude session the server keeps hidden from the list,
+// shown in a popover through a second terminal frame on the board terminal's frame origin.
+const KANBOT_SVG =
+  '<svg viewBox="0 0 16 13" width="16" height="13" shape-rendering="crispEdges" aria-hidden="true">' +
+  '<path fill="#d97757" d="M3 0h10v4h3v3h-3v3H3V7H0V4h3z"/>' +
+  '<path fill="#d97757" d="M4 10h1v3H4zM6 10h1v3H6zM9 10h1v3H9zM11 10h1v3h-1z"/>' +
+  '<path fill="#1f1e1d" d="M5 2h1v2H5zM10 2h1v2h-1z"/></svg>';
+const KANBOT_LAYOUT_KEY = 'cck-kanbot-layout';
+const KANBOT_WIDTH_KEY = 'cck-kanbot-width';
+const kanbotState = {
+  el: null,
+  frame: null,
+  origin: null,
+  ptyId: null,
+  inited: false,
+  attached: false,
+  ended: false,
+  socketId: 0,
+  theme: null,
+  claims: null,
+  returnFocus: null,
+};
+
+function kanbotFocused() {
+  return !!kanbotState.el?.contains(document.activeElement);
+}
+
+function kanbotAvailable() {
+  return !!appConfig.kanbot && terminalAvailable();
+}
+
+function kanbotButton() {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'footer-kanbot';
+  b.title = 'Kanbot, the board assistant';
+  b.setAttribute('aria-label', b.title);
+  b.innerHTML = KANBOT_SVG;
+  b.onclick = toggleKanbot;
+  return b;
+}
+
+function ensureKanbotPopover() {
+  if (kanbotState.el) return kanbotState.el;
+  const el = document.createElement('div');
+  el.className = 'kanbot-popover';
+  el.innerHTML = `<div class="kanbot-head">${KANBOT_SVG}<strong>Kanbot</strong><span class="kanbot-status"></span><button type="button" class="kanbot-collapse" aria-label="Hide" title="Hide, Kanbot keeps running">–</button><button type="button" class="kanbot-dock">${showIcon('dock')}</button><button type="button" class="kanbot-expand"></button><button type="button" class="kanbot-close" aria-label="End" title="End the session, the next open resumes the chat">×</button></div><div class="kanbot-body"></div><div class="panel-resize-handle kanbot-resize"></div>`;
+  el.querySelector('.kanbot-dock').onclick = () => setKanbotLayout(el.classList.contains('docked') ? '' : 'docked');
+  el.querySelector('.kanbot-expand').onclick = () =>
+    setKanbotLayout(el.classList.contains('expanded') ? '' : 'expanded');
+  el.querySelector('.kanbot-collapse').onclick = () => toggleKanbot(false);
+  el.querySelector('.kanbot-close').onclick = endKanbot;
+  const width = store.getItem(KANBOT_WIDTH_KEY);
+  if (width) el.style.setProperty('--kanbot-width', width);
+  initResize(el, el.querySelector('.kanbot-resize'), '--kanbot-width', KANBOT_WIDTH_KEY, 320);
+  document.body.appendChild(el);
+  kanbotState.el = el;
+  setKanbotLayout(store.getItem(KANBOT_LAYOUT_KEY) || '');
+  return el;
+}
+
+function setKanbotLayout(layout) {
+  const el = kanbotState.el;
+  const docked = layout === 'docked';
+  const expanded = layout === 'expanded';
+  el.classList.toggle('docked', docked);
+  el.classList.toggle('expanded', expanded);
+  const dock = el.querySelector('.kanbot-dock');
+  dock.classList.toggle('active', docked);
+  dock.title = docked ? 'Undock' : 'Dock to the right';
+  dock.setAttribute('aria-label', dock.title);
+  dock.setAttribute('aria-pressed', String(docked));
+  const expand = el.querySelector('.kanbot-expand');
+  expand.innerHTML = showIcon(expanded ? 'restore' : 'expand');
+  expand.title = expanded ? 'Restore' : 'Expand';
+  expand.setAttribute('aria-label', expand.title);
+  store.setItem(KANBOT_LAYOUT_KEY, layout);
+  postToKanbotFrame('focus');
+}
+
+function setKanbotStatus(text) {
+  kanbotState.el.querySelector('.kanbot-status').textContent = text;
+}
+
+function postToKanbotFrame(t, data) {
+  kanbotState.frame?.contentWindow?.postMessage({ ...data, type: TERMINAL_MSG + t }, kanbotState.origin);
+}
+
+function kanbotOnScreen() {
+  return kanbotState.attached && !!kanbotState.el?.classList.contains('visible');
+}
+
+function endKanbot() {
+  const id = kanbotState.ptyId;
+  toggleKanbot(false);
+  kanbotState.ptyId = null;
+  if (id) terminalFetch(apiPath`/api/terminals/${id}`, 'DELETE').catch(() => {});
+}
+
+function setKanbotAttached(on) {
+  kanbotState.attached = on;
+  syncCloseGuard();
+}
+
+function toggleKanbot(force) {
+  const el = ensureKanbotPopover();
+  const show = typeof force === 'boolean' ? force : !el.classList.contains('visible');
+  const wasShown = el.classList.contains('visible');
+  el.classList.toggle('visible', show);
+  if (!show) {
+    const hadFocus = kanbotFocused();
+    postToKanbotFrame('detach');
+    setKanbotAttached(false);
+    const back = kanbotState.returnFocus;
+    kanbotState.returnFocus = null;
+    if (hadFocus) {
+      document.activeElement.blur();
+      if (back === 'terminal') focusTerminalPane();
+      else if (back?.isConnected) back.focus();
+    }
+    return;
+  }
+  if (!wasShown && !kanbotFocused()) {
+    kanbotState.returnFocus = terminalPaneFocused() ? 'terminal' : document.activeElement;
+  }
+  kanbotState.frame?.focus();
+  if (!kanbotState.frame) {
+    const frame = document.createElement('iframe');
+    frame.className = 'kanbot-frame';
+    frame.title = 'Kanbot';
+    frame.allow = 'clipboard-read; clipboard-write';
+    kanbotState.origin = termFrame.sameOrigin ? location.origin : terminalFrameOrigin();
+    frame.src = `${kanbotState.origin}/terminal.html#p=${encodeURIComponent(location.origin)}`;
+    kanbotState.frame = frame;
+    el.querySelector('.kanbot-body').appendChild(frame);
+    return;
+  }
+  if (kanbotState.inited) {
+    postToKanbotFrame('refresh');
+    postToKanbotFrame('focus');
+    if (!kanbotState.attached) openKanbot();
+  }
+}
+
+async function openKanbot() {
+  setKanbotStatus('starting…');
+  let res;
+  try {
+    res = await terminalFetch('/api/kanbot/start', 'POST', {});
+  } catch {
+    setKanbotStatus('board unreachable, retrying…');
+    setTimeout(() => {
+      if (kanbotState.el.classList.contains('visible') && !kanbotState.attached) openKanbot();
+    }, 3000);
+    return;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return setKanbotStatus(data.error || `error ${res.status}`);
+  kanbotState.ended = false;
+  kanbotState.ptyId = data.ptyId;
+  setKanbotStatus(data.sessionId ? data.sessionId.slice(0, 8) : '');
+  postToKanbotFrame('open', {
+    socketId: ++kanbotState.socketId,
+    reset: true,
+    hello: { token: terminalToken, id: data.ptyId, mode: 'auto' },
+  });
+  postToKanbotFrame('focus');
+}
+
+window.addEventListener('message', (e) => {
+  if (!kanbotState.frame || e.source !== kanbotState.frame.contentWindow || e.origin !== kanbotState.origin) return;
+  const m = e.data;
+  if (typeof m?.type !== 'string' || !m.type.startsWith(TERMINAL_MSG)) return;
+  const t = m.type.slice(TERMINAL_MSG.length);
+  if (t === 'loaded') {
+    const themeOptions = terminalThemeOptions();
+    kanbotState.inited = false;
+    kanbotState.claims = null;
+    kanbotState.theme = JSON.stringify(themeOptions);
+    postToKanbotFrame('init', terminalInitOptions(themeOptions));
+    return;
+  }
+  if (t === 'term') {
+    kanbotState.inited = true;
+    const claims = keyClaims();
+    sendFrameClaims(kanbotState, claims, JSON.stringify(claims), postToKanbotFrame);
+    // The first show created the frame after its focus call, so the frame takes focus once it is up.
+    if (kanbotState.el.classList.contains('visible')) kanbotState.frame.focus();
+    openKanbot();
+    return;
+  }
+  if (t === 'key') {
+    replayKey(m, document.getElementById('terminal-key-proxy'));
+    return;
+  }
+  if (m.socketId !== kanbotState.socketId) return;
+  if (t === 'ws') {
+    if (m.msg?.t === 'ready') setKanbotAttached(true);
+    else if (m.msg?.t === 'exit') {
+      setKanbotAttached(false);
+      kanbotState.ended = true;
+      setKanbotStatus('ended, reopen to resume');
+    } else if (m.msg?.t === 'error') setKanbotStatus(m.msg.msg || 'error');
+  } else if (t === 'close') {
+    setKanbotAttached(false);
+    if (!kanbotState.ended && kanbotState.el.classList.contains('visible')) setTimeout(openKanbot, 1000);
+  }
+});
+
+//#endregion
+
+//#region ASK
+// The question the session in the embedded terminal asks with the ask tool; the tool call waits for
+// the answer. Hiding keeps the frame, so a half-filled card comes back as it was. Only an answer, a
+// skip or the agent's interrupt ends the question.
+const ASK_MSG = 'cck-ask:';
+const askState = { terminalId: null, ask: null, frame: null, frameH: 0, hidden: false, busy: false, seq: 0 };
+
+// Runs inside the card as source text, ahead of the card's own scripts. The JSON round trip makes
+// the answer cloneable, and a value that is not JSON throws in the card.
+function askBridge() {
+  window.cck = {
+    send: (data) => parent.postMessage({ type: 'cck-ask:send', data: JSON.parse(JSON.stringify(data ?? null)) }, '*'),
+  };
+}
+
+const ASK_BRIDGE_TAG = `<script>(${askBridge})();</script>`;
+
+function askEl() {
+  return document.getElementById('ask-modal');
+}
+
+function isAskOnScreen() {
+  return !!askState.ask && !askEl().hidden;
+}
+
+function syncAsk(tid) {
+  if (tid === askState.terminalId) return;
+  askState.terminalId = tid;
+  setAsk(null);
+  if (tid) loadAsk(tid);
+}
+
+async function loadAsk(tid) {
+  const seq = ++askState.seq;
+  const data = await getJson(apiPath`/api/terminals/${tid}/ask`, null, { cache: 'no-store' });
+  if (seq !== askState.seq || tid !== askState.terminalId) return;
+  const a = data?.ask ?? null;
+  if (a?.id !== askState.ask?.id) setAsk(a);
+}
+
+function setAsk(a) {
+  const modal = askEl();
+  const body = modal.querySelector('.ask-body');
+  Object.assign(askState, { ask: a, frame: null, frameH: 0, hidden: false, busy: false });
+  body.replaceChildren();
+  if (a) {
+    modal.querySelector('.ask-title').textContent = a.title;
+    modal.querySelector('.ask-box').dataset.size = a.size;
+    if (a.content == null) {
+      body.innerHTML = '<p class="ask-missing">The card file is gone. Skip, so the agent stops waiting.</p>';
+    } else {
+      const frame = createPreviewFrame('ask-frame', showSrcdoc(a.content, 0, ASK_BRIDGE_TAG), SHOW_SANDBOX);
+      frame.addEventListener('load', () => {
+        if (askState.frame === frame && !askState.hidden) frame.focus();
+      });
+      askState.frame = frame;
+      body.append(frame);
+    }
+  }
+  renderAsk();
+}
+
+function renderAsk() {
+  const a = askState.ask;
+  askEl().hidden = !a || askState.hidden;
+  const chip = document.getElementById('ask-reopen');
+  chip.hidden = !a || !askState.hidden;
+  if (a) {
+    chip.querySelector('.ask-reopen-n').textContent = a.title;
+    chip.title = `Open the question: ${a.title}`;
+  }
+  layoutAsk();
+}
+
+// A full card fills the modal; a smaller one takes its content's height, up to the terminal's.
+function layoutAsk() {
+  const frame = askState.frame;
+  const box = askEl().querySelector('.ask-box');
+  if (!frame || askEl().hidden || box.dataset.size === 'full') return;
+  const host = document.getElementById('terminal-host');
+  const chrome = box.querySelector('.ask-head').offsetHeight + box.querySelector('.ask-foot').offsetHeight + 2;
+  frame.style.height = `${Math.max(SHOW_MIN_H, Math.min(askState.frameH || SHOW_MIN_H, host.clientHeight - 32 - chrome))}px`;
+}
+
+function hideAsk() {
+  askState.hidden = true;
+  renderAsk();
+  focusTerminalPane();
+}
+
+function reopenAsk() {
+  askState.hidden = false;
+  renderAsk();
+  askState.frame?.focus();
+}
+
+async function endAsk(body) {
+  const a = askState.ask;
+  const tid = askState.terminalId;
+  if (!a || !tid || askState.busy) return;
+  askState.busy = true;
+  try {
+    const res = await terminalFetch(apiPath`/api/terminals/${tid}/ask/${a.id}`, 'POST', body);
+    if (res.status === 404) showToast('The question is no longer open');
+    else if (!res.ok) {
+      const out = await res.json().catch(() => ({}));
+      return showToast(out.error || `Send failed (HTTP ${res.status})`, 'error');
+    }
+    if (askState.ask?.id !== a.id) return;
+    setAsk(null);
+    focusTerminalPane();
+  } catch {
+    showToast('Failed to send the answer', 'error');
+  } finally {
+    if (askState.ask?.id === a.id) askState.busy = false;
+  }
+}
+
+function answerAsk(data) {
+  return endAsk({ status: 'answered', data });
+}
+
+function onAskOpened(d) {
+  if (typeof d.terminalId !== 'string') return;
+  if (d.terminalId === askState.terminalId) return loadAsk(d.terminalId);
+  if (askState.terminalId || !wantsTerminal()) return;
+  if (!terminalIds.has(currentSessionId)) showState.lookup = null;
+  syncShowCard();
+}
+
+function onAskClosed(d) {
+  if (d.terminalId !== askState.terminalId || askState.ask?.id !== d.id) return;
+  if (d.status === 'cancelled') showToast('The agent stopped waiting for the answer');
+  setAsk(null);
+}
+
+// A script can send without a click, so a send needs transient user activation, as a card action does.
+window.addEventListener('message', (e) => {
+  const frame = askState.frame;
+  if (!frame || e.source !== frame.contentWindow || typeof e.data?.type !== 'string') return;
+  if (e.data.type === `${ASK_MSG}send`) {
+    if (navigator.userActivation?.isActive) answerAsk(e.data.data);
+  } else if (e.data.type === `${SHOW_MSG}height`) {
+    askState.frameH = Number(e.data.h) || askState.frameH;
+    layoutAsk();
+  }
+});
+
+function initAsk() {
+  const modal = askEl();
+  modal.addEventListener('click', (e) => {
+    const cmd = e.target === modal ? 'hide' : e.target.closest('[data-ask]')?.dataset.ask;
+    if (cmd === 'hide') hideAsk();
+    else if (cmd === 'skip') endAsk({ status: 'dismissed' });
+  });
+  document.getElementById('ask-reopen').addEventListener('click', reopenAsk);
+  // Capture, ahead of the board's own Escape. The card's frame hands Escape back as a key on the frame.
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.key !== 'Escape' || modal.hidden || !modal.contains(e.target)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      hideAsk();
+    },
+    true,
+  );
+  window.addEventListener('resize', layoutAsk);
+}
+//#endregion
+
+//#region SHOW
+// The card the session in the embedded terminal posts to with the show tool. It belongs to the
+// terminal, not the session: /clear and the --resume picker change the session id, the terminal id
+// stays. Nothing here runs until the terminal view shows a terminal that has posts.
+const SHOW_MSG = 'cck-show:';
+const SHOW_SIZE_KEY = 'cck-show-size-v2';
+const SHOW_VIEW_KEY = 'cck-show-view-v1';
+const SHOW_MIN_W = 280;
+const SHOW_MIN_H = 120;
+const SHOW_INSET = 8;
+const SHOW_SANDBOX = 'allow-scripts allow-forms';
+const SHOW_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; frame-src 'none'; connect-src 'none'; form-action 'none'";
+// The card's token contract (the show skill lists these names) mapped to the board's theme vars.
+const SHOW_TOKENS = {
+  '--color-bg': '--bg-surface',
+  '--color-bg-subtle': '--bg-deep',
+  '--color-text': '--text-primary',
+  // --text-muted is too faint for body text on the card.
+  '--color-text-muted': '--text-tertiary',
+  '--color-border': '--border',
+  '--color-accent': '--accent',
+  '--color-info': '--info',
+  '--color-success': '--success',
+  '--color-warning': '--warning',
+  '--color-danger': '--danger',
+};
+// One chart palette for every color theme, checked against each theme in show-card.test.js.
+const SHOW_PALETTE = {
+  light: {
+    series: ['#2a78d6', '#c4511c', '#008a72', '#ad6f00', '#c4467a', '#008300', '#4a3aa7', '#d03a3a'],
+    ramp: ['#5598e7', '#2a78d6', '#1c5cab', '#104281', '#0a2b57'],
+  },
+  dark: {
+    series: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#2a9a2a', '#9085e9', '#e66767'],
+    ramp: ['#256abf', '#3987e5', '#6da7ec', '#9ec5f4', '#cde2fb'],
+  },
+};
+// Bundled fonts do not load in the opaque-origin srcdoc.
+const SHOW_FONTS = {
+  '--font-sans': "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  '--font-mono': "ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace",
+};
+const SHOW_FRAME_BASE =
+  `html{color-scheme:var(--color-scheme);font-size:13px}body{margin:0;padding:.9rem 1.1rem;background:var(--color-bg);color:var(--color-text);font:1rem/1.5 var(--font-sans)}` +
+  'h1,h2,h3,h4{margin:0 0 .5em;font-weight:600;line-height:1.3}h1{font-size:1.25rem}h2{font-size:1.1rem}h3,h4{font-size:1rem}p{margin:0 0 .6em}a{color:var(--color-accent)}' +
+  'code,pre,kbd{font-family:var(--font-mono);font-size:.92rem}pre{padding:.6rem .8rem;border-radius:6px;background:var(--color-bg-subtle);border:1px solid var(--color-border);overflow:auto}' +
+  'table{border-collapse:collapse;font-size:.92rem}th,td{border:1px solid var(--color-border);padding:.3rem .6rem;text-align:left}th{background:var(--color-bg-subtle)}hr{border:0;border-top:1px solid var(--color-border)}' +
+  'button{font:inherit;font-size:.92rem;padding:.4rem .9rem;border-radius:6px;border:1px solid var(--color-border);background:transparent;color:var(--color-text);cursor:pointer}' +
+  'button.primary{background:var(--color-accent);border-color:var(--color-accent);color:#fff}input,select,textarea{font:inherit;color:var(--color-text)}';
+const SHOW_MERMAID_INIT =
+  '%%{init: {"themeVariables": {"fontSize": "12px"}, "flowchart": {"nodeSpacing": 28, "rankSpacing": 28, "padding": 6}}}%%\n';
+const SHOW_ICONS = {
+  prev: '<path d="M15 18l-6-6 6-6"/>',
+  next: '<path d="M9 18l6-6-6-6"/>',
+  collapse: '<path d="M18 15l-6-6-6 6"/>',
+  uncollapse: '<path d="M6 9l6 6 6-6"/>',
+  expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
+  restore: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
+  dock: '<path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM15 3v18"/>',
+  clear: '<path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>',
+  close: '<path d="M18 6L6 18M6 6l12 12"/>',
+  pane: '<use href="#icon-pane"/>',
+};
+
+// PTY id → terminal id, from the terminal list. A terminal started after the last list read is
+// missing until a post asks for it.
+const terminalIds = new Map();
+const showState = {
+  terminalId: null,
+  sessionId: null,
+  posts: [],
+  idx: 0,
+  closed: false,
+  expanded: false,
+  collapsed: false,
+  marked: new Set(),
+  rendered: null,
+  frame: null,
+  frameH: 0,
+  frameY: 0,
+  frameFocused: false,
+  listSeq: 0,
+  bodySeq: 0,
+  lookup: null,
+  review: null,
+  path: null,
+};
+let showSize = store.readJson(SHOW_SIZE_KEY);
+// Terminal id → { closed?, collapsed?, expanded? }; a terminal with no entry yet starts collapsed. Ids gone from the terminal list are pruned.
+const showViews = store.readJson(SHOW_VIEW_KEY, {});
+// Older boards stored the string 'collapsed' or 'expanded'.
+for (const [tid, v] of Object.entries(showViews)) if (typeof v === 'string') showViews[tid] = { [v]: true };
+const SHOW_VIEW_FLAGS = ['closed', 'collapsed', 'expanded'];
+let showHostObserver = null;
+
+function showCardEl() {
+  return document.getElementById('show-card');
+}
+
+// Focus that moves from the terminal's frame (another process) into the card's frame leaves the
+// board's activeElement on the terminal frame and fires no event here, so the card's frame
+// reports its own focus and blur (showBridge).
+function isShowCardFocused() {
+  if (showState.frameFocused && showState.frame?.isConnected) return true;
+  const el = document.activeElement;
+  return el?.tagName !== 'IFRAME' && !!el?.closest('#show-card .show-body');
+}
+
+// Deferred, because a blur in the board comes before activeElement changes.
+function syncShowFocus() {
+  setTimeout(() => showCardEl()?.classList.toggle('focused', isShowCardFocused()));
+}
+
+// An HTML card's own keys and scroll keys reach it only inside its frame.
+function focusShowBody() {
+  const frame = showState.frame;
+  if (frame?.isConnected && frame.loaded) frame.focus();
+  else showCardEl()?.querySelector('.show-body')?.focus();
+}
+
+const SHOW_KEY_COMMANDS = { 'alt+Enter': 'expand', 'alt+w': 'close' };
+
+// The body keeps focus, because a render replaces an HTML card's frame.
+function showCardKey(e) {
+  if (matchKey(e, '[', ']')) {
+    showCommand(e.key === ']' ? 'next' : 'prev');
+    focusShowBody();
+    return true;
+  }
+  const combo = ClaudeHub.comboOf(e);
+  const cmd = combo === 'Escape' ? (showState.expanded ? 'expand' : 'collapse') : SHOW_KEY_COMMANDS[combo];
+  if (cmd) {
+    showCommand(cmd);
+    if (cmd === 'expand') focusShowBody();
+    else focusTerminalPane();
+    return true;
+  }
+  const p = showState.posts[showState.idx];
+  if (combo !== 'ctrl+d' || !p) return false;
+  confirmModal({
+    title: 'Remove this post?',
+    message: 'It is taken off the card.',
+    chip: p.title,
+    okLabel: 'Remove post',
+  }).then((ok) => {
+    if (!ok || showState.posts[showState.idx]?.id !== p.id) return;
+    showCommand('remove');
+    focusAfterShowRemove();
+  });
+  return true;
+}
+
+// The removed post took the focused body or button with it.
+function focusAfterShowRemove() {
+  if (showState.posts.length) focusShowBody();
+  else focusTerminalPane();
+}
+
+function showIcon(name) {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SHOW_ICONS[name]}</svg>`;
+}
+
+// An empty list can be a host that has not restored its terminals yet, so it prunes nothing.
+function rememberTerminalIds(list) {
+  terminalIds.clear();
+  for (const t of list) if (t.terminalId) terminalIds.set(t.id, t.terminalId);
+  if (!terminalIds.size) return;
+  const live = new Set(terminalIds.values());
+  const gone = Object.keys(showViews).filter((tid) => !live.has(tid));
+  if (!gone.length) return;
+  for (const tid of gone) delete showViews[tid];
+  store.writeJson(SHOW_VIEW_KEY, showViews);
+}
+
+// A session resumed after its terminal ended runs under the same PTY id in a new terminal, with a
+// new terminal id, so the next view change looks it up again.
+function forgetEndedTerminals() {
+  for (const pty of terminalIds.keys()) if (!runningTerminals.has(pty)) terminalIds.delete(pty);
+  if (!runningTerminals.has(showState.lookup)) showState.lookup = null;
+}
+
+// `post` is the id of the card on screen; a view without one keeps the saved id, so an empty list
+// while a terminal's posts load does not forget it.
+function setShowView(tid, view, post) {
+  const set = SHOW_VIEW_FLAGS.filter((f) => view[f]);
+  const old = showViews[tid];
+  const shown = post ?? old?.post;
+  if (old && old.post === shown && SHOW_VIEW_FLAGS.every((f) => !!old[f] === set.includes(f))) return;
+  showViews[tid] = Object.fromEntries(set.map((f) => [f, true]));
+  if (shown) showViews[tid].post = shown;
+  store.writeJson(SHOW_VIEW_KEY, showViews);
+}
+
+function saveShowView() {
+  if (showState.terminalId) setShowView(showState.terminalId, showState, showState.posts[showState.idx]?.id);
+}
+
+function resetShowPosts() {
+  showState.posts = [];
+  showState.marked.clear();
+  showState.rendered = null;
+}
+
+// Runs on every view change, so it returns at once unless the shown terminal changed.
+function syncShowCard() {
+  const pty = wantsTerminal() ? currentSessionId : null;
+  if (pty && runningTerminals.has(pty) && !terminalIds.has(pty) && showState.lookup !== pty) {
+    showState.lookup = pty;
+    loadTerminals().catch(() => {});
+  }
+  const tid = pty ? (terminalIds.get(pty) ?? null) : null;
+  syncAsk(tid);
+  if (tid === showState.terminalId) return;
+  const view = (tid && showViews[tid]) || { collapsed: true };
+  Object.assign(showState, { terminalId: tid, sessionId: null, idx: 0 });
+  for (const f of SHOW_VIEW_FLAGS) showState[f] = !!view[f];
+  resetShowPosts();
+  renderShow();
+  if (tid) loadShowPosts(tid, { shownId: view.post }).then((ok) => ok && renderShow());
+}
+
+// Opens `shownId` (by default the card on screen) when the list still holds it, else the newest.
+async function loadShowPosts(tid, { shownId = showState.posts[showState.idx]?.id } = {}) {
+  const seq = ++showState.listSeq;
+  const data = await getJson(apiPath`/api/terminals/${tid}/show`, null, { cache: 'no-store' });
+  if (seq !== showState.listSeq || tid !== showState.terminalId) return false;
+  showState.sessionId = data?.sessionId ?? null;
+  showState.posts = Array.isArray(data?.posts) ? data.posts : [];
+  const at = showState.posts.findIndex((p) => p.id === shownId);
+  showState.idx = at < 0 ? Math.max(0, showState.posts.length - 1) : at;
+  return true;
+}
+
+async function onShowPosted(d) {
+  if (typeof d.terminalId !== 'string') return;
+  const view = showViews[d.terminalId];
+  if (!d.replaced && view?.closed && d.terminalId !== showState.terminalId)
+    setShowView(d.terminalId, { ...view, closed: false });
+  if (!showState.terminalId) {
+    if (!wantsTerminal()) return;
+    if (!terminalIds.has(currentSessionId)) showState.lookup = null;
+    syncShowCard();
+    return;
+  }
+  if (d.terminalId !== showState.terminalId) return;
+  if (d.sessionId !== showState.sessionId) resetShowPosts();
+  if (!(await loadShowPosts(d.terminalId))) return;
+  const i = showState.posts.findIndex((p) => p.id === d.id);
+  if (i < 0) return renderShow();
+  if (d.replaced) {
+    if (i !== showState.idx) showState.marked.add(d.id);
+    else if (showState.rendered) showState.rendered.stale = true;
+    return renderShow();
+  }
+  showState.idx = i;
+  showState.closed = false;
+  renderShow({ flash: true });
+}
+
+function onShowCleared(d) {
+  if (d.terminalId !== showState.terminalId) return;
+  resetShowPosts();
+  renderShow();
+}
+
+function dropShowPost(id) {
+  const i = showState.posts.findIndex((p) => p.id === id);
+  if (i < 0) return false;
+  showState.posts.splice(i, 1);
+  showState.marked.delete(id);
+  if (i < showState.idx || showState.idx >= showState.posts.length) showState.idx--;
+  return true;
+}
+
+function onShowRemoved(d) {
+  if (d.terminalId !== showState.terminalId || d.sessionId !== showState.sessionId) return;
+  if (dropShowPost(d.id)) renderShow();
+}
+
+function showHeaderHtml(p) {
+  const n = showState.posts.length;
+  const i = showState.idx;
+  const key = p.key ? `<span class="show-sep">·</span><span class="show-key">${escapeHtml(p.key)}</span>` : '';
+  const btn = (cmd, icon, title, disabled = false) =>
+    `<button type="button" class="show-btn${cmd === 'remove' ? ' remove' : ''}" data-show="${escapeHtml(cmd)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"${disabled ? ' disabled' : ''}>${showIcon(icon)}</button>`;
+  const { collapsed, expanded } = showState;
+  return `<span class="show-nav"><span class="show-title" title="${escapeHtml(p.title)}">${escapeHtml(p.title)}</span>${key}</span>
+    <span class="show-pager">${btn('prev', 'prev', 'Previous post', i === 0)}<span class="show-pos">${i + 1}/${n}</span>${btn('next', 'next', 'Next post', i === n - 1)}</span>
+    <span class="show-actions">${btn('pane', 'pane', 'Open in a pane of the session')}${btn('collapse', collapsed ? 'uncollapse' : 'collapse', collapsed ? 'Show the post' : 'Collapse to the header · Esc')}${btn('expand', expanded ? 'restore' : 'expand', expanded ? 'Back to the card · Alt+Enter or Esc' : 'Fill the terminal · Alt+Enter')}${btn('remove', 'clear', 'Remove this post · Ctrl+D · Shift+click clears every post')}${btn('close', 'close', 'Close until the next post · Alt+W')}</span>`;
+}
+
+function showTicksHtml() {
+  return showState.posts
+    .map((p, i) => {
+      const marked = showState.marked.has(p.id);
+      const title = marked ? `${p.title} · updated` : p.title;
+      return `<button type="button" class="show-tick${i === showState.idx ? ' on' : ''}${marked ? ' dot' : ''}" data-go="${i}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></button>`;
+    })
+    .join('');
+}
+
+function renderShow({ flash = false } = {}) {
+  const n = showState.posts.length;
+  if (n) showState.idx = Math.min(Math.max(0, showState.idx), n - 1);
+  saveShowView();
+  const card = showCardEl();
+  const chip = document.getElementById('show-reopen');
+  const open = n > 0 && !showState.closed;
+  chip.hidden = !n || open;
+  chip.querySelector('.show-reopen-n').textContent = `show · ${n}`;
+  card.classList.toggle('open', open);
+  if (!open) {
+    showState.rendered = null;
+    showState.frame = null;
+    setShowReview(null);
+    showHostObserver?.disconnect();
+    showHostObserver = null;
+    card.replaceChildren();
+    return;
+  }
+  const p = showState.posts[showState.idx];
+  showState.marked.delete(p.id);
+  card.classList.toggle('expanded', showState.expanded && !showState.collapsed);
+  card.classList.toggle('collapsed', showState.collapsed);
+  if (!card.firstChild) {
+    card.innerHTML = `<header class="show-head"></header><div class="show-ticks"></div><div class="show-body" tabindex="-1"></div>
+      <aside class="review-panel show-review" hidden></aside>
+      <div class="show-grip" title="Resize · double-click to fit"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1 1v8h8M1 5l4 4"/></svg></div>`;
+  }
+  card.querySelector('.show-head').innerHTML = showHeaderHtml(p);
+  card.querySelector('.show-ticks').innerHTML = showTicksHtml();
+  const r = showState.rendered;
+  if (!showState.collapsed && (!r || r.stale || r.id !== p.id || r.updatedAt !== p.updatedAt)) {
+    renderShowBody(p, r?.id === p.id);
+  }
+  if (flash) {
+    card.classList.remove('flash');
+    void card.offsetWidth;
+    card.classList.add('flash');
+  }
+  if (!showHostObserver) {
+    showHostObserver = new ResizeObserver(() => layoutShow());
+    showHostObserver.observe(document.getElementById('terminal-host'));
+    showHostObserver.observe(card.querySelector('.show-review'));
+  }
+  layoutShow();
+}
+
+async function renderShowBody(p, samePost) {
+  const seq = ++showState.bodySeq;
+  const tid = showState.terminalId;
+  showState.rendered = { id: p.id, updatedAt: p.updatedAt };
+  const data = await getJson(apiPath`/api/terminals/${tid}/show/${p.id}`, null, { cache: 'no-store' });
+  const card = showCardEl();
+  const body = card.querySelector('.show-body');
+  if (seq !== showState.bodySeq || !body) return;
+  showState.path = data && !data.waiting ? data.path : null;
+  const html = data?.kind === 'html' && !data.waiting;
+  // A new frame or document drops focus to the page, and Ctrl +/- then zooms the terminal.
+  const refocus = isShowCardFocused() ? focusShowBody : () => {};
+  card.classList.toggle('html', html);
+  if (html) {
+    const restoreY = samePost && showState.frame ? showState.frameY : 0;
+    showState.frameY = restoreY;
+    if (samePost && showState.frame?.isConnected) {
+      showState.frame.srcdoc = showSrcdoc(data.content, restoreY);
+    } else {
+      showState.frameH = 0;
+      body.replaceChildren(createShowFrame(p.title, showSrcdoc(data.content, 0)));
+    }
+    refocus();
+    setShowReview(showReviewOpts(p, data, body, showState.frame));
+    layoutShow();
+    return;
+  }
+  showState.frame = null;
+  const keepScroll = samePost ? body.scrollTop : 0;
+  const md = document.createElement('div');
+  md.className = 'show-md modal-zoomable';
+  if (!data) md.innerHTML = '<p class="show-gone">This post is gone.</p>';
+  else if (data.waiting) md.innerHTML = '<p class="show-gone">Waiting for content.</p>';
+  else renderPreviewContent(md, data.file || p.file || '', data.content ?? '', data.kind);
+  for (const pre of md.querySelectorAll('pre.mermaid')) {
+    if (/^\s*(---|%%\{)/.test(pre.textContent)) continue;
+    pre.textContent = SHOW_MERMAID_INIT + pre.textContent;
+  }
+  body.replaceChildren(md);
+  refocus();
+  body.scrollTop = keepScroll;
+  setShowReview(data && !data.waiting ? showReviewOpts(p, data, md, null) : null);
+  layoutShow();
+}
+
+function showReviewOpts(p, data, contentEl, frame) {
+  const opts = fileReviewOpts(data.path ?? '', data.kind, contentEl, frame);
+  if (!opts) return null;
+  const card = showCardEl();
+  return {
+    ...opts,
+    panelEl: card.querySelector('.show-review'),
+    hostEl: card,
+    sessionId: showState.sessionId,
+    source: {
+      kind: 'show',
+      id: p.id,
+      label: `the show card "${p.title}"`,
+      locate: data.path ? `The card shows ${data.path}.` : null,
+    },
+  };
+}
+
+// The card's review is the base review in the terminal view, like a pane's elsewhere.
+function setShowReview(opts) {
+  if (showState.review === opts) return;
+  showState.review = opts;
+  syncPaneReview();
+}
+
+// No allow-popups: it opens window.open as a way out. The CSP blocks fetch and remote sub-resources,
+// but not navigation or WebRTC; the real guard is that only the terminal's own agent can post.
+function createShowFrame(title, srcdoc) {
+  const frame = createPreviewFrame('show-frame', srcdoc, SHOW_SANDBOX);
+  frame.title = title;
+  // Focus given before the first document loads stays on the frame element, out of the document's
+  // keys, and the document never reports focus or blur, so the body holds focus until then.
+  frame.addEventListener('load', () => {
+    const waited = !frame.loaded && document.activeElement === frame.parentElement;
+    frame.loaded = true;
+    if (waited) frame.focus();
+    else if (frame === document.activeElement) frame.contentWindow?.focus();
+  });
+  showState.frame = frame;
+  showState.frameFocused = false;
+  return frame;
+}
+
+function showTokens() {
+  const css = getComputedStyle(document.body);
+  const mode = isLightTheme() ? 'light' : 'dark';
+  const out = { ...SHOW_FONTS, '--color-scheme': mode };
+  for (const [token, v] of Object.entries(SHOW_TOKENS)) out[token] = css.getPropertyValue(v).trim();
+  for (const [kind, colors] of Object.entries(SHOW_PALETTE[mode])) {
+    for (const [i, c] of colors.entries()) out[`--color-${kind}-${i + 1}`] = c;
+  }
+  return out;
+}
+
+function showTokenCss() {
+  return Object.entries(showTokens())
+    .map(([k, v]) => `${k}:${v}`)
+    .join(';');
+}
+
+function withHeadFirst(content, head) {
+  const at = /<head[^>]*>/i.exec(content) || /<html[^>]*>/i.exec(content) || /<!doctype[^>]*>/i.exec(content);
+  const inject = at?.[0].toLowerCase().startsWith('<head') ? head : `<head>${head}</head>`;
+  const cut = at ? at.index + at[0].length : 0;
+  return content.slice(0, cut) + inject + content.slice(cut);
+}
+
+// The board's scrollbar rules do not reach into a frame, which would show the OS default.
+// Grey, not a board token, because the page paints its own background.
+const FRAME_SCROLLBAR_CSS = ':where(html){scrollbar-width:thin;scrollbar-color:rgba(128,128,128,.45) transparent}';
+
+// A whole document gets the tokens and base styles first in its head, so its own styles win.
+function showSrcdoc(content, restoreY, extraHead = '') {
+  const head = `<meta http-equiv="Content-Security-Policy" content="${SHOW_CSP}"><style>:root{${showTokenCss()}}${SHOW_FRAME_BASE}${FRAME_SCROLLBAR_CSS}</style>${extraHead}`;
+  const bridge = `<script>(${showBridge})(${Math.max(0, Math.round(restoreY) || 0)}, ${modalZoom});</script>${REVIEW_BRIDGE_TAG}`;
+  if (!/^\s*(<!doctype|<html)/i.test(content)) {
+    return `<!doctype html><html><head><meta charset="utf-8">${head}</head><body>${content}${bridge}</body></html>`;
+  }
+  return withHeadFirst(content, head) + bridge;
+}
+
+// An HTML file preview gets only the tokens, first in its head: its own :root rules win, and
+// a page that declares its defaults in :where(:root) follows the board theme.
+function themedSrcdoc(content) {
+  const head = `<style id="cck-tokens">:root{${showTokenCss()}}${FRAME_SCROLLBAR_CSS}</style>`;
+  return withHeadFirst(content, head) + THEME_BRIDGE_TAG + REVIEW_BRIDGE_TAG;
+}
+
+// Runs inside the preview as source text, so it must not close over anything outside its own body.
+// It rewrites the injected rule, not inline styles, so the page's own :root still wins after a switch.
+function themeBridge(prefix) {
+  addEventListener('message', (e) => {
+    if (e.source !== parent || e.data?.type !== `${prefix}tokens`) return;
+    const rule = document.getElementById('cck-tokens')?.sheet?.cssRules[0];
+    if (!rule) return;
+    for (const [k, v] of Object.entries(e.data.tokens)) rule.style.setProperty(k, v);
+  });
+}
+
+const THEME_BRIDGE_TAG = `<script>(${themeBridge})(${JSON.stringify(SHOW_MSG)});</script>`;
+
+// Runs inside the card as source text, so it must not close over anything outside its own body.
+// Keys and links go through reviewBridge, which the card loads next to this.
+function showBridge(restoreY, textZoom) {
+  const P = 'cck-show:';
+  const send = (msg) => parent.postMessage({ ...msg, type: P + msg.type }, '*');
+  const restore = () => {
+    if (restoreY) scrollTo(0, restoreY);
+  };
+  restore();
+  addEventListener('load', restore);
+  // Zoom, not a root font size, because most cards are sized in px: 1 up to a 480px card, 16/13 at 1000px, at most 18/13.
+  // The board's text zoom (Ctrl +/-) multiplies it; the zoom shrinks innerWidth, so the fit reads the unzoomed width.
+  const fit = () => {
+    const width = innerWidth * (Number.parseFloat(document.documentElement.style.zoom) || 1);
+    const z = Math.min(Math.max((10.2 + width * 0.0058) / 13, 1), 18 / 13) * textZoom;
+    document.documentElement.style.zoom = z !== 1 ? z.toFixed(3) : '';
+  };
+  fit();
+  addEventListener('resize', fit);
+  let lastH = -1;
+  const measure = () => {
+    const b = document.body;
+    const cs = getComputedStyle(b);
+    const h = Math.ceil(b.getBoundingClientRect().height + parseFloat(cs.marginTop) + parseFloat(cs.marginBottom));
+    if (h === lastH) return;
+    lastH = h;
+    send({ type: 'height', h });
+  };
+  new ResizeObserver(measure).observe(document.body);
+  addEventListener('focus', () => send({ type: 'focus', on: true }));
+  addEventListener('blur', () => send({ type: 'focus', on: false }));
+  let raf = 0;
+  addEventListener('scroll', () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      send({ type: 'scroll', y: scrollY });
+    });
+  });
+  addEventListener('message', (e) => {
+    if (e.source !== parent) return;
+    if (e.data?.type === `${P}zoom`) {
+      textZoom = Number(e.data.z) || 1;
+      fit();
+    } else if (e.data?.type === `${P}tokens`) {
+      for (const [k, v] of Object.entries(e.data.tokens)) document.documentElement.style.setProperty(k, v);
+    }
+  });
+}
+
+window.addEventListener('message', (e) => {
+  const frame = showState.frame;
+  if (!frame || e.source !== frame.contentWindow || typeof e.data?.type !== 'string') return;
+  if (e.data.type === `${SHOW_MSG}scroll`) showState.frameY = Number(e.data.y) || 0;
+  else if (e.data.type === `${SHOW_MSG}focus`) {
+    showState.frameFocused = e.data.on === true;
+    syncShowFocus();
+  } else if (e.data.type === `${SHOW_MSG}height`) {
+    showState.frameH = Number(e.data.h) || 0;
+    layoutShow();
+  }
+});
+
+// The same body attributes the terminal theme watches; a markdown card follows the board's CSS.
+// The body's style also changes on every drag, so a push with the same tokens is dropped.
+let sentTokens = '';
+new MutationObserver(() => {
+  postToShowFrames(() => {
+    const tokens = showTokens();
+    const key = JSON.stringify(tokens);
+    if (key === sentTokens) return null;
+    sentTokens = key;
+    return { type: `${SHOW_MSG}tokens`, tokens };
+  });
+}).observe(document.body, { attributes: true, attributeFilter: ['class', 'data-color-theme', 'style'] });
+
+// Builds the message only when a frame is there, because showTokens forces a style recalc.
+function postToShowFrames(makeMsg) {
+  const frames = [showState.frame, ...document.querySelectorAll('.show-pane-frame, .themed-frame, .ask-frame')].filter(
+    (f) => f?.contentWindow,
+  );
+  if (!frames.length) return;
+  const msg = makeMsg();
+  if (!msg) return;
+  for (const f of frames) f.contentWindow.postMessage(msg, '*');
+}
+
+function showFitSize(w, h) {
+  return { w: Math.min(Math.max(360, Math.round(w * 0.4)), 640, w - 2 * SHOW_INSET), h: Math.round(h * 0.6) };
+}
+
+function showClampSize(size, w, h) {
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+  return { w: clamp(size.w, SHOW_MIN_W, w - 2 * SHOW_INSET), h: clamp(size.h, SHOW_MIN_H, h - 2 * SHOW_INSET) };
+}
+
+function layoutShow() {
+  const card = showCardEl();
+  if (!card.classList.contains('open')) return;
+  const host = document.getElementById('terminal-host');
+  const w = host.clientWidth;
+  const h = host.clientHeight;
+  if (!w || !h) return;
+  const fit = showFitSize(w, h);
+  card.style.setProperty('--show-fit-w', `${fit.w}px`);
+  card.style.setProperty('--show-fit-h', `${fit.h}px`);
+  card.style.setProperty('--show-term-font', `${currentTerminalFontSize()}px`);
+  const sized = !!showSize && !showState.expanded && !showState.collapsed;
+  card.classList.toggle('sized', sized);
+  if (sized) {
+    const s = showClampSize(showSize, w, h);
+    card.style.setProperty('--show-w', `${s.w}px`);
+    card.style.setProperty('--show-h', `${s.h}px`);
+  }
+  const frame = showState.frame;
+  if (!frame) return;
+  const peek = !showState.expanded && !sized;
+  const chrome =
+    card.querySelector('.show-head').offsetHeight +
+    card.querySelector('.show-ticks').offsetHeight +
+    card.querySelector('.show-review').offsetHeight +
+    2;
+  frame.style.flex = peek ? 'none' : '1';
+  frame.style.height = peek ? `${Math.min(showState.frameH || SHOW_MIN_H, fit.h - chrome)}px` : '';
+}
+
+async function openShowInPane() {
+  const sid = showState.sessionId;
+  const target = showState.path;
+  if (!sid || !target) return showToast('The post has no file yet');
+  const title = showState.posts[showState.idx]?.title;
+  const onScreen = await postPane(sid, { target, title, show: true, base: getSessionBaseDir(sid) || undefined });
+  toastPaneAdded(sid, onScreen, 'Card');
+}
+
+// `onScreen` is postPane's result: null failed, true is already in view unless the terminal covers it.
+function revealPane(sid, onScreen) {
+  if (onScreen && !wantsTerminal()) syncPanes();
+  else if (sid === currentSessionId && wantsTerminal()) toggleTerminal();
+  else openSession(sid);
+}
+
+function toastPaneAdded(sid, onScreen, label) {
+  if (onScreen === null || (onScreen && !wantsTerminal())) return;
+  showToast(`${label} added as a pane`, 'success', { label: 'Open', onClick: () => revealPane(sid, false) });
+}
+
+function showCommand(cmd) {
+  const tid = showState.terminalId;
+  if (cmd === 'pane') {
+    openShowInPane();
+    return;
+  }
+  if (cmd === 'prev' || cmd === 'next') {
+    const i = showState.idx + (cmd === 'prev' ? -1 : 1);
+    if (i < 0 || i >= showState.posts.length) return;
+    showState.idx = i;
+    showState.collapsed = false;
+  } else if (cmd === 'collapse') showState.collapsed = !showState.collapsed;
+  else if (cmd === 'expand') {
+    showState.expanded = !showState.expanded;
+    showState.collapsed = false;
+  } else if (cmd === 'close') showState.closed = true;
+  else if (cmd === 'remove') {
+    const id = showState.posts[showState.idx]?.id;
+    if (!id) return;
+    dropShowPost(id);
+    terminalFetch(apiPath`/api/terminals/${tid}/show/${id}`, 'DELETE')
+      .then((res) => {
+        if (res.ok || res.status === 404) return;
+        showToast(`Could not remove the post (HTTP ${res.status})`, 'error');
+        loadShowPosts(tid).then((ok) => ok && renderShow());
+      })
+      .catch((e) => showToast(e.message, 'error'));
+  } else if (cmd === 'clear') {
+    resetShowPosts();
+    terminalFetch(apiPath`/api/terminals/${tid}/show`, 'DELETE')
+      .then((res) => {
+        if (!res.ok && res.status !== 404) showToast(`Could not clear the posts (HTTP ${res.status})`, 'error');
+      })
+      .catch((e) => showToast(e.message, 'error'));
+  }
+  renderShow();
+}
+
+function initShowCard() {
+  const card = showCardEl();
+  card.addEventListener('focusin', syncShowFocus);
+  card.addEventListener('focusout', syncShowFocus);
+  // A click on the header gives the card focus, so its keys and zoom apply next. Close and
+  // collapse hide the body and leave focus where it was.
+  card.addEventListener('mousedown', (e) => {
+    if (!e.target.closest('.show-head, .show-ticks')) return;
+    e.preventDefault();
+    if (showState.collapsed || e.target.closest('[data-show="close"], [data-show="collapse"]')) return;
+    focusShowBody();
+  });
+  card.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-show]');
+    if (b) {
+      if (!b.disabled) showCommand(b.dataset.show === 'remove' && e.shiftKey ? 'clear' : b.dataset.show);
+      if (b.dataset.show === 'collapse' && !showState.collapsed) focusShowBody();
+      if (b.dataset.show === 'remove') focusAfterShowRemove();
+      return;
+    }
+    const t = e.target.closest('[data-go]');
+    if (!t) return;
+    showState.idx = Number(t.dataset.go);
+    showState.collapsed = false;
+    renderShow();
+  });
+  // Pointer capture keeps the drag when the pointer crosses the card's frame or the terminal's.
+  card.addEventListener('pointerdown', (e) => {
+    const grip = e.target.closest('.show-grip');
+    if (!grip || e.button !== 0) return;
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const r = card.getBoundingClientRect();
+    const start = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
+    let last = e;
+    let raf = 0;
+    document.body.classList.add('show-resizing');
+    const move = (ev) => {
+      last = ev;
+      raf ||= requestAnimationFrame(() => {
+        raf = 0;
+        showSize = { w: Math.round(start.w + start.x - last.clientX), h: Math.round(start.h + last.clientY - start.y) };
+        layoutShow();
+      });
+    };
+    const up = () => {
+      cancelAnimationFrame(raf);
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      document.body.classList.remove('show-resizing');
+      const host = document.getElementById('terminal-host');
+      if (showSize) showSize = showClampSize(showSize, host.clientWidth, host.clientHeight);
+      store.writeJson(SHOW_SIZE_KEY, showSize);
+      layoutShow();
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
+  });
+  card.addEventListener('dblclick', (e) => {
+    if (!e.target.closest('.show-grip')) return;
+    showSize = null;
+    store.removeItem(SHOW_SIZE_KEY);
+    layoutShow();
+  });
+  document.getElementById('show-reopen').addEventListener('click', () => {
+    showState.closed = false;
+    renderShow({ flash: true });
+  });
+}
+
+//#endregion
+
+//#region NEW_SESSION
+// claude writes no transcript until the first message, so until then the sidebar shows a
+// placeholder built from the form. newSpecs holds one entry per such session; the entry
+// goes when the real session shows up in /api/sessions.
+const NEW_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/;
+const NEW_WORKTREE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const NS_MAX_MATCHES = 8;
+const PLUS_SVG =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+const newSpecs = new Map();
+// Sessions another session started (`dispatch start`), shown where they will stay until
+// their transcript appears. Kept apart from newSpecs: their prompt is already sent.
+const dispatchSpecs = new Map();
+const ns = { projects: [], picked: [], matches: [], idx: -1, folder: '', busy: false, resume: false, images: [] };
+// Must match ATTACHMENT_TYPES and the upload limit in server.js.
+const NS_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const NS_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const NEW_SESSION_STAY_KEY = 'new-session-stay';
+const NEW_SESSION_EDIT_KEY = 'new-session-edit';
+
+const PLACEHOLDER_NAMES = { pick: 'Resume session', dispatch: 'Started session', new: 'New session' };
+const PLACEHOLDER_HINTS = {
+  pick: 'pick a session to resume',
+  dispatch: 'starting',
+  new: 'waiting for your first message',
+  edit: 'press Enter in the terminal to start',
+};
+
+// The parent may be outside the loaded list, so its short id stands in for its name.
+function forkLabel(parentId) {
+  return `Fork of ${sessionDisplayName(sessions.find((s) => s.id === parentId) || { id: parentId })}`;
+}
+
+function placeholderSession(id, spec) {
+  return {
+    id,
+    placeholder: true,
+    mode: spec.mode,
+    edit: !!spec.edit,
+    name: spec.name || (spec.forkOf && forkLabel(spec.forkOf)) || PLACEHOLDER_NAMES[spec.mode] || PLACEHOLDER_NAMES.new,
+    dispatched: spec.mode === 'dispatch' ? { parent: spec.parent || null } : undefined,
+    project: spec.cwd,
+    worktree: spec.worktree ? { repo: spec.cwd, name: spec.worktree === true ? 'new' : spec.worktree } : null,
+    modifiedAt: new Date(spec.startedAt).toISOString(),
+    hasMessages: true,
+    hasRecentActivity: true,
+    taskCount: 0,
+    completed: 0,
+  };
+}
+
+function mergePlaceholders(list) {
+  if (!newSpecs.size && !dispatchSpecs.size) return list;
+  const ids = new Set(list.map((s) => s.id));
+  for (const specs of [newSpecs, dispatchSpecs]) {
+    for (const id of [...specs.keys()]) if (ids.has(id)) specs.delete(id);
+  }
+  const pending = [...newSpecs, ...dispatchSpecs].sort((a, b) => b[1].startedAt - a[1].startedAt);
+  const placeholders = pending.map(([id, spec]) => placeholderSession(id, spec));
+  revealNewPlaceholders(placeholders);
+  return [...placeholders, ...list];
+}
+
+// Ids whose sections were expanded once; a section the user collapses again stays collapsed.
+const revealedPlaceholderIds = new Set();
+
+function revealNewPlaceholders(placeholders) {
+  let changed = false;
+  for (const p of placeholders) {
+    if (revealedPlaceholderIds.has(p.id)) continue;
+    revealedPlaceholderIds.add(p.id);
+    if (uncollapseFor(p)) changed = true;
+  }
+  if (changed) persistCollapsedGroups();
+}
+
+async function loadDispatches() {
+  const data = await getJson('/api/dispatch', null, { cache: 'no-store' });
+  if (!data) return;
+  dispatchSpecs.clear();
+  for (const r of data.running || []) {
+    if (!r.session || sessions.some((s) => s.id === r.session && !s.placeholder)) continue;
+    dispatchSpecs.set(r.session, {
+      mode: 'dispatch',
+      cwd: r.cwd,
+      name: r.name,
+      worktree: r.worktree,
+      group: r.group,
+      parent: r.parent,
+      startedAt: r.startedAt,
+    });
+  }
+}
+
+async function onDispatchUpdate() {
+  await loadDispatches();
+  refreshPlaceholders();
+  fetchSessions(false).catch(() => {});
+}
+
+function refreshPlaceholders() {
+  sessions = mergePlaceholders(sessions.filter((s) => !s.placeholder));
+  renderSessions();
+}
+
+// With no first message there is no transcript, so an ended placeholder leaves nothing to come back to.
+function dropPlaceholder(id) {
+  if (!forgetPlaceholder(id)) return;
+  if (currentSessionId === id && viewMode === 'session') showNoSession();
+  else renderSessions();
+}
+
+function forgetPlaceholder(id) {
+  if (!newSpecs.delete(id)) return false;
+  setTerminalMode(id, false);
+  // Before the socket's close handler runs, or it would reconnect and start the session again.
+  if (termState.sessionId === id) detachTerminal();
+  sessions = sessions.filter((s) => s.id !== id);
+  forgetSwapHistory(id);
+  return true;
+}
+
+function renderPlaceholderCard(session, depth) {
+  const isActive = session.id === currentSessionId && viewMode === 'session';
+  const projectHtml = renderProjectIdentity(session);
+  return `
+          <button onclick="openSession('${escAttrJs(session.id)}')" data-session-id="${escapeHtml(session.id)}" class="session-item session-placeholder ${isActive ? 'active' : ''}${childDepthClass(depth)}" title="${escapeHtml(`${session.id} | ${session.project}`)}">
+            <div class="session-name">${escapeHtml(session.name)}</div>
+            ${projectHtml ? `<div class="session-secondary">${projectHtml}</div>` : ''}
+            ${
+              trustWaiting.has(session.id)
+                ? `<div class="session-waiting"><span class="agent-badge agent-badge-waiting" title="Waiting for user">${ICON_AGENT_WAITING}</span>trust this folder?</div>`
+                : `<div class="session-waiting"><span class="pulse"></span>${PLACEHOLDER_HINTS[session.edit ? 'edit' : session.mode] || PLACEHOLDER_HINTS.new}</div>`
+            }
+          </button>
+        `;
+}
+
+// After a reload the form is gone, but the PTY still runs; its hello options come back from the server.
+async function restorePendingSessions() {
+  document.getElementById('new-session-btn').hidden = !terminalAvailable();
+  const terminals = terminalAvailable() ? loadTerminals() : null;
+  await loadDispatches();
+  try {
+    for (const t of terminals ? await terminals : []) {
+      if ((t.mode !== 'new' && t.mode !== 'pick') || newSpecs.has(t.id) || dispatchSpecs.has(t.id)) continue;
+      newSpecs.set(t.id, {
+        cwd: t.cwd,
+        name: t.name,
+        worktree: t.worktree,
+        mode: t.mode,
+        edit: t.edit,
+        forkOf: t.forkOf,
+        startedAt: t.startedAt,
+      });
+    }
+  } catch (_) {}
+  // Sessions that were already running keep the collapse state saved before the reload.
+  for (const id of [...newSpecs.keys(), ...dispatchSpecs.keys()]) revealedPlaceholderIds.add(id);
+}
+
+async function loadTerminals() {
+  const res = await api('/api/terminals', { cache: 'no-store' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  const list = data.sessions || [];
+  runningTerminals = new Set(list.map((t) => t.id));
+  setTrustWaiting(list.filter((t) => t.awaitingTrust).map((t) => t.id));
+  rememberTerminalIds(list);
+  syncShowCard();
+  pushTerminalClaims();
+  renderActivityChip();
+  return list;
+}
+
+// A dispatched session never had its terminal toggled on, so the dialog would stay out of sight.
+function setTrustWaiting(ids) {
+  const before = trustWaiting;
+  trustWaiting = new Set(ids);
+  for (const id of trustWaiting) {
+    if (before.has(id)) continue;
+    setTerminalMode(id, true);
+    if (id !== currentSessionId || viewMode !== 'session') continue;
+    if (termState.shown && termState.attached) {
+      if (promptAwaitsUser(id)) focusTerminalPane();
+    } else {
+      termState.openedByUser = id;
+      syncTerminal();
+    }
+  }
+}
+
+function setRunningTerminals(ids, awaitingTrust = []) {
+  runningTerminals = new Set(ids);
+  setTrustWaiting(awaitingTrust);
+  forgetEndedTerminals();
+  syncShowCard();
+  pushTerminalClaims();
+  if (ids.some((id) => !sessions.some((s) => s.id === id))) fetchSessions(false).catch(() => {});
+  else renderSessionViews();
+  renderActivityChip();
+}
+
+function showSessionTerminal(sessionId) {
+  setTerminalMode(sessionId, true);
+  if (currentSessionId === sessionId && viewMode === 'session') syncTerminal();
+  else fetchTasks(sessionId);
+}
+
+function openNewSession(folder, resume = false) {
+  if (!terminalAvailable() || document.getElementById('new-session-modal').classList.contains('visible')) return;
+  if (terminalPaneFocused()) leaveTerminalPane();
+  ns.resume = resume;
+  document.querySelector('.new-session-modal').classList.toggle('ns-resume', resume);
+  document.getElementById('ns-title').textContent = resume ? 'Resume session' : 'New session';
+  for (const id of ['ns-name', 'ns-wt-name', 'ns-prompt']) document.getElementById(id).value = '';
+  document.getElementById('ns-wt').checked = false;
+  document.getElementById('ns-model').value = '';
+  document.getElementById('ns-effort').value = '';
+  clearNewSessionImages();
+  document.getElementById('ns-stay').checked = store.getItem(NEW_SESSION_STAY_KEY) === 'true';
+  document.getElementById('ns-edit').checked = store.getItem(NEW_SESSION_EDIT_KEY) === 'true';
+  setNewSessionError('');
+  const session = viewMode === 'session' ? sessions.find((s) => s.id === currentSessionId) : null;
+  const current = session?.worktree?.repo || session?.project;
+  setNewSessionFolder(folder || current || '');
+  document.getElementById('new-session-modal').classList.add('visible');
+  const input = document.getElementById('ns-folder');
+  input.focus();
+  input.select();
+  loadProjects().then((list) => {
+    ns.projects = list
+      .filter((p) => !p.temp)
+      .sort((a, b) => (b.modifiedAt || '').localeCompare(a.modifiedAt || ''))
+      .map((p) => p.path);
+    if (!ns.folder) setNewSessionFolder(input.value, true);
+    if (folderListOpen()) renderFolderList();
+  });
+}
+
+function closeNewSession() {
+  hideModalOverlay('new-session-modal');
+  closeFolderList();
+  closeImagePreview();
+  clearNewSessionImages();
+  promptVoice.rec?.abort();
+}
+
+function addNewSessionImages(files) {
+  for (const file of files) {
+    if (!NS_IMAGE_TYPES.includes(file.type)) {
+      setNewSessionError(`${file.name || 'File'}: use a PNG, JPEG, GIF or WebP image.`);
+      continue;
+    }
+    if (file.size > NS_IMAGE_MAX_BYTES) {
+      setNewSessionError(`${file.name || 'Image'}: larger than ${NS_IMAGE_MAX_BYTES / 1024 / 1024} MB.`);
+      continue;
+    }
+    ns.images.push({ file, url: URL.createObjectURL(file) });
+  }
+  renderNewSessionImages();
+}
+
+function removeNewSessionImage(i) {
+  const [img] = ns.images.splice(i, 1);
+  if (img) URL.revokeObjectURL(img.url);
+  renderNewSessionImages();
+}
+
+function clearNewSessionImages() {
+  for (const img of ns.images) URL.revokeObjectURL(img.url);
+  ns.images = [];
+  renderNewSessionImages();
+}
+
+function renderNewSessionImages() {
+  const strip = document.getElementById('ns-images');
+  strip.hidden = !ns.images.length;
+  strip.innerHTML = ns.images
+    .map(
+      (img, i) =>
+        `<button type="button" class="ns-thumb" data-preview="${i}" title="${escapeHtml(img.file.name || 'Pasted image')}"><img src="${escapeHtml(img.url)}" alt=""><span class="ns-thumb-remove" data-remove="${i}" title="Remove" aria-label="Remove image">×</span></button>`,
+    )
+    .join('');
+}
+
+function openImagePreview(i) {
+  const img = ns.images[i];
+  if (!img) return;
+  const box = document.getElementById('ns-lightbox');
+  box.querySelector('img').src = img.url;
+  box.hidden = false;
+}
+
+function closeImagePreview() {
+  const box = document.getElementById('ns-lightbox');
+  if (box.hidden) return false;
+  box.hidden = true;
+  box.querySelector('img').removeAttribute('src');
+  return true;
+}
+
+async function uploadNewSessionImage(sessionId, file) {
+  const r = await newSessionPost(`/api/terminal/attachments/${encodeURIComponent(sessionId)}`, file, 'Upload failed');
+  if (r.error) throw new Error(r.error);
+  return r.path;
+}
+
+async function withImagePaths(id, prompt) {
+  const paths = await Promise.all(ns.images.map((img) => uploadNewSessionImage(id, img.file)));
+  const list = `Attached images:\n${paths.map((p) => `- ${p}`).join('\n')}`;
+  return prompt ? `${prompt}\n\n${list}` : list;
+}
+
+function knownFolders() {
+  return [...new Set([...ns.picked, ...ns.projects])];
+}
+
+// The field holds free text; a folder counts as chosen only when the text is a known project
+// or a folder the dialog returned, because those are the only ones the server accepts.
+// The sidebar's projects count too, so a prefilled folder is usable before /api/projects answers.
+function setNewSessionFolder(value, keepList) {
+  const input = document.getElementById('ns-folder');
+  input.value = value;
+  const known = knownFolders().includes(value) || sessions.some((s) => !s.placeholder && s.project === value);
+  ns.folder = value && known ? value : '';
+  if (!keepList) closeFolderList();
+  renderNewSessionForm();
+}
+
+function folderRank(path, q) {
+  const name = pathBasename(path).toLowerCase();
+  if (name === q) return 0;
+  if (name.startsWith(q)) return 1;
+  if (name.includes(q)) return 2;
+  return path.toLowerCase().includes(q) ? 3 : 4;
+}
+
+function rankFolders(paths, query) {
+  const q = query.toLowerCase();
+  return paths
+    .filter((p) => fuzzyMatch(p, query))
+    .map((p) => ({ p, r: folderRank(p, q) }))
+    .sort((a, b) => a.r - b.r)
+    .map((x) => x.p);
+}
+
+function renderFolderList() {
+  const input = document.getElementById('ns-folder');
+  const list = document.getElementById('ns-folder-list');
+  const query = input.value.trim();
+  const all = knownFolders();
+  ns.matches = (query && query !== ns.folder ? rankFolders(all, query) : all).slice(0, NS_MAX_MATCHES);
+  if (ns.idx >= ns.matches.length) ns.idx = ns.matches.length - 1;
+  list.innerHTML = ns.matches.length
+    ? ns.matches
+        .map(
+          (p, i) =>
+            `<div class="ns-option${i === ns.idx ? ' active' : ''}" role="option" data-idx="${i}" aria-selected="${i === ns.idx}"><span class="ns-option-name">${escapeHtml(pathBasename(p))}</span><span class="ns-option-path">${escapeHtml(p)}</span></div>`,
+        )
+        .join('')
+    : '<div class="ns-empty"><span>No project matches</span><button type="button" class="btn btn-secondary ns-browse" data-browse>Browse…</button></div>';
+  list.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+}
+
+function moveFolderHighlight(step) {
+  const n = ns.matches.length;
+  if (!n) return;
+  ns.idx = (ns.idx + step + n) % n;
+  for (const row of document.querySelectorAll('#ns-folder-list .ns-option')) {
+    const on = Number(row.dataset.idx) === ns.idx;
+    row.classList.toggle('active', on);
+    row.setAttribute('aria-selected', on);
+  }
+}
+
+function closeFolderList() {
+  document.getElementById('ns-folder-list').hidden = true;
+  document.getElementById('ns-folder').setAttribute('aria-expanded', 'false');
+  ns.idx = -1;
+}
+
+function folderListOpen() {
+  return !document.getElementById('ns-folder-list').hidden;
+}
+
+function newSessionValues() {
+  const wtOn = document.getElementById('ns-wt').checked;
+  const wtName = document.getElementById('ns-wt-name').value.trim();
+  const edit = !ns.resume && document.getElementById('ns-edit').checked;
+  return {
+    cwd: ns.folder,
+    name: document.getElementById('ns-name').value.trim() || null,
+    worktree: wtOn ? wtName || true : false,
+    model: document.getElementById('ns-model').value || null,
+    effort: document.getElementById('ns-effort').value || null,
+    prompt: document.getElementById('ns-prompt').value.trim() || null,
+    edit,
+    stay: !ns.resume && !edit && document.getElementById('ns-stay').checked,
+  };
+}
+
+function newSessionProblem(v) {
+  if (v.name && !NEW_NAME_RE.test(v.name))
+    return 'Name: use letters, digits, spaces and . _ -, starting with a letter or digit.';
+  if (typeof v.worktree === 'string' && !NEW_WORKTREE_RE.test(v.worktree))
+    return 'Worktree name: use letters, digits and . _ -, starting with a letter or digit.';
+  return '';
+}
+
+function setNewSessionError(text) {
+  const el = document.getElementById('ns-error');
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+function renderNewSessionForm() {
+  const v = newSessionValues();
+  const wtOn = v.worktree !== false;
+  const wtInput = document.getElementById('ns-wt-name');
+  wtInput.disabled = !wtOn;
+  const hint = document.getElementById('ns-wt-hint');
+  hint.hidden = !wtOn;
+  hint.textContent = `.claude/worktrees/${typeof v.worktree === 'string' ? v.worktree : '<name chosen by Claude>'}`;
+  document.getElementById('ns-stay').disabled = v.edit;
+  const problem = newSessionProblem(v);
+  setNewSessionError(problem);
+  const start = document.getElementById('ns-start');
+  start.disabled = !v.cwd || !!problem || ns.busy;
+  const verb = ns.resume ? 'Resume' : v.edit ? 'Open' : 'Start';
+  start.textContent = v.cwd ? `${verb} in ${pathBasename(v.cwd)}` : verb;
+}
+
+// Resolves to the response body, or to { error } with the message for the dialog.
+async function newSessionPost(url, body, failure) {
+  try {
+    const res = await terminalFetch(url, 'POST', body);
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) return out;
+    return { error: res.status === 401 ? STALE_TOKEN_MSG : out.error || `${failure} (${res.status})` };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+function setNewSessionBusy(on) {
+  ns.busy = on;
+  renderNewSessionForm();
+}
+
+async function browseNewSessionFolder() {
+  if (ns.busy) return;
+  closeFolderList();
+  const btn = document.getElementById('ns-browse');
+  btn.textContent = 'Opening…';
+  setNewSessionBusy(true);
+  const start = ns.folder || ns.picked[0] || ns.projects[0];
+  const r = await newSessionPost('/api/terminal/pick-folder', start ? { start } : null, 'Folder dialog failed');
+  if (r.path) {
+    ns.picked = [r.path, ...ns.picked.filter((p) => p !== r.path)];
+    setNewSessionFolder(r.path);
+  }
+  btn.textContent = 'Browse…';
+  setNewSessionBusy(false);
+  if (r.error) setNewSessionError(r.error);
+  document.getElementById(ns.folder ? fieldAfterFolder() : 'ns-folder').focus();
+}
+
+function fieldAfterFolder() {
+  return ns.resume ? 'ns-start' : 'ns-name';
+}
+
+async function startNewSession() {
+  const v = newSessionValues();
+  if (!v.cwd || newSessionProblem(v) || ns.busy) return;
+  const id = crypto.randomUUID();
+  if (!ns.resume && ns.images.length) {
+    setNewSessionBusy(true);
+    const prompt = await withImagePaths(id, v.prompt).catch((e) => e);
+    setNewSessionBusy(false);
+    if (prompt instanceof Error) return setNewSessionError(prompt.message);
+    v.prompt = prompt;
+  }
+  newSpecs.set(id, { ...(ns.resume ? { cwd: v.cwd } : v), mode: ns.resume ? 'pick' : 'new', startedAt: Date.now() });
+  setTerminalMode(id, true);
+  if (v.stay) return startNewSessionInBackground(id, v);
+  closeNewSession();
+  openPlaceholder(id);
+}
+
+function openPlaceholder(id) {
+  sessions = mergePlaceholders(sessions.filter((s) => !s.placeholder));
+  fetchTasks(id).then(() => sessionsList.querySelector('.session-item.active')?.scrollIntoView({ block: 'nearest' }));
+}
+
+function forkableSession(id) {
+  return terminalAvailable() ? sessions.find((s) => s.id === id && !s.placeholder) : undefined;
+}
+
+// The fork gets its own id up front, so it runs as a new session and needs no rekey.
+function forkSession(parentId) {
+  const parent = forkableSession(parentId);
+  if (!parent) return;
+  const id = crypto.randomUUID();
+  newSpecs.set(id, { cwd: parent.project, forkOf: parentId, mode: 'new', startedAt: Date.now() });
+  setTerminalMode(id, true);
+  openPlaceholder(id);
+}
+
+async function startNewSessionInBackground(id, v) {
+  refreshPlaceholders();
+  setNewSessionBusy(true);
+  const r = await newSessionPost('/api/terminal/start', { id, ...v }, 'Start failed');
+  setNewSessionBusy(false);
+  if (r.error) {
+    dropPlaceholder(id);
+    return setNewSessionError(r.error);
+  }
+  // A server started before the page's code changed ignores the id and picks its own.
+  if (r.session !== id) {
+    const spec = newSpecs.get(id);
+    forgetPlaceholder(id);
+    newSpecs.set(r.session, spec);
+    setTerminalMode(r.session, true);
+    refreshPlaceholders();
+  }
+  closeNewSession();
+}
+
+const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
+const promptVoice = { rec: null };
+
+// Replaces the selection the field had when dictation began, so interim results rewrite
+// themselves in place instead of piling up.
+function togglePromptVoice() {
+  if (promptVoice.rec) return promptVoice.rec.stop();
+  const field = document.getElementById('ns-prompt');
+  const btn = document.getElementById('ns-mic');
+  const before = field.value.slice(0, field.selectionStart);
+  const after = field.value.slice(field.selectionEnd);
+  const lead = before && !/\s$/.test(before) ? ' ' : '';
+  const rec = new SpeechRecognitionApi();
+  rec.lang = navigator.language;
+  rec.interimResults = true;
+  rec.onresult = (e) => {
+    const text = Array.from(e.results, (r) => r[0].transcript).join('');
+    field.value = before + lead + text + after;
+    const caret = before.length + lead.length + text.length;
+    field.setSelectionRange(caret, caret);
+  };
+  rec.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed')
+      setNewSessionError('Microphone access is blocked for this page.');
+    else if (e.error !== 'no-speech' && e.error !== 'aborted') setNewSessionError(`Dictation failed: ${e.error}`);
+  };
+  rec.onend = () => {
+    promptVoice.rec = null;
+    btn.setAttribute('aria-pressed', 'false');
+  };
+  promptVoice.rec = rec;
+  btn.setAttribute('aria-pressed', 'true');
+  field.focus();
+  rec.start();
+}
+
+function pickFolderOption(i) {
+  const path = ns.matches[i];
+  if (!path) return;
+  setNewSessionFolder(path);
+  document.getElementById(fieldAfterFolder()).focus();
+}
+
+function initNewSession() {
+  const modal = document.getElementById('new-session-modal');
+  const input = document.getElementById('ns-folder');
+  const list = document.getElementById('ns-folder-list');
+  input.addEventListener('input', () => {
+    setNewSessionFolder(input.value, true);
+    if (ns.folder) return closeFolderList();
+    ns.idx = 0;
+    renderFolderList();
+  });
+  input.addEventListener('focus', () => {
+    if (!ns.folder) renderFolderList();
+  });
+  input.addEventListener('click', () => {
+    if (!folderListOpen()) renderFolderList();
+  });
+  input.addEventListener('blur', () =>
+    setTimeout(() => {
+      if (!list.contains(document.activeElement)) closeFolderList();
+    }, 0),
+  );
+  // mousedown, not click: the input's blur would close the list before a click lands.
+  list.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    if (e.target.closest('[data-browse]')) return browseNewSessionFolder();
+    const row = e.target.closest('.ns-option');
+    if (row) pickFolderOption(Number(row.dataset.idx));
+  });
+  document.getElementById('ns-wt').addEventListener('change', (e) => {
+    renderNewSessionForm();
+    if (e.target.checked) document.getElementById('ns-wt-name').focus();
+  });
+  document
+    .getElementById('ns-stay')
+    .addEventListener('change', (e) => store.setItem(NEW_SESSION_STAY_KEY, String(e.target.checked)));
+  document.getElementById('ns-edit').addEventListener('change', (e) => {
+    store.setItem(NEW_SESSION_EDIT_KEY, String(e.target.checked));
+    renderNewSessionForm();
+  });
+  for (const id of ['ns-name', 'ns-wt-name', 'ns-prompt', 'ns-model', 'ns-effort']) {
+    document.getElementById(id).addEventListener('input', renderNewSessionForm);
+  }
+  if (SpeechRecognitionApi) {
+    const mic = document.getElementById('ns-mic');
+    mic.hidden = false;
+    // mousedown would blur the textarea and lose the caret the dictation inserts at.
+    mic.addEventListener('mousedown', (e) => e.preventDefault());
+    mic.addEventListener('click', togglePromptVoice);
+  }
+  const prompt = document.getElementById('ns-prompt');
+  const promptField = prompt.closest('.ns-prompt-field');
+  prompt.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    addNewSessionImages(files);
+  });
+  promptField.addEventListener('dragover', (e) => {
+    if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+  });
+  promptField.addEventListener('drop', (e) => {
+    if (!e.dataTransfer?.files.length) return;
+    e.preventDefault();
+    addNewSessionImages(e.dataTransfer.files);
+  });
+  document.getElementById('ns-images').addEventListener('click', (e) => {
+    const remove = e.target.closest('[data-remove]');
+    if (remove) return removeNewSessionImage(Number(remove.dataset.remove));
+    const thumb = e.target.closest('[data-preview]');
+    if (thumb) openImagePreview(Number(thumb.dataset.preview));
+  });
+  document.getElementById('ns-lightbox').addEventListener('click', closeImagePreview);
+  // Bound on the dialog: the global handler returns early on INPUT and TEXTAREA targets.
+  modal.addEventListener('keydown', (e) => {
+    const inFolder = e.target === input;
+    if (e.key === 'Escape') {
+      if (closeImagePreview()) prompt.focus();
+      else if (folderListOpen()) closeFolderList();
+      else closeNewSession();
+    } else if (inFolder && matchKey(e, 'ArrowDown')) {
+      if (!folderListOpen()) renderFolderList();
+      else moveFolderHighlight(1);
+    } else if (inFolder && matchKey(e, 'ArrowUp') && folderListOpen()) {
+      moveFolderHighlight(-1);
+    } else if (inFolder && e.key === 'Enter' && folderListOpen() && ns.idx >= 0 && ns.matches[ns.idx] !== ns.folder) {
+      pickFolderOption(ns.idx);
+    } else if (e.target === prompt && e.key === 'Backspace' && !prompt.value && ns.images.length) {
+      removeNewSessionImage(ns.images.length - 1);
+    } else if (e.key === 'Enter' && (e.target.tagName !== 'TEXTAREA' || e.ctrlKey || e.metaKey)) {
+      if (e.target.tagName === 'BUTTON') return;
+      startNewSession();
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+}
+
+initNewSession();
 //#endregion
 
 //#region PWA
@@ -5637,17 +18028,52 @@ if ('serviceWorker' in navigator) {
 
 //#region INIT
 loadTheme();
-if (localStorage.getItem('sessions-filtersCollapsed') === 'true') {
+if (store.getItem(sectionCollapsedKey('sessions-filters')) === 'true') {
   document.getElementById('sessions-filters').classList.add('collapsed');
   document.getElementById('sessions-chevron').classList.add('rotated');
 }
+
+// Capture phase: a message preview opens its detail on any click, so a fold stops the click first.
+function onCallstackFold(e) {
+  if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+  const fold = e.target.closest?.('code.ct .ct-has');
+  if (!fold) return;
+  // A drag that selects text ends in a click, and a review comment needs the selection.
+  if (e.type === 'click' && (e.target.closest('.ct-loc') || !window.getSelection().isCollapsed)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  treeHighlight.toggleFold(fold);
+}
+document.addEventListener('click', onCallstackFold, true);
+document.addEventListener('keydown', onCallstackFold, true);
+
+// A path:line note opens its file at that line: as a pane of the session, or in the preview with
+// Shift, from a modal, or with no session.
+function onCallstackLoc(e) {
+  const el = e.target.closest?.('code.ct .ct-loc');
+  const loc = el && treeHighlight.parseLoc(el.textContent);
+  // Shift+click extends the selection to the link, so a selection there is the click's own.
+  if (!loc || (!e.shiftKey && !window.getSelection().isCollapsed)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.shiftKey) window.getSelection().collapseToEnd();
+  const onCard = !!el.closest('#show-card');
+  const sid = onCard ? showState.sessionId : currentSessionId;
+  const base = (onCard && showState.posts[showState.idx]?.base) || (sid && getSessionBaseDir(sid)) || undefined;
+  if (e.shiftKey || !sid || el.closest('.modal-overlay')) openPreviewAtLine(loc, base);
+  else openPaneAtLine(sid, loc, base);
+}
+document.addEventListener('click', onCallstackLoc, true);
 
 document.addEventListener('DOMContentLoaded', () => {
   if (typeof marked !== 'undefined' && typeof hljs !== 'undefined') {
     const renderer = new marked.Renderer();
     renderer.code = ({ text, lang }) => {
       if (lang === 'mermaid') {
-        return `<pre class="mermaid" data-original="${escapeHtml(text)}">${escapeHtml(text)}</pre>`;
+        return `<pre class="mermaid">${escapeHtml(text)}</pre>`;
+      }
+      if (treeHighlight.wantsTree(lang, text)) {
+        return treeHighlight.renderTree(text);
       }
       let highlighted;
       if (lang && hljs.getLanguage(lang)) {
@@ -5660,31 +18086,36 @@ document.addEventListener('DOMContentLoaded', () => {
     marked.use({ renderer });
   }
 
-  if (typeof mermaid !== 'undefined') {
-    mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
-    let mermaidPending = false;
-    const mo = new MutationObserver(() => {
-      if (mermaidPending) return;
-      mermaidPending = true;
-      queueMicrotask(() => {
-        mermaidPending = false;
-        initMermaidBlocks();
-      });
+  let mermaidPending = false;
+  const mo = new MutationObserver(() => {
+    if (mermaidPending) return;
+    mermaidPending = true;
+    queueMicrotask(() => {
+      mermaidPending = false;
+      initMermaidBlocks();
     });
-    mo.observe(document.body, { childList: true, subtree: true });
-  }
+  });
+  mo.observe(document.body, { childList: true, subtree: true });
 });
 
 loadSidebarState();
-try {
-  const cg = JSON.parse(localStorage.getItem('collapsedGroups') || '[]');
-  // biome-ignore lint/suspicious/useIterableCallbackReturn: forEach side-effect
-  cg.forEach((p) => collapsedProjectGroups.add(p));
-} catch (_) {}
+for (const p of readStoredList(COLLAPSED_GROUPS_KEY)) collapsedProjectGroups.add(p);
+syncSessionGroups();
+initSessionGroupsDnd();
+initSessionPicker();
+initProjectPicker();
+initShowCard();
+initAsk();
+for (const k of readStoredList(ACTIVITY_FILTER_KEY)) activityFilter.add(k);
 initSidebarResize();
+applyModalZoom();
+loadModalFullscreen();
+initModalResize();
 loadPanelWidths();
-initPanelResize('detail-panel', 'detail-panel-resize', '--detail-panel-width', 'detail-panel-width');
-initPanelResize('message-panel', 'message-panel-resize', '--message-panel-width', 'message-panel-width');
+initPanelResize('detail-panel', 'detail-panel-resize', '--detail-panel-width');
+initDetailLayout();
+initPanelResize('message-panel', 'message-panel-resize', '--message-panel-width');
+initMessagePanelFull();
 
 const msgContentEl = document.getElementById('message-panel-content');
 const jumpLatestBtn = document.createElement('button');
@@ -5721,7 +18152,7 @@ msgContentEl.addEventListener('wheel', function (e) {
   }
 });
 
-const footerState = { version: null, limitsKey: null, timer: null };
+const footerState = { version: null, plugin: null, limitsKey: null, timer: null, resetTimer: null };
 function formatResetIn(epochSec) {
   if (!epochSec) return null;
   const ms = epochSec * 1000 - Date.now();
@@ -5745,6 +18176,12 @@ function makeLimitCell(label, bucket) {
   const strong = document.createElement('strong');
   strong.textContent = pct == null ? '-%' : `${Math.ceil(pct)}%`;
   cell.appendChild(strong);
+  if (reset) {
+    const r = document.createElement('span');
+    r.className = 'footer-limit-reset';
+    r.textContent = ` (${reset})`;
+    cell.appendChild(r);
+  }
   return cell;
 }
 function makeLimitSpan(rl) {
@@ -5756,58 +18193,95 @@ function makeLimitSpan(rl) {
 function renderSidebarFooter(rateLimits) {
   const el = document.getElementById('sidebar-footer');
   if (!el) return;
+  footerState.rl = rateLimits;
   const fh = rateLimits?.five_hour?.used_percentage ?? null;
   const sd = rateLimits?.seven_day?.used_percentage ?? null;
   const children = [];
   if (footerState.version) {
     const v = document.createElement('span');
-    v.textContent = `v${footerState.version}`;
+    v.className = 'footer-version';
+    if (kanbotAvailable()) v.append(kanbotButton());
+    v.append(`v${footerState.version}`);
+    const warn = pluginWarning(footerState.plugin);
+    if (warn) v.append(warn);
     children.push(v);
   }
   if (fh != null || sd != null) children.push(makeLimitSpan(rateLimits));
   el.replaceChildren(...children);
 }
+function pluginWarning(plugin) {
+  const problem =
+    plugin &&
+    {
+      missing: 'The claude-code-kanban plugin is not installed',
+      disabled: `The claude-code-kanban plugin ${plugin.installed} is disabled`,
+      mismatch: `Plugin ${plugin.installed} is installed, this board ships ${plugin.bundled}`,
+    }[plugin.state];
+  if (!problem) return null;
+  const fix =
+    plugin.state === 'disabled'
+      ? 'Enable it with /plugin in Claude Code.'
+      : `Click to copy: ${plugin.installCommand}\nThen restart open sessions, they keep the old hooks.`;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'footer-plugin-warning';
+  btn.textContent = '⚠';
+  btn.title = `${problem} (${plugin.configDir}).\n${fix}`;
+  btn.setAttribute('aria-label', problem);
+  if (plugin.state !== 'disabled') {
+    btn.addEventListener('click', () => copyText(plugin.installCommand, 'install command'));
+  }
+  return btn;
+}
+
 function refreshRateLimits() {
   if (footerState.timer) return;
   footerState.timer = setTimeout(() => {
     footerState.timer = null;
-    fetch('/api/context-status')
-      .then((r) => r.json())
-      .then((all) => {
-        let freshest = null;
-        for (const e of Object.values(all || {})) {
-          if (e?.rate_limits && (!freshest || (e._updatedAt || 0) > (freshest._updatedAt || 0))) freshest = e;
-        }
-        const rl = freshest?.rate_limits || null;
-        const fh = rl?.five_hour?.used_percentage ?? null;
-        const sd = rl?.seven_day?.used_percentage ?? null;
-        const key = `${fh}|${sd}`;
-        if (key === footerState.limitsKey) return;
-        footerState.limitsKey = key;
-        renderSidebarFooter(rl);
-      })
-      .catch(() => {});
+    // The route answers null when no session has reported limits, so failure needs its own value.
+    getJson('/api/rate-limits', false).then((rl) => {
+      if (rl === false) return;
+      scheduleRateLimitReset(rl);
+      const fh = rl?.five_hour?.used_percentage ?? null;
+      const sd = rl?.seven_day?.used_percentage ?? null;
+      const key = `${fh}|${sd}`;
+      if (key === footerState.limitsKey) return;
+      footerState.limitsKey = key;
+      renderSidebarFooter(rl);
+    });
   }, 1500);
 }
-fetch('/api/version')
-  .then((r) => r.json())
-  .then((d) => {
-    footerState.version = d.version;
-    renderSidebarFooter(null);
-    refreshRateLimits();
-  })
-  .catch(() => {});
+
+// No context-update comes when a window resets on an idle board, so refetch at the earliest reset.
+function scheduleRateLimitReset(rl) {
+  clearTimeout(footerState.resetTimer);
+  footerState.resetTimer = null;
+  const resets = Object.values(rl || {})
+    .map((b) => b?.resets_at)
+    .filter((s) => s > 0);
+  if (!resets.length) return;
+  const ms = Math.min(...resets) * 1000 - Date.now() + 1000;
+  footerState.resetTimer = setTimeout(refreshRateLimits, Math.min(Math.max(ms, 0), 2 ** 31 - 1));
+}
+getJson('/api/version', {}).then((d) => {
+  footerState.version = d.version;
+  footerState.plugin = d.plugin ?? null;
+  renderSidebarFooter(null);
+  refreshRateLimits();
+});
 
 const urlState = getUrlState();
-sessionFilter = urlState.filter || 'active';
-showPins = urlState.pins;
-sessionLimit = urlState.limit || '20';
-filterProject = urlState.project || '__recent__';
+const lastView = loadLastView();
+sessionFilter = urlState.filter || FILTER_DEFAULTS.session;
+// The URL wins; the persisted view only fills in when it carries a project key, so 'all' (null)
+// restores as 'all' and pre-existing blobs without the key still default to '__recent__'.
+filterProject = urlState.project || (lastView && 'project' in lastView ? lastView.project : FILTER_DEFAULTS.project);
+ownerFilter = urlState.owner || '';
 searchQuery = urlState.search || '';
 
-loadPreferences();
-pinnedSessionIds = loadPinnedSessions();
-stickySessionIds = loadStickySessions();
+renderFilterState();
+renderZenState();
+syncSessionPins();
 setupEventSource();
 
 if (urlState.search) {
@@ -5815,58 +18289,211 @@ if (urlState.search) {
   document.getElementById('search-clear-btn').classList.add('visible');
 }
 
-fetchSessions()
+{
+  const verbs = ['Clawding…', 'Shuffling cards…', 'Herding tasks…', 'Waking sessions…', 'Sorting the board…'];
+  document.getElementById('boot-verb').textContent = pickRandom(verbs);
+}
+
+getJson('/api/config')
+  .then((c) => {
+    if (c) appConfig = c;
+    if (appConfig.kanbot && footerState.version) renderSidebarFooter(footerState.rl);
+  })
+  .then(restorePendingSessions)
+  .then(() =>
+    fetchSessions(
+      true,
+      urlState.projectView ? null : urlState.session || (lastView?.view === 'session' ? lastView.session : null),
+    ),
+  )
   .then(async () => {
+    const focusZoneBeforeReload = tabStore.getItem(FOCUS_ZONE_KEY);
     if (urlState.projectView) {
       try {
         await fetchProjectView(atob(urlState.projectView));
       } catch (_) {
-        showAllTasks();
+        showNoSession();
       }
     } else if (urlState.session) {
+      restoreTerminalFocus(focusZoneBeforeReload, urlState.session);
       await fetchTasks(urlState.session);
-    } else if (urlState.view === 'all') {
-      showAllTasks();
     } else {
       const last = loadLastView();
       if (last?.view === 'project' && last.projectPath && sessions.some((s) => s.project === last.projectPath)) {
         try {
           await fetchProjectView(last.projectPath);
         } catch (_) {
-          showAllTasks();
+          showNoSession();
         }
       } else if (last?.view === 'session' && last.session && sessions.some((s) => s.id === last.session)) {
+        restoreTerminalFocus(focusZoneBeforeReload, last.session);
         await fetchTasks(last.session);
       } else {
-        showAllTasks();
+        showNoSession();
       }
     }
+    if (focusZoneBeforeReload === 'sidebar') setFocusZone('sidebar');
     if (urlState.messages && currentSessionId) {
+      if (logAutoOpened) setMessagePanelVisible(false);
       toggleMessagePanel();
       // Re-render after panel layout settles so scroll dimensions are correct
       requestAnimationFrame(() => {
         if (currentMessages.length) renderMessages(currentMessages);
       });
     }
+  })
+  .finally(() => {
+    document.body.classList.remove('booting');
+    sessionsList.removeAttribute('aria-busy');
   });
 
 window.addEventListener('popstate', () => {
   const s = getUrlState();
-  sessionFilter = s.filter || 'active';
-  showPins = s.pins;
-  sessionLimit = s.limit || '20';
-  filterProject = s.project || '__recent__';
+  sessionFilter = s.filter || FILTER_DEFAULTS.session;
+  resetSessionPage();
+  filterProject = s.project || FILTER_DEFAULTS.project;
+  ownerFilter = s.owner || '';
   searchQuery = s.search || '';
-  loadPreferences();
+  renderFilterState();
+  // fetchSessions derives query params from the globals set above — refetch so
+  // back/forward across a filter change doesn't render a stale server-filtered list.
+  fetchSessions(false);
   if (s.projectView) {
     try {
       fetchProjectView(atob(s.projectView));
     } catch (_) {
-      showAllTasks();
+      showNoSession();
     }
   } else if (s.session) fetchTasks(s.session);
-  else showAllTasks();
+  else showNoSession();
   if (s.messages !== messagePanelOpen) toggleMessagePanel();
 });
 //#endregion
 
+// #region HUB_INTEGRATION
+const costDetail = (session) => `?view=detail&session=${encodeURIComponent(session)}`;
+const projectQuery = (project) => `?${new URLSearchParams({ project })}`;
+const hub = ClaudeHub.connect({
+  // A function, because the --*-url flags arrive with /api/config after connect.
+  standalone: () => ({
+    ...(appConfig.costUrl && {
+      'session.cost': (p) => p.session && new URL(costDetail(p.session), appConfig.costUrl).href,
+    }),
+    ...(appConfig.marketplaceUrl && {
+      'project.plugins': (p) => p.project && new URL(projectQuery(p.project), appConfig.marketplaceUrl).href,
+    }),
+    ...(appConfig.memoryUrl && {
+      'project.memory': (p) => p.project && new URL(projectQuery(p.project), appConfig.memoryUrl).href,
+    }),
+  }),
+});
+
+hub.onActive((active) => {
+  onHubActive(active);
+  pushTerminalClaims();
+});
+hub.onStatus(pushTerminalClaims);
+hub.onSettings(applyHubSettings);
+
+// session.changed goes out once the switch settles, so arrowing through the list sends one event.
+let publishTimer = 0;
+let publishedSessionId;
+let cliOpenedId = null;
+
+function schedulePublishSession() {
+  clearTimeout(publishTimer);
+  publishTimer = setTimeout(publishSession, 150);
+}
+
+function publishSession() {
+  if (currentSessionId === publishedSessionId) return;
+  const s = currentSessionId ? sessions.find((x) => x.id === currentSessionId) : null;
+  // A placeholder publishes once its real row replaces it.
+  if (currentSessionId && (!s || s.placeholder)) return;
+  publishedSessionId = currentSessionId;
+  const source = currentSessionId === cliOpenedId ? 'cli' : 'user';
+  cliOpenedId = null;
+  hub.publish(
+    'session.changed',
+    s && {
+      sessionId: s.id,
+      project: s.project,
+      name: s.name || null,
+      gitBranch: s.gitBranch || null,
+      live: isSessionActive(s),
+      source,
+    },
+  );
+}
+
+function webUrl(href) {
+  let url;
+  try {
+    url = new URL(href, window.location.href);
+  } catch (_) {
+    return null;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+}
+
+function isLocalHref(href) {
+  return /^file:/i.test(href) || (isAbsolutePath(href) && !href.startsWith('//'));
+}
+
+function openLocalHref(href) {
+  openPreviewByPath(href.replace(/#.*$/, ''), undefined, openFileInEditor);
+}
+
+// Capture, because the modals stop a click's propagation, and stopped here so a link in a message
+// preview does not also open the row. Under the hub the SDK has already opened a web link
+// outside (defaultPrevented), and leaves a link to a hub app alone.
+document.addEventListener(
+  'click',
+  (e) => {
+    if (e.button !== 0) return;
+    const href = e.target.closest?.('a[href]')?.getAttribute('href');
+    if (!href) return;
+    const url = webUrl(href);
+    const external = url && url.origin !== window.location.origin;
+    if (e.defaultPrevented) {
+      if (external) e.stopPropagation();
+      return;
+    }
+    const local = isLocalHref(href);
+    if (!local && (!external || hub.inHub)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (local) openLocalHref(href);
+    else hub.openExternal(url.href);
+  },
+  true,
+);
+
+(function initHubTheme() {
+  const getTheme = () => (document.body.classList.contains('light') ? 'light' : 'dark');
+  const getColorTheme = () => document.body.dataset.colorTheme || 'ember';
+  const report = hub.bindTheme({
+    get: () => ({ theme: getTheme(), colorTheme: getColorTheme() }),
+    set: ({ theme, colorTheme }) => {
+      if (colorTheme !== getColorTheme()) setColorTheme(colorTheme);
+      if (theme !== getTheme()) window.toggleTheme();
+    },
+  });
+  new MutationObserver(report).observe(document.body, {
+    attributes: true,
+    attributeFilter: ['class', 'data-color-theme'],
+  });
+})();
+
+// Under the hub the picker lists the hub's themes, which include the user's own (protocol section 6, rule 5).
+hub.onThemes((themes) => {
+  buildThemeMenu(themes.map((t) => [t.id, t.label]));
+  syncColorThemeSelect(document.body.dataset.colorTheme);
+});
+
+hub.subscribe('project.changed', (p) => {
+  const dirPath = p?.project;
+  if (typeof dirPath !== 'string' || !dirPath || dirPath === filterProject) return;
+  filterByProject(dirPath);
+});
+// #endregion HUB_INTEGRATION

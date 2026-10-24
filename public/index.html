@@ -3,39 +3,61 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Pi Kanban</title>
+  <title>CC Kanban</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231a1a1a'/%3E%3Crect x='4' y='6' width='7' height='20' rx='2' fill='%23e8927c'/%3E%3Crect x='13' y='6' width='7' height='14' rx='2' fill='%23e8927c'/%3E%3Crect x='22' y='6' width='7' height='8' rx='2' fill='%23e8927c'/%3E%3C/svg%3E">
+  <!-- Chrome uses the SVG only in the tab strip; app windows, shortcuts and the
+       history list need a raster icon or they fall back to /favicon.ico and then to
+       whatever icon localhost was last seen with, which is a sibling app's. -->
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#e8e6e3" media="(prefers-color-scheme: light)">
-  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Playfair+Display:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/fonts/fonts.css">
   <link rel="stylesheet" href="/style.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css" id="hljs-theme-dark">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css" id="hljs-theme-light" disabled>
-  <script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <link rel="stylesheet" href="/themes.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js" integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+" crossorigin="anonymous"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.4.16/dist/purify.min.js" integrity="sha384-a7SzOxErzJ3ZpQz0zJ32d67dSitNzPcbfybc/ykU9KJhMgZkwqfSxlhhdJRS+XGL" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.12.0/build/styles/github-dark.min.css" integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous" id="hljs-theme-dark">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.12.0/build/styles/github.min.css" integrity="sha384-eFTL69TLRZTkNfYZOLM+G04821K1qZao/4QLJbet1pP4tcF+fdXq/9CdqAbWRl/L" crossorigin="anonymous" id="hljs-theme-light" disabled>
+  <script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.12.0/build/highlight.min.js" integrity="sha384-wjfDDhOPPdjtva8vWBhWeVprSpmxisEu5aYT3q1JyACqXpdKpo3PWZTMVq24MBix" crossorigin="anonymous"></script>
+  <script>window.__STORAGE_NS__ = null;</script>
+  <script defer src="/project-match.js"></script>
+  <script defer src="/tree-highlight.js"></script>
+  <script defer src="/link-url.js"></script>
+  <script defer src="/group-tree.js"></script>
   <script defer src="/app.js"></script>
 </head>
-<body>
+<body class="booting">
+<script src="/vendor/claude-hub-sdk.js"></script>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="icon-pane" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 4v5"/></symbol>
+  </svg>
   <div id="offline-overlay" class="offline-overlay">
     <div class="offline-card">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-        <rect width="512" height="512" rx="96" fill="#1a1a1a"/>
-        <rect x="64" y="96" width="112" height="320" rx="32" fill="#e8927c"/>
-        <rect x="208" y="96" width="112" height="224" rx="32" fill="#e8927c"/>
-        <rect x="352" y="96" width="112" height="128" rx="32" fill="#e8927c"/>
-      </svg>
+      <div class="clawd-sleep" aria-hidden="true">
+        <svg class="clawd clawd-asleep" viewBox="1 0 16 10" shape-rendering="crispEdges">
+          <rect x="3" y="0" width="12" height="2"/>
+          <rect x="3" y="2" width="2" height="2"/>
+          <rect x="5" y="2" width="1" height="1"/>
+          <rect x="6" y="2" width="6" height="2"/>
+          <rect x="12" y="2" width="1" height="1"/>
+          <rect x="13" y="2" width="2" height="2"/>
+          <rect x="1" y="4" width="16" height="2"/>
+          <rect x="3" y="6" width="12" height="2"/>
+          <rect x="4" y="8" width="1" height="2"/>
+          <rect x="6" y="8" width="1" height="2"/>
+          <rect x="11" y="8" width="1" height="2"/>
+          <rect x="13" y="8" width="1" height="2"/>
+        </svg>
+        <span class="clawd-zzz">z</span>
+      </div>
       <h2>Server Not Running</h2>
-      <p>The dashboard needs the pi-kanban server to stream live task data. Start it with:</p>
-      <code>npx pi-kanban</code>
+      <p>The dashboard needs the Claude Code Kanban server to stream live task data. Start it with:</p>
+      <code>claude-code-kanban</code>
       <button class="btn btn-primary" onclick="location.reload()">Retry Connection</button>
       <div class="offline-status" id="offline-status" aria-live="polite"></div>
     </div>
@@ -45,32 +67,105 @@
     <!-- Sidebar -->
     <aside class="sidebar">
       <header class="sidebar-header">
-        <div class="logo">
-          <div class="logo-mark">
-            <svg viewBox="4 6 16 12" fill="none" stroke="currentColor" stroke-width="2.5">
-              <path d="M5 13l4 4L19 7"/>
-            </svg>
-          </div>
-          <span class="logo-text">Dashboard</span>
-        </div>
-        <button id="sidebar-toggle" class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar">
+        <div id="activity-chips" class="activity-chips"></div>
+        <button id="new-session-btn" class="new-session-pill" onclick="openNewSession()" title="New session (Ctrl+Alt+N)" hidden>+ New</button>
+        <button id="sidebar-toggle" class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar (\)" aria-label="Toggle sidebar">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M15 18l-6-6 6-6"/>
           </svg>
         </button>
-        <div id="connection-status" class="connection">
-          <span class="connection-dot"></span>
-          <span>Connecting</span>
-        </div>
       </header>
 
       <!-- Tasks -->
       <div class="sidebar-section flex-1">
-        <div class="section-header" onclick="toggleSection('sessions-filters', 'sessions-chevron')" style="cursor: pointer;">
-          <span>Sessions</span>
-          <svg id="sessions-chevron" class="collapse-chevron" viewBox="0 0 24 24">
-            <path d="M6 9l6 6 6-6"/>
-          </svg>
+        <div class="section-header">
+          <span class="section-header-label">Sessions</span>
+          <span id="filter-summary" class="filter-summary" title=""></span>
+          <span class="section-header-actions">
+            <button
+              id="zen-mode-btn"
+              class="icon-btn section-btn"
+              onclick="event.stopPropagation(); toggleZenMode()"
+              title="Zen mode: current session only (Ctrl+Shift+Z)"
+              aria-label="Zen mode: current session only"
+              aria-pressed="false"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="7"/>
+                <circle cx="12" cy="12" r="2"/>
+                <path d="M12 1v3M12 20v3M1 12h3M20 12h3"/>
+              </svg>
+            </button>
+            <button
+              id="filter-menu-btn"
+              class="icon-btn section-btn"
+              onclick="toggleFilterMenu(event)"
+              title="Filters"
+              aria-label="Filters"
+              aria-haspopup="true"
+              aria-expanded="false"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 4H4l6.5 8v6l3 2v-8L20 4z"/>
+              </svg>
+            </button>
+            <button
+              class="icon-btn section-btn"
+              onclick="event.stopPropagation(); resetState()"
+              title="Reset filters and clear selection"
+              aria-label="Reset filters and clear selection"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 2v6h6"/>
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L3 8"/>
+              </svg>
+            </button>
+            <button
+              class="icon-btn section-btn"
+              onclick="toggleSection('sessions-filters', 'sessions-chevron')"
+              title="Show or hide search and filters"
+              aria-label="Show or hide search and filters"
+            >
+              <svg id="sessions-chevron" class="collapse-chevron" viewBox="0 0 24 24">
+                <path d="M6 9l6 6 6-6"/>
+              </svg>
+            </button>
+          </span>
+          <div id="filter-menu" class="filter-menu" onclick="event.stopPropagation()">
+            <div class="pf-field">
+              <svg class="pf-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              </svg>
+              <input
+                id="project-filter"
+                type="text"
+                class="pf-input"
+                placeholder="Any project"
+                autocomplete="off"
+                data-bwignore data-1p-ignore data-lpignore="true"
+                spellcheck="false"
+                role="combobox"
+                aria-expanded="true"
+                aria-controls="project-filter-options"
+                aria-autocomplete="list"
+                aria-label="Project. Type part of a path, or pick a project."
+                oninput="typeProjectFilter(this.value)"
+              />
+              <button
+                id="project-recent-btn"
+                type="button"
+                class="pf-recent"
+                onclick="toggleRecentProjects()"
+                aria-pressed="false"
+                title="Projects with activity in the last 24 hours"
+              >24h</button>
+            </div>
+            <ul id="project-filter-options" class="pf-list" role="listbox" aria-label="Projects"></ul>
+            <div class="pf-seg" role="radiogroup" aria-label="Sessions">
+              <button type="button" role="radio" data-session-filter="active" onclick="filterBySessions('active')">Active</button>
+              <button type="button" role="radio" data-session-filter="all" onclick="filterBySessions('all')">All sessions</button>
+            </div>
+          </div>
         </div>
         <div id="sessions-filters" class="collapsible-section">
           <div class="search-container">
@@ -79,6 +174,8 @@
               type="text"
               class="search-input"
               placeholder="Search tasks, sessions, projects..."
+              autocomplete="off"
+              data-bwignore data-1p-ignore data-lpignore="true"
               oninput="handleSearch(this.value)"
             />
             <button id="search-clear-btn" class="search-clear" onclick="clearSearch()" title="Clear search" aria-label="Clear search">
@@ -87,38 +184,13 @@
               </svg>
             </button>
           </div>
-          <div class="filter-row">
-            <select id="project-filter" class="filter-dropdown" onchange="filterByProject(this.value)" aria-label="Filter by project">
-              <option value="">All Projects</option>
-            </select>
-            <select id="session-filter" class="filter-dropdown" onchange="filterBySessions(this.value)" aria-label="Filter by session status">
-              <option value="all">All Sessions</option>
-              <option value="active">Active</option>
-            </select>
-            <label class="filter-checkbox-label" id="show-pins-label" title="Include pinned sessions in Active filter">
-              <input type="checkbox" id="show-pins" onchange="toggleShowPins(this.checked)" />
-              <span class="filter-pins-btn">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><path d="M5 10l7-7 7 7"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
-                Pins
-              </span>
-            </label>
-          </div>
-          <div class="filter-row">
-            <select id="session-limit" class="filter-dropdown" onchange="changeSessionLimit(this.value)" aria-label="Number of sessions to show">
-              <option value="10">Show 10</option>
-              <option value="20">Show 20</option>
-              <option value="50">Show 50</option>
-              <option value="all">Show All</option>
-            </select>
-            <button class="icon-btn reset-btn" onclick="resetState()" title="Reset all filters" aria-label="Reset all filters">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                <path d="M3 12a9 9 0 1 1 9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-                <path d="M3 22v-6h6"/>
-              </svg>
-            </button>
-          </div>
         </div>
-        <div id="sessions-list" class="sessions-list"></div>
+        <div id="sessions-list" class="sessions-list" aria-busy="true">
+          <div class="session-skeleton"><span></span><span></span></div>
+          <div class="session-skeleton"><span></span><span></span></div>
+          <div class="session-skeleton"><span></span><span></span></div>
+          <div class="session-skeleton"><span></span><span></span></div>
+        </div>
       </div>
 
       <div class="sidebar-footer" id="sidebar-footer"></div>
@@ -127,11 +199,37 @@
 
     <!-- Main -->
     <main class="main">
-      <div id="no-session" class="empty-state">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+      <div class="boot-splash" aria-hidden="true">
+        <svg class="clawd clawd-jump" viewBox="1 0 16 10" shape-rendering="crispEdges">
+          <g id="clawd-shape">
+            <rect x="3" y="0" width="12" height="2"/>
+            <rect x="3" y="2" width="2" height="2"/>
+            <rect x="6" y="2" width="6" height="2"/>
+            <rect x="13" y="2" width="2" height="2"/>
+            <rect x="1" y="4" width="16" height="2"/>
+            <rect x="3" y="6" width="12" height="2"/>
+            <rect x="4" y="8" width="1" height="2"/>
+            <rect x="6" y="8" width="1" height="2"/>
+            <rect x="11" y="8" width="1" height="2"/>
+            <rect x="13" y="8" width="1" height="2"/>
+          </g>
         </svg>
-        <p>Select a session to view tasks</p>
+        <p id="boot-verb">Clawding…</p>
+      </div>
+      <div id="no-session" class="empty-state idle-board">
+        <div class="idle-ghost" aria-hidden="true">
+          <div><span></span><span></span><span></span></div>
+          <div><span></span><span></span></div>
+          <div><span></span><span></span><span></span><span></span></div>
+        </div>
+        <div class="idle-glow" aria-hidden="true"><span></span><span></span></div>
+        <div class="idle-content">
+          <div class="idle-clawd" aria-hidden="true">
+            <svg class="clawd" viewBox="1 0 16 10" shape-rendering="crispEdges"><use href="#clawd-shape"/></svg>
+          </div>
+          <p class="idle-title">Select a session to view tasks</p>
+          <div class="idle-hint sp-hint"><kbd>↑</kbd><kbd>↓</kbd> move <span>·</span> <kbd>Enter</kbd> open <span>·</span> <kbd>?</kbd> shortcuts</div>
+        </div>
       </div>
 
       <div id="session-view" class="session-view">
@@ -147,7 +245,12 @@
               </div>
               <span id="progress-percent" class="progress-text">0%</span>
             </div>
-            <button id="message-toggle" class="icon-btn" onclick="toggleMessagePanel()" title="Session log (L)" aria-label="Toggle session log">
+            <button id="terminal-toggle" class="icon-btn" onclick="event.shiftKey ? openTerminalManager() : toggleTerminal()" title="Show / hide terminal (Ctrl+`) · Focus (Alt+`) · End (Alt+Shift+`) · Shift+click or Ctrl+Shift+` for all terminals" aria-label="Toggle terminal" style="display: none;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+              </svg>
+            </button>
+            <button id="message-toggle" class="icon-btn" onclick="toggleMessagePanel()" title="Session log (Shift+L)" aria-label="Toggle session log">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
               </svg>
@@ -162,7 +265,11 @@
                 <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
               </svg>
             </button>
-            <button id="theme-toggle" class="icon-btn" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
+            <span class="icon-btn theme-picker" id="themePickerBtn" title="Color theme" onclick="toggleThemeMenu(event)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+              <div class="theme-menu" id="themeMenu"></div>
+            </span>
+            <button id="theme-toggle" class="icon-btn" onclick="toggleTheme()" title="Toggle theme (T)" aria-label="Toggle theme">
               <svg id="theme-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
               </svg>
@@ -178,7 +285,7 @@
                 <circle cx="12" cy="17" r="0.5" fill="currentColor"/>
               </svg>
             </button>
-            <a href="https://github.com/NikiforovAll/pi-kanban" target="_blank" class="icon-btn" title="View on GitHub" aria-label="View on GitHub">
+            <a href="https://github.com/NikiforovAll/claude-code-kanban" target="_blank" class="icon-btn" title="View on GitHub" aria-label="View on GitHub">
               <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
                 <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
               </svg>
@@ -186,7 +293,33 @@
           </div>
         </header>
 
+        <div id="pane-strip" class="pane-strip" role="tablist" aria-label="Session panes">
+          <div id="pane-pin" class="pane-pin"></div>
+          <div id="pane-tabs" class="pane-tabs"></div>
+          <button id="pane-add" class="icon-btn pane-add" title="Add pane (paste a URL or a file path, or a linked doc)" aria-label="Add pane">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <div class="pane-tools">
+            <button id="pane-split-btn" class="icon-btn pane-split-btn" title="Split with the tab before it (|)" aria-label="Split panes" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+            </button>
+            <button id="pane-reload" class="icon-btn pane-tool" title="Reload pane" aria-label="Reload pane">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg>
+            </button>
+            <button id="pane-open" class="icon-btn pane-tool" title="Open in new tab" aria-label="Open pane in new tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div id="pane-split" class="pane-split">
+        <div id="board-side" class="board-side">
         <div class="kanban" id="main-content">
+          <div id="owner-filter-bar" class="owner-filter-bar">
+            <select id="owner-filter" class="filter-dropdown" onchange="filterByOwner(this.value)" aria-label="Filter by team member">
+              <option value="">All Members</option>
+            </select>
+          </div>
           <div class="kanban-column" aria-label="Pending tasks">
             <div class="column-header">
               <span class="column-dot pending"></span>
@@ -221,6 +354,51 @@
           </div>
           <div class="agent-footer-content" id="agent-footer-content"></div>
         </div>
+        </div>
+        <div id="pane-divider" class="pane-divider" title="Drag to resize · drag to an edge to unsplit · double-click to reset"></div>
+        <div id="pane-views" class="pane-views"></div>
+        <div id="pane-drop" class="pane-drop"><div data-side="l"></div><div data-side="r"></div></div>
+        </div>
+        <div id="terminal-pane" class="terminal-pane">
+          <div class="terminal-bar">
+            <span id="terminal-status" class="terminal-status"></span>
+            <button id="ask-reopen" class="show-reopen ask-reopen" type="button" hidden>
+              <span class="ask-dot" aria-hidden="true">?</span>
+              <span class="ask-reopen-n"></span>
+            </button>
+            <button id="show-reopen" class="show-reopen" type="button" title="Show the overlay" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M13 4v7h8"/></svg>
+              <span class="show-reopen-n">show</span>
+            </button>
+          </div>
+          <div id="terminal-prompt" class="terminal-prompt"></div>
+          <div id="terminal-boot" class="terminal-boot" aria-hidden="true">
+            <svg class="clawd clawd-jump" viewBox="1 0 16 10" shape-rendering="crispEdges"><use href="#clawd-shape"/></svg>
+            <p id="terminal-boot-verb"></p>
+            <p class="terminal-boot-slow">Slow to connect. Press <kbd>R</kbd> to reconnect.</p>
+          </div>
+          <div id="terminal-host" class="terminal-host">
+            <section id="show-card" class="show-card" aria-label="Show overlay"></section>
+            <div id="ask-modal" class="ask-modal" hidden>
+              <section class="ask-box" role="dialog" aria-modal="true" aria-labelledby="ask-title">
+                <header class="ask-head">
+                  <span class="ask-dot" aria-hidden="true">?</span>
+                  <span id="ask-title" class="ask-title"></span>
+                  <span class="ask-hint">Esc hides</span>
+                  <button type="button" class="ask-x" data-ask="hide" title="Hide. The question stays open." aria-label="Hide">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </header>
+                <div class="ask-body"></div>
+                <footer class="ask-foot">
+                  <span>The agent waits for your answer.</span>
+                  <button type="button" data-ask="skip">Skip</button>
+                </footer>
+              </section>
+            </div>
+          </div>
+          <textarea id="terminal-key-proxy" class="terminal-key-proxy" tabindex="-1" aria-hidden="true"></textarea>
+        </div>
       </div>
     </main>
 
@@ -230,11 +408,12 @@
       <header class="detail-header">
         <h3>Task Details</h3>
         <div style="display: flex; gap: 8px; align-items: center;">
-          <button id="delete-task-btn" class="icon-btn" title="Delete task (D)" aria-label="Delete task" style="color: #ef4444; border-color: #ef4444; display: none;">
+          <button id="delete-task-btn" class="icon-btn icon-btn-danger" title="Delete task (D)" aria-label="Delete task" style="display: none;">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
             </svg>
           </button>
+          <button id="expand-detail" class="detail-close detail-expand" type="button"></button>
           <button id="close-detail" class="detail-close" aria-label="Close detail panel">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M6 18L18 6M6 6l12 12"/>
@@ -253,6 +432,9 @@
         <button class="icon-btn" onclick="openLiveLatestMessage()" title="Follow latest message (Shift+M)" aria-label="Follow latest message">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         </button>
+        <button id="message-panel-full-btn" class="icon-btn" onclick="toggleMessagePanelFull()" title="Expand to full width" aria-label="Expand to full width" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+        </button>
         <button class="detail-close" onclick="toggleMessagePanel()" aria-label="Close message panel">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M6 18L18 6M6 6l12 12"/>
@@ -269,12 +451,15 @@
 
   <!-- Message Detail Modal -->
   <div id="msg-detail-modal" class="modal-overlay" onclick="closeMsgDetailModal()">
-    <div class="modal" onclick="event.stopPropagation()" style="max-width: 860px; width: 90vw; max-height: 90vh; display: flex; flex-direction: column;">
+    <div class="modal msg-detail-dialog review-host" tabindex="-1" onclick="event.stopPropagation()">
       <div class="modal-header">
         <h3 class="modal-title" id="msg-detail-title">Message</h3>
         <div style="display:flex;gap:4px;align-items:center;">
           <button id="msg-detail-agent-btn" class="icon-btn" aria-label="View Agent" title="View Agent" style="display:none" onclick="closeMsgDetailModal();showAgentModal(this.dataset.agentId)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="4" y="10" width="16" height="10" rx="2"/><circle cx="9" cy="15" r="1"/><circle cx="15" cy="15" r="1"/><path d="M12 2v4"/><path d="M2 14h2"/><path d="M20 14h2"/></svg>
+          </button>
+          <button id="msg-detail-pane-btn" class="icon-btn" aria-label="Open in a pane" title="Open in a pane" style="display:none" onclick="openMsgInPane()">
+            <svg fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><use href="#icon-pane"/></svg>
           </button>
           <button id="msg-detail-pin-btn" class="icon-btn" aria-label="Pin message" title="Pin message" onclick="togglePinFromModal()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
@@ -285,7 +470,7 @@
           <button class="icon-btn" aria-label="Open in editor" title="Open in editor" onclick="openMsgInEditor()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           </button>
-          <button id="msg-detail-fullscreen-btn" class="icon-btn" aria-label="Toggle fullscreen" title="Toggle fullscreen" onclick="toggleModalFullscreen('msg-detail-modal')">
+          <button id="msg-detail-modal-fullscreen-btn" class="icon-btn" aria-label="Toggle fullscreen" title="Toggle fullscreen" onclick="toggleModalFullscreen('msg-detail-modal')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
           </button>
           <button class="modal-close" aria-label="Close" onclick="closeMsgDetailModal()">
@@ -294,19 +479,26 @@
         </div>
       </div>
       <div class="modal-body" style="flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden;">
-        <div id="msg-detail-body" class="rendered-md" style="word-break: break-word; font-size: 13px; line-height: 1.6; overflow-y: auto; flex: 0 1 auto; min-height: 0; padding-right: 8px;"></div>
+        <div class="preview-split">
+          <div id="msg-detail-body" class="rendered-md modal-zoomable"></div>
+          <aside id="msg-review-panel" class="review-panel" hidden></aside>
+        </div>
         <div id="msg-detail-meta" style="margin-top: 12px; font-size: 11px; color: var(--text-muted); flex-shrink: 0;"></div>
       </div>
+      <div id="msg-detail-waiting-footer"></div>
     </div>
   </div>
 
-  <!-- Markdown Preview Modal -->
+  <!-- File Preview Modal (markdown rendered inline, HTML in a sandboxed iframe) -->
   <div id="preview-modal" class="modal-overlay" style="z-index:10002;" onclick="closePreviewModal()">
-    <div class="modal preview-modal-dialog" onclick="event.stopPropagation()">
+    <div class="modal preview-modal-dialog review-host" tabindex="-1" onclick="event.stopPropagation()">
       <div class="modal-header">
         <h3 class="modal-title" id="preview-modal-title">Preview</h3>
         <div style="display:flex;gap:4px;align-items:center;">
-          <button id="preview-link-btn" class="icon-btn" aria-label="Link to current session" title="Link to current session" onclick="togglePreviewSessionLink()">
+          <button id="preview-pane-btn" class="icon-btn" aria-label="Open in a pane" title="Open in a pane" onclick="openPreviewInPane()">
+            <svg fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><use href="#icon-pane"/></svg>
+          </button>
+          <button id="preview-link-btn" class="icon-btn" aria-label="Link to the session" title="Link to the session" onclick="togglePreviewSessionLink()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
           </button>
           <button class="icon-btn" aria-label="Open in editor" title="Open in editor" onclick="openPreviewInEditor()">
@@ -320,237 +512,124 @@
           </button>
         </div>
       </div>
-      <div class="modal-body" style="flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden;">
-        <div id="preview-modal-body" class="rendered-md" style="word-break: break-word; font-size: 13px; line-height: 1.6; overflow-y: auto; flex: 0 1 auto; min-height: 0; padding-right: 8px;"></div>
-        <div id="preview-modal-meta" style="margin-top: 12px; font-size: 11px; color: var(--text-muted); flex-shrink: 0;"></div>
+      <div class="modal-body">
+        <div class="preview-split">
+          <div id="preview-modal-body" class="rendered-md modal-zoomable"></div>
+          <aside id="preview-review-panel" class="review-panel" hidden></aside>
+        </div>
+        <div id="preview-modal-meta"></div>
       </div>
     </div>
   </div>
 
   <!-- Help Modal -->
   <div id="help-modal" class="modal-overlay" onclick="closeHelpModal()">
-    <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal modal-help" onclick="event.stopPropagation()">
       <div class="modal-header">
         <h3 class="modal-title">Keyboard Shortcuts</h3>
+        <a class="help-docs" id="help-docs" href="https://nikiforovall.blog/claude-code-kanban/" target="_blank" rel="noopener">Docs ↗</a>
         <button class="modal-close" aria-label="Close dialog" onclick="closeHelpModal()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 6L6 18M6 6l12 12"/>
           </svg>
         </button>
       </div>
+      <div class="help-bar">
+        <div class="help-tabs" id="help-tabs" role="tablist" aria-label="Shortcut groups"></div>
+        <input type="search" id="help-filter" class="form-input help-filter" placeholder="Filter shortcuts" aria-label="Filter shortcuts" autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false">
+      </div>
       <div class="modal-body">
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px;">
-          <div style="display: grid; gap: 16px; align-content: start;">
-            <div>
-              <h4 style="margin: 0 0 8px 0; color: var(--text-primary); font-size: 14px; font-weight: 600;">Global</h4>
-              <table style="width: 100%; font-size: 13px;">
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">?</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Show keyboard shortcuts</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Esc</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Close panels or cancel</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Tab</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Toggle sidebar / board focus</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">[</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Toggle sidebar collapse</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">R</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Reload page</td>
-                </tr>
-              </table>
-            </div>
-            <div>
-              <h4 style="margin: 0 0 8px 0; color: var(--text-primary); font-size: 14px; font-weight: 600;">Navigation</h4>
-              <table style="width: 100%; font-size: 13px;">
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">J</kbd> / <kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">&darr;</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Next task in column</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">K</kbd> / <kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">&uarr;</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Previous task in column</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">H</kbd> / <kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">&larr;</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Move to left column</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">L</kbd> / <kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">&rarr;</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Move to right column</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Enter</kbd></td>
-                  <td style="padding: 4px 0; color: var(--text-primary);">Toggle task detail panel</td>
-                </tr>
-              </table>
-            </div>
-          </div>
-          <div style="align-content: start;">
-            <h4 style="margin: 0 0 8px 0; color: var(--text-primary); font-size: 14px; font-weight: 600;">Actions</h4>
-            <table style="width: 100%; font-size: 13px;">
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">P</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Open session plan</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">I</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Open session info</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">D</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Delete selected task</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">N</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Toggle scratchpad</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">.</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Pin/unpin selected session</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">&gt;</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Toggle sticky on selected session</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">T</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Toggle theme</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Shift+L</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Toggle session log</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Shift+M</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Open last message detail</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Shift+S</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Storage manager</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Shift+C</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Copy session id</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">J/K</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Navigate messages in detail modal</td>
-              </tr>
-              <tr>
-                <td style="padding: 4px 0; color: var(--text-secondary);"><kbd style="background: var(--bg-hover); padding: 2px 6px; border-radius: 4px; font-family: monospace;">Ctrl+D</kbd></td>
-                <td style="padding: 4px 0; color: var(--text-primary);">Dismiss current session</td>
-              </tr>
-            </table>
+        <dl class="shortcuts" id="help-shortcuts"></dl>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div id="confirm-modal" class="modal-overlay" onclick="closeConfirmModal?.(false)">
+    <div class="modal modal-sm confirm-dialog" onclick="event.stopPropagation()" role="alertdialog" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message">
+      <div class="modal-body confirm-body">
+        <div class="confirm-top">
+          <div class="confirm-icon" aria-hidden="true">!</div>
+          <div>
+            <h3 id="confirm-modal-title" class="confirm-title"></h3>
+            <p id="confirm-modal-message" class="confirm-message"></p>
           </div>
         </div>
+        <div id="confirm-modal-chip" class="confirm-chip" hidden></div>
+        <div id="confirm-modal-list" class="confirm-list" hidden></div>
+        <div id="confirm-modal-warn" class="confirm-warn" hidden></div>
       </div>
-      <div class="modal-footer">
-        <button class="btn btn-primary" onclick="closeHelpModal()">Got it</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Delete Confirmation Modal -->
-  <div id="delete-confirm-modal" class="modal-overlay" onclick="closeDeleteConfirmModal()">
-    <div class="modal modal-sm" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <h3 class="modal-title">Delete Task</h3>
-        <button class="modal-close" aria-label="Close dialog" onclick="closeDeleteConfirmModal()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 6L6 18M6 6l12 12"/>
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        <p id="delete-confirm-message" style="margin: 0; color: var(--text-primary);"></p>
-      </div>
-      <div class="modal-footer">
-        <button id="delete-cancel-btn" class="btn btn-secondary" onclick="closeDeleteConfirmModal()">Cancel</button>
-        <button id="delete-confirm-btn" class="btn btn-primary" onclick="confirmDelete()" style="background: #ef4444; border-color: #ef4444;">Delete</button>
+      <div class="modal-footer confirm-footer">
+        <span class="confirm-hint"><span><kbd>Enter</kbd> confirm</span><span><kbd>Esc</kbd> cancel</span></span>
+        <div class="confirm-buttons">
+          <button id="confirm-cancel-btn" class="btn btn-secondary" onclick="closeConfirmModal?.(false)">Cancel</button>
+          <button id="confirm-ok-btn" class="btn btn-danger" onclick="closeConfirmModal?.(true)"></button>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Delete All Session Tasks Confirmation Modal -->
-  <div id="delete-session-tasks-modal" class="modal-overlay" onclick="closeDeleteSessionTasksModal()">
+  <!-- Team Info Modal -->
+  <div id="team-modal" class="modal-overlay" onclick="closeTeamModal()">
     <div class="modal" onclick="event.stopPropagation()">
       <div class="modal-header">
-        <h3 class="modal-title">Delete All Tasks</h3>
-        <button class="modal-close" aria-label="Close dialog" onclick="closeDeleteSessionTasksModal()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 6L6 18M6 6l12 12"/>
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        <p id="delete-session-tasks-message" style="margin: 0 0 12px 0; color: var(--text-primary);"></p>
-        <p style="margin: 0; font-size: 13px; color: var(--text-secondary);">This action cannot be undone.</p>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="closeDeleteSessionTasksModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="confirmDeleteSessionTasks()" style="background: #ef4444; border-color: #ef4444;">Delete All</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Delete Result Modal -->
-  <div id="delete-result-modal" class="modal-overlay" onclick="closeDeleteResultModal()">
-    <div class="modal" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <h3 class="modal-title">Deletion Result</h3>
-        <button class="modal-close" aria-label="Close dialog" onclick="closeDeleteResultModal()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 6L6 18M6 6l12 12"/>
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        <p id="delete-result-message" style="margin: 0; color: var(--text-primary);"></p>
-        <div id="delete-result-details" style="margin-top: 12px; font-size: 13px; color: var(--text-secondary);"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-primary" onclick="closeDeleteResultModal()">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Session Info Modal -->
-  <div id="session-info-modal" class="modal-overlay" onclick="closeSessionInfoModal()">
-    <div class="modal" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <h3 id="session-info-modal-title" class="modal-title">Session</h3>
+        <h3 id="team-modal-title" class="modal-title">Team</h3>
         <div style="display:flex;align-items:center;gap:4px;">
-          <button id="session-info-sticky-btn" class="icon-btn" style="display:none" title="Sticky pin — always show at top" onclick="toggleSessionSticky(_infoModalSessionId); updateStickyBtnState()">
+          <button id="session-info-sticky-btn" class="icon-btn" style="display:none" title="Sticky pin — always show in the list" onclick="toggleSessionSticky(_infoModalSessionId); updateStickyBtnState()">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 L15 9 L22 9 L17 14 L19 22 L12 18 L5 22 L7 14 L2 9 L9 9 Z"/></svg>
           </button>
-          <button class="modal-close" aria-label="Close dialog" onclick="closeSessionInfoModal()">
+          <button id="session-info-cost-btn" class="icon-btn" style="display:none" title="Open in Cost (Shift: Cost tab)" onclick="openAppForInfoModal(openCost, event)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
+          </button>
+          <button id="session-info-marketplace-btn" class="icon-btn" style="display:none" title="Open in Marketplace (Shift: Marketplace tab)" onclick="openAppForInfoModal(openMarketplace, event)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 01-8 0"/></svg>
+          </button>
+          <button id="session-info-memory-btn" class="icon-btn" style="display:none" title="Open in Memory (Shift: Memory tab)" onclick="openAppForInfoModal(openMemory, event)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+          </button>
+          <button class="modal-close" aria-label="Close dialog" onclick="closeTeamModal()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M18 6L6 18M6 6l12 12"/>
             </svg>
           </button>
         </div>
       </div>
-      <div id="session-info-modal-body" class="modal-body"></div>
+      <div id="team-modal-body" class="modal-body modal-zoomable"></div>
       <div class="modal-footer">
-        <button id="session-info-dismiss-btn" class="btn btn-secondary" onclick="dismissAndAdvance(_infoModalSessionId); closeSessionInfoModal()">Dismiss</button>
-        <button class="btn btn-primary" onclick="closeSessionInfoModal()">Close</button>
+        <button id="session-info-dismiss-btn" class="btn btn-secondary" onclick="toggleDismissSession(_infoModalSessionId); closeTeamModal()">Dismiss</button>
+        <button class="btn btn-secondary" onclick="showToolStatsModal(_infoModalSessionId)" title="Tool invocation statistics">Tool Stats</button>
+        <button class="btn btn-secondary" onclick="closeTeamModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tool Stats Modal (stacked on top of info modal) -->
+  <div id="tool-stats-modal" class="modal-overlay plan-modal-overlay" onclick="closeToolStatsModal()">
+    <div class="modal tool-stats-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 id="tool-stats-modal-title" class="modal-title">Tool Statistics</h3>
+        <button class="modal-close" aria-label="Close dialog" onclick="closeToolStatsModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div id="tool-stats-modal-body" class="modal-body modal-zoomable" style="overflow-y:auto;flex:1 1 auto;min-height:0;"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeToolStatsModal()">Close</button>
       </div>
     </div>
   </div>
 
   <!-- Plan Modal (stacked on top of info modal) -->
   <div id="plan-modal" class="modal-overlay plan-modal-overlay" onclick="closePlanModal()">
-    <div class="modal plan-modal" onclick="event.stopPropagation()">
+    <div class="modal plan-modal review-host" onclick="event.stopPropagation()">
       <div class="modal-header">
         <h3 id="plan-modal-title" class="modal-title">Plan</h3>
         <div style="display:flex;align-items:center;gap:4px;">
+          <button id="plan-pane-btn" class="icon-btn" aria-label="Open in a pane" title="Open in a pane" style="display:none" onclick="openPlanInPane()">
+            <svg fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><use href="#icon-pane"/></svg>
+          </button>
           <button class="icon-btn" aria-label="Open in editor" title="Open in editor" onclick="openPlanInEditor()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           </button>
@@ -567,36 +646,57 @@
           </button>
         </div>
       </div>
-      <div id="plan-modal-body" class="modal-body detail-desc rendered-md" style="overflow-y: auto; flex: 0 1 auto; min-height: 0;"></div>
+      <div class="modal-body">
+        <div class="preview-split">
+          <div id="plan-modal-body" class="detail-desc rendered-md modal-zoomable"></div>
+          <aside id="plan-review-panel" class="review-panel" hidden></aside>
+        </div>
+      </div>
       <div class="modal-footer">
-        <button class="btn btn-primary" onclick="closePlanModal()">Close</button>
+        <button class="btn btn-secondary" onclick="closePlanModal()">Close</button>
       </div>
     </div>
   </div>
 
-  <!-- Blocked Task Warning Modal -->
-  <div id="blocked-task-modal" class="modal-overlay" onclick="closeBlockedTaskModal()">
-    <div class="modal modal-sm" onclick="event.stopPropagation()">
+  <!-- Loop Wakeups Modal -->
+  <div id="loop-modal" class="modal-overlay" onclick="closeLoopModal()">
+    <div class="modal plan-modal" onclick="event.stopPropagation()">
       <div class="modal-header">
-        <h3 class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" style="width: 20px; height: 20px;">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="15" y1="9" x2="9" y2="15"/>
-            <line x1="9" y1="9" x2="15" y2="15"/>
-          </svg>
-          Cannot Start Blocked Task
+        <h3 id="loop-modal-title" class="modal-title" style="display:flex;align-items:center;gap:8px;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Loop activity
         </h3>
-        <button class="modal-close" aria-label="Close dialog" onclick="closeBlockedTaskModal()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 6L6 18M6 6l12 12"/>
-          </svg>
+        <button class="modal-close" aria-label="Close dialog" onclick="closeLoopModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
-      <div class="modal-body">
-        <div id="blocked-task-message" style="color: var(--text-primary); line-height: 1.6;"></div>
-      </div>
+      <div id="loop-modal-body" class="modal-body modal-zoomable" style="overflow-y:auto;flex:0 1 auto;min-height:0;"></div>
       <div class="modal-footer">
-        <button class="btn btn-primary" onclick="closeBlockedTaskModal()">OK</button>
+        <button class="btn btn-secondary" onclick="closeLoopModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Workflow Scripts Modal -->
+  <div id="workflow-modal" class="modal-overlay" onclick="closeWorkflowModal()">
+    <div class="modal plan-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 id="workflow-modal-title" class="modal-title" style="display:flex;align-items:center;gap:8px;min-width:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;flex-shrink:0;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span id="workflow-modal-title-text" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Workflows</span>
+        </h3>
+        <div style="display:flex;align-items:center;gap:4px;">
+          <button id="workflow-modal-open-btn" class="icon-btn" aria-label="Open in editor" title="Open in editor" style="display:none;" onclick="openWorkflowHeaderScript()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="modal-close" aria-label="Close dialog" onclick="closeWorkflowModal()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="workflow-modal-body" class="modal-body modal-zoomable" style="overflow-y:auto;flex:1 1 auto;min-height:0;"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeWorkflowModal()">Close</button>
       </div>
     </div>
   </div>
@@ -625,17 +725,27 @@
           </button>
         </div>
       </div>
-      <div id="agent-modal-body" class="modal-body" style="overflow-y: auto; overflow-x: hidden; flex: 0 1 auto; min-height: 0;"></div>
+      <div id="agent-modal-body" class="modal-body modal-zoomable" style="overflow-y: auto; overflow-x: hidden; flex: 0 1 auto; min-height: 0;"></div>
       <div class="modal-footer">
         <button id="agent-modal-dismiss-btn" class="btn agent-dismiss-btn" style="display:none" onclick="dismissAgent(currentAgentModalId);closeAgentModal()">Dismiss</button>
-        <button class="btn btn-primary" onclick="closeAgentModal()">Close</button>
+        <button class="btn btn-secondary" onclick="closeAgentModal()">Close</button>
       </div>
     </div>
   </div>
   <div id="scratchpad-modal" class="modal-overlay" onclick="closeScratchpad()">
     <div class="modal scratchpad-modal" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <h3 class="modal-title">Scratchpad</h3>
+      <div class="modal-header scratchpad-header">
+        <div class="scratchpad-title-row">
+          <button id="scratchpad-emoji-btn" class="scratchpad-emoji-btn" type="button" onclick="toggleScratchpadEmojiPicker()"></button>
+          <h3 class="modal-title">Scratchpad</h3>
+        </div>
+        <div id="scratchpad-emoji-picker" class="scratchpad-emoji-picker" tabindex="-1">
+          <div id="scratchpad-emoji-grid" class="scratchpad-emoji-grid"></div>
+          <div class="scratchpad-emoji-row">
+            <input id="scratchpad-emoji-input" class="form-input" maxlength="16" placeholder="Paste" aria-label="Custom emoji">
+            <button type="button" class="btn btn-secondary" onclick="setScratchpadEmoji('')">Clear</button>
+          </div>
+        </div>
         <button class="modal-close" aria-label="Close dialog" onclick="closeScratchpad()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 6L6 18M6 6l12 12"/>
@@ -647,7 +757,7 @@
       </div>
       <div class="modal-footer scratchpad-footer">
         <span id="scratchpad-charcount" class="scratchpad-charcount">0 chars</span>
-        <button class="btn btn-primary" onclick="closeScratchpad()">Close</button>
+        <button class="btn btn-secondary" onclick="closeScratchpad()">Close</button>
       </div>
     </div>
   </div>
@@ -663,16 +773,166 @@
           </button>
         </div>
       </div>
-      <div class="storage-tabs">
-        <button class="storage-tab active" data-tab="sessions" onclick="switchStorageTab('sessions')">Sessions</button>
-        <button class="storage-tab" data-tab="scratchpads" onclick="switchStorageTab('scratchpads')">Scratchpads</button>
-        <button class="storage-tab" data-tab="linked-docs" onclick="switchStorageTab('linked-docs')">Linked Docs</button>
+      <div class="storage-tabs" role="tablist" aria-label="Storage" title="← → switch tab">
+        <button class="storage-tab active" role="tab" aria-selected="true" data-tab="sessions" onclick="switchStorageTab('sessions')">Sessions</button>
+        <button class="storage-tab" role="tab" aria-selected="false" data-tab="dismissed" onclick="switchStorageTab('dismissed')">Dismissed</button>
+        <button class="storage-tab" role="tab" aria-selected="false" data-tab="scratchpads" onclick="switchStorageTab('scratchpads')">Scratchpads</button>
+        <button class="storage-tab" role="tab" aria-selected="false" data-tab="linked-docs" onclick="switchStorageTab('linked-docs')">Linked Docs</button>
+        <button class="storage-tab" role="tab" aria-selected="false" data-tab="groups" onclick="switchStorageTab('groups')">Groups</button>
       </div>
-      <div class="modal-body" id="storage-modal-body" style="overflow-y:auto;min-height:200px;max-height:60vh;padding-top:16px;padding-right:8px;"></div>
+      <div class="modal-body modal-zoomable" id="storage-modal-body"></div>
       <div class="modal-footer">
+        <button id="storage-groups-clean-btn" class="btn btn-secondary" style="display:none" disabled title="Take the sessions the sidebar hides (not active or dismissed, and not pinned) out of every group" onclick="_storageCleanGroup(null)">Clean all</button>
         <button id="storage-cleanup-btn" class="btn btn-secondary" onclick="cleanupOrphanedStorage()">Clean Orphaned</button>
-        <button class="btn btn-primary" onclick="closeStorageManager()">Close</button>
+        <button class="btn btn-secondary" onclick="closeStorageManager()">Close</button>
       </div>
+    </div>
+  </div>
+
+  <div id="terminal-manager-modal" class="modal-overlay" onclick="closeTerminalManager()">
+    <div class="modal terminal-manager-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 class="modal-title">Terminals</h3>
+        <button class="modal-close" aria-label="Close dialog" onclick="closeTerminalManager()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body" id="terminal-manager-body"></div>
+      <div class="modal-footer terminal-manager-footer">
+        <span class="terminal-manager-count"><span id="terminal-manager-count"></span><span id="terminal-manager-stats" class="terminal-manager-stats" title="Memory and CPU of the cck server process. Terminals are not counted. 100% CPU is one core."></span></span>
+        <button id="terminal-manager-end-all" class="btn btn-secondary terminal-manager-end" onclick="endAllTerminals()">End all</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="new-session-modal" class="modal-overlay top-aligned" onclick="closeNewSession()">
+    <div class="modal new-session-modal" onclick="event.stopPropagation()" role="dialog" aria-labelledby="ns-title">
+      <div class="modal-header">
+        <h3 class="modal-title" id="ns-title">New session</h3>
+        <button class="modal-close" aria-label="Close dialog" onclick="closeNewSession()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body ns-body">
+        <div class="ns-row">
+          <label class="ns-label" for="ns-folder">Folder</label>
+          <div class="ns-field ns-folder-field">
+            <div class="ns-inline">
+              <input type="text" id="ns-folder" class="form-input" placeholder="Type to find a project" autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="ns-folder-list">
+              <button type="button" id="ns-browse" class="btn btn-secondary ns-browse" onclick="browseNewSessionFolder()">Browse…</button>
+            </div>
+            <div id="ns-folder-list" class="ns-dropdown" role="listbox" hidden></div>
+          </div>
+        </div>
+        <div class="ns-row ns-extra">
+          <label class="ns-label" for="ns-name">Name</label>
+          <div class="ns-field">
+            <input type="text" id="ns-name" class="form-input" placeholder="Optional" maxlength="80" autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false">
+          </div>
+        </div>
+        <div class="ns-row ns-extra">
+          <label class="ns-label" for="ns-prompt">Prompt</label>
+          <div class="ns-field ns-prompt-field">
+            <textarea id="ns-prompt" class="form-input" rows="4" placeholder="Optional. Sent as the first message. Paste or drop images to attach."></textarea>
+            <button type="button" id="ns-mic" class="ns-mic" title="Dictate" aria-label="Dictate" aria-pressed="false" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg>
+            </button>
+            <div id="ns-images" class="ns-images" hidden></div>
+          </div>
+        </div>
+        <div class="ns-row ns-extra">
+          <span class="ns-label">Worktree</span>
+          <div class="ns-field">
+            <div class="ns-inline">
+              <label class="ns-check"><input type="checkbox" id="ns-wt"> New worktree</label>
+              <input type="text" id="ns-wt-name" class="form-input" placeholder="Name (optional)" maxlength="64" autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false" disabled aria-label="Worktree name">
+            </div>
+            <div id="ns-wt-hint" class="ns-hint" hidden></div>
+          </div>
+        </div>
+        <div class="ns-row ns-extra">
+          <span class="ns-label"></span>
+          <div class="ns-field">
+            <div class="ns-inline">
+              <fieldset class="ns-notched">
+                <legend><label for="ns-model">Model</label></legend>
+                <select id="ns-model" class="form-input">
+                  <option value="">Default</option>
+                  <option value="fable">Fable</option>
+                  <option value="opus">Opus</option>
+                  <option value="sonnet">Sonnet</option>
+                  <option value="haiku">Haiku</option>
+                </select>
+              </fieldset>
+              <fieldset class="ns-notched">
+                <legend><label for="ns-effort">Effort</label></legend>
+                <select id="ns-effort" class="form-input">
+                  <option value="">Default</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="xhigh">XHigh</option>
+                  <option value="max">Max</option>
+                </select>
+              </fieldset>
+            </div>
+          </div>
+        </div>
+        <div id="ns-error" class="ns-error" hidden></div>
+      </div>
+      <div class="modal-footer ns-footer">
+        <label class="ns-check ns-stay" title="Start in the background and keep the current view"><input type="checkbox" id="ns-stay"> Stay here</label>
+        <label class="ns-check ns-edit" title="Open a shell in the folder with the claude command typed in. Press Enter to run it."><input type="checkbox" id="ns-edit"> Edit before run</label>
+        <button type="button" class="btn btn-secondary" onclick="closeNewSession()">Cancel</button>
+        <button type="button" id="ns-start" class="btn btn-primary" onclick="startNewSession()" disabled>Start</button>
+      </div>
+      <div id="ns-lightbox" class="ns-lightbox" hidden><img alt=""></div>
+    </div>
+  </div>
+
+  <div id="pane-pop" class="modal-overlay" onclick="closePanePop()">
+    <div class="modal pane-pop-dialog" role="dialog" aria-labelledby="pane-pop-title" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 id="pane-pop-title" class="modal-title">Add a pane</h3>
+        <button class="modal-close" aria-label="Close dialog" onclick="closePanePop()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <input id="pane-pop-input" class="form-input" placeholder="Search linked docs, or paste a URL or a file path" autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false">
+      <div id="pane-pop-detect" class="pane-pop-detect"></div>
+      <div class="pane-pop-label">Linked docs</div>
+      <div id="pane-pop-docs" class="pane-pop-docs"></div>
+      <div class="sp-hint"><kbd>Enter</kbd> add &middot; <kbd>&uarr;</kbd><kbd>&darr;</kbd> select &middot; <kbd>Esc</kbd> close</div>
+    </div>
+  </div>
+
+  <div id="session-picker-modal" class="modal-overlay top-aligned" onclick="closeSessionPicker()">
+    <div class="modal session-picker" onclick="event.stopPropagation()">
+      <div class="sp-head">
+        <input type="text" id="session-picker-input" class="form-input sp-input" placeholder="Jump to session..." autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false">
+        <div id="session-picker-scope" class="sp-scope" role="radiogroup" aria-label="Sessions" title="Tab switches scope">
+          <button type="button" role="radio" tabindex="-1" data-scope="board">Board</button>
+          <button type="button" role="radio" tabindex="-1" data-scope="all">All</button>
+        </div>
+      </div>
+      <div class="sp-body">
+        <div id="session-picker-list" class="sp-list"></div>
+        <div id="session-picker-peek" class="sp-peek"></div>
+      </div>
+      <div class="sp-hint"><kbd>&uarr;</kbd><kbd>&darr;</kbd> move &middot; <kbd>Enter</kbd> open &middot; <kbd>Tab</kbd> board / all &middot; <kbd>Ctrl</kbd><kbd>Space</kbd> peek &middot; <kbd>Esc</kbd> close</div>
+    </div>
+  </div>
+
+  <div id="project-picker-modal" class="modal-overlay top-aligned" onclick="closeProjectPicker()">
+    <div class="modal session-picker" onclick="event.stopPropagation()">
+      <input type="text" id="project-picker-input" class="form-input sp-input" placeholder="Filter by project..." autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" spellcheck="false">
+      <div class="pp-chips">
+        <button type="button" class="pf-recent" id="pp-recent-chip" aria-pressed="false" title="List only projects active in the last 24h" onclick="ppToggleRecentOnly()">Recent</button>
+      </div>
+      <div class="sp-body">
+        <div id="project-picker-list" class="sp-list"></div>
+      </div>
+      <div class="sp-hint"><kbd>&uarr;</kbd><kbd>&darr;</kbd> move &middot; <kbd>Enter</kbd> filter &middot; <kbd>Alt</kbd><kbd>R</kbd> recent &middot; <kbd>Alt</kbd><kbd>C</kbd> reset filter &middot; <kbd>Esc</kbd> close</div>
     </div>
   </div>
 

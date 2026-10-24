@@ -1,0 +1,52 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.14/schema.json",
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "style": {
+        "noDescendingSpecificity": "off"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  },
+  "css": {
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  },
+  "files": {
+    "includes": [
+      "public/app.js",
+      "public/project-match.js",
+      "public/link-url.js",
+      "public/group-tree.js",
+      "public/tree-highlight.js",
+      "public/terminal-frame.js",
+      "public/style.css",
+      "server.js",
+      "cli.js",
+      "install.js",
+      "lib/**/*.js",
+      "evals/*/*.cjs",
+      "!!**/.claude/worktrees"
+    ]
+  },
+  "overrides": [
+    {
+      "includes": ["server.js", "cli.js", "install.js", "lib/**/*.js"],
+      "formatter": {
+        "enabled": false
+      }
+    }
+  ]
+}

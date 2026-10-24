@@ -1,0 +1,359 @@
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const { execFile, spawn } = require('node:child_process');
+const fs = require('node:fs');
+const http = require('node:http');
+const os = require('node:os');
+const path = require('node:path');
+
+const SERVER = path.join(__dirname, '..', 'server.js');
+
+function tempConfigDir(beacon, token) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cck-cli-'));
+  if (beacon) {
+    fs.mkdirSync(path.join(dir, '.cck'));
+    fs.writeFileSync(path.join(dir, '.cck', 'server.json'), JSON.stringify(beacon));
+  }
+  if (token) {
+    fs.mkdirSync(path.join(dir, '.cck', 'terminal-tokens'));
+    fs.writeFileSync(path.join(dir, '.cck', 'terminal-tokens', `${beacon.port}.json`), JSON.stringify({ pid: process.pid, token }));
+  }
+  return dir;
+}
+
+function runCli(args, env) {
+  const clean = { ...process.env };
+  delete clean.PORT;
+  delete clean.CLAUDE_DIR;
+  delete clean.CCK_URL;
+  return new Promise((resolve) => {
+    execFile(process.execPath, [SERVER, ...args], { env: { ...clean, ...env } }, (err, stdout, stderr) => {
+      resolve({ code: err ? err.code : 0, stdout, stderr });
+    });
+  });
+}
+
+describe('CLI server resolution', () => {
+  it('reaches the server named by the config dir beacon', async () => {
+    const hits = [];
+    const srv = http.createServer((req, res) => {
+      hits.push(req.url);
+      res.setHeader('Content-Type', 'application/json');
+      res.end('{"sticky":[],"pinned":[]}');
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const dir = tempConfigDir({ port: srv.address().port, pid: process.pid });
+      await runCli(['project', 'list', '--json'], { CLAUDE_CONFIG_DIR: dir });
+      assert.deepEqual(hits, ['/api/projects']);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('refuses a beacon whose server is dead instead of falling back to 3541', async () => {
+    const hits = [];
+    const srv = http.createServer((req, res) => { hits.push(req.url); res.end('[]'); });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const child = spawn(process.execPath, ['-e', '']);
+      await new Promise((r) => child.on('exit', r));
+      const dir = tempConfigDir({ port: srv.address().port, pid: child.pid });
+      const { code, stderr } = await runCli(['session', 'list'], { CLAUDE_CONFIG_DIR: dir });
+      assert.equal(code, 1);
+      assert.match(stderr, /Cannot reach cck server for .+cck-cli-.+: its server\.json names a server that is no longer running/);
+      assert.deepEqual(hits, []);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('lets PORT win over a dead beacon', async () => {
+    const dir = tempConfigDir({ port: 9, pid: 999999999 });
+    const { stderr } = await runCli(['session', 'list'], { CLAUDE_CONFIG_DIR: dir, PORT: '1' });
+    assert.match(stderr, /on port 1\b/);
+  });
+
+  it('uses CCK_URL before the beacon', async () => {
+    const hits = [];
+    const srv = http.createServer((req, res) => {
+      hits.push(req.url);
+      res.setHeader('Content-Type', 'application/json');
+      res.end('[]');
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const dir = tempConfigDir({ port: 9, pid: 999999999 });
+      const { code } = await runCli(['project', 'list', '--json'], {
+        CLAUDE_CONFIG_DIR: dir,
+        CCK_URL: `http://127.0.0.1:${srv.address().port}/`,
+      });
+      assert.equal(code, 0);
+      assert.deepEqual(hits, ['/api/projects']);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('sends dispatch start the token of the board it reaches', async () => {
+    const seen = [];
+    const board = () => http.createServer((req, res) => {
+      seen.push({ port: req.socket.localPort, token: req.headers['x-terminal-token'] });
+      res.setHeader('Content-Type', 'application/json');
+      res.end('{"session":"s1","cwd":"."}');
+    });
+    const boards = [board(), board()];
+    await Promise.all(boards.map((s) => new Promise((r) => s.listen(0, '127.0.0.1', r))));
+    try {
+      const [ownerPort, pinnedPort] = boards.map((s) => s.address().port);
+      const dir = tempConfigDir({ port: ownerPort, pid: process.pid });
+      const tokens = path.join(dir, '.cck', 'terminal-tokens');
+      fs.mkdirSync(tokens);
+      for (const [port, token] of [[ownerPort, 'owner-token'], [pinnedPort, 'pinned-token']]) {
+        fs.writeFileSync(path.join(tokens, `${port}.json`), JSON.stringify({ pid: process.pid, token }));
+      }
+      const start = ['dispatch', 'start', '--spec', 'x', '--cwd', dir];
+      assert.equal((await runCli(start, { CLAUDE_CONFIG_DIR: dir })).code, 0);
+      assert.equal((await runCli(start, { CLAUDE_CONFIG_DIR: dir, CCK_URL: `http://127.0.0.1:${pinnedPort}` })).code, 0);
+      assert.deepEqual(seen, [{ port: ownerPort, token: 'owner-token' }, { port: pinnedPort, token: 'pinned-token' }]);
+    } finally {
+      for (const s of boards) s.close();
+    }
+  });
+
+  it('passes the args after -- to claude and keeps them out of its own flags', async () => {
+    let body;
+    const srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        body = JSON.parse(raw);
+        res.setHeader('Content-Type', 'application/json');
+        res.end('{"session":"s1","cwd":"."}');
+      });
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const dir = tempConfigDir({ port: srv.address().port, pid: process.pid }, 't');
+      const argv = ['dispatch', 'start', '--spec', 'x', '--cwd', dir, '--name', 'a', '--', '--permission-mode', 'auto', '--worktree'];
+      assert.equal((await runCli(argv, { CLAUDE_CONFIG_DIR: dir })).code, 0);
+      assert.deepEqual(body.claudeArgs, ['--permission-mode', 'auto', '--worktree']);
+      assert.equal(body.name, 'a');
+      assert.equal(body.worktree, false);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('dispatch end ends one of this session\'s dispatches, by id prefix or name', async () => {
+    const parent = '11111111-1111-4111-8111-111111111111';
+    const running = [
+      { session: 'aaaa1111-0000-4000-8000-000000000001', name: 'api-worker', startedAt: 1 },
+      { session: 'aaaa2222-0000-4000-8000-000000000002', name: 'ui-worker', startedAt: 2 },
+    ];
+    const seen = [];
+    const srv = http.createServer((req, res) => {
+      seen.push(`${req.method} ${req.url} ${req.headers['x-terminal-token'] || ''}`.trim());
+      if (req.method === 'DELETE') return res.writeHead(204).end();
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ running }));
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const dir = tempConfigDir({ port: srv.address().port, pid: process.pid }, 't');
+      const env ={ CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_SESSION_ID: parent };
+      const list = `GET /api/dispatch?parent=${parent}`;
+
+      const byName = await runCli(['dispatch', 'end', '--name', 'api-worker'], env);
+      assert.equal(byName.code, 0);
+      assert.match(byName.stdout, /Ended session aaaa1111-/);
+      assert.deepEqual(seen.splice(0), [list, `DELETE /api/terminals/${running[0].session} t`]);
+
+      assert.equal((await runCli(['dispatch', 'end', 'aaaa2222'], env)).code, 0);
+      assert.deepEqual(seen.splice(0), [list, `DELETE /api/terminals/${running[1].session} t`]);
+
+      const ambiguous = await runCli(['dispatch', 'end', 'aaaa'], env);
+      assert.equal(ambiguous.code, 1);
+      assert.match(ambiguous.stderr, /"aaaa" matches 2 dispatches:\n {2}aaaa2222-.+ui-worker\n {2}aaaa1111-.+api-worker/);
+      const unknown = await runCli(['dispatch', 'end', '--name', 'nope'], env);
+      assert.equal(unknown.code, 1);
+      assert.match(unknown.stderr, /No running dispatch matches "nope"/);
+      assert.deepEqual(seen.splice(0), [list, list]);
+
+      const none = await runCli(['dispatch', 'end'], env);
+      assert.equal(none.code, 1);
+      assert.match(none.stdout, /Usage: claude-code-kanban dispatch end/);
+      const both = await runCli(['dispatch', 'end', 'aaaa1111', '--name', 'api-worker'], env);
+      assert.equal(both.code, 1);
+      assert.match(both.stderr, /Give one of <session id or prefix> or --name/);
+      assert.deepEqual(seen, []);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('terminal list shows every terminal, newest first, and hints at dispatch end for its own', async () => {
+    const self = '11111111-1111-4111-8111-111111111111';
+    const sessions = [
+      { id: 'aaaa1111-0000-4000-8000-000000000001', mode: 'resume', cwd: 'C:/a', startedAt: Date.now() - 60000, kanbot: true },
+      { id: 'aaaa2222-0000-4000-8000-000000000002', mode: 'new', cwd: 'C:/b', name: 'api-worker', startedAt: Date.now() - 1000, dispatched: { parent: self } },
+      { id: 'aaaa3333-0000-4000-8000-000000000003', mode: 'new', cwd: 'C:/c', startedAt: Date.now() - 5000, dispatched: { parent: null } },
+      { id: 'aaaa4444-0000-4000-8000-000000000004', mode: 'shell', cwd: 'C:/d', startedAt: Date.now() - 9000 },
+    ];
+    const seen = [];
+    const srv = http.createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ sessions }));
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const dir = tempConfigDir({ port: srv.address().port, pid: process.pid });
+      const mine = await runCli(['terminal', 'list'], { CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_SESSION_ID: self });
+      assert.equal(mine.code, 0);
+      const lines = mine.stdout.trim().split('\n');
+      assert.match(lines[0], /^SESSION\s+AGE\s+KIND\s+NAME\s+CWD$/);
+      assert.match(lines[1], /^aaaa2222-\S+\s+\S+\s+dispatch \(yours\)\s+api-worker\s+C:\/b$/);
+      assert.match(lines[2], /^aaaa3333-\S+\s+\S+\s+dispatch\s+-\s+C:\/c$/);
+      assert.match(lines[3], /^aaaa4444-\S+\s+\S+\s+shell\s+/);
+      assert.match(lines[4], /^aaaa1111-\S+\s+\S+\s+kanbot\s+/);
+      assert.match(mine.stdout, /dispatch end <session>/);
+
+      const other = await runCli(['terminal', 'list'], { CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_SESSION_ID: '' });
+      assert.doesNotMatch(other.stdout, /yours|dispatch end/);
+
+      const json = await runCli(['terminal', 'list', '--json'], { CLAUDE_CONFIG_DIR: dir });
+      assert.deepEqual(JSON.parse(json.stdout).map((t) => t.id.slice(0, 8)), ['aaaa2222', 'aaaa3333', 'aaaa4444', 'aaaa1111']);
+      assert.deepEqual([...new Set(seen)], ['GET /api/terminals']);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('names the config dir when the server is unreachable', async () => {
+    const dir = tempConfigDir();
+    const { code, stderr } = await runCli(['session', 'list'], { CLAUDE_CONFIG_DIR: dir, PORT: '1' });
+    assert.notEqual(code, 0);
+    assert.match(stderr, /Cannot reach cck server for .+cck-cli-.+ on port 1\b/);
+  });
+});
+
+describe('CLI help', () => {
+  const env = () => ({ CLAUDE_CONFIG_DIR: tempConfigDir(), PORT: '1' });
+
+  it('lists commands at the top, verbs one level down, flags at the leaf', async () => {
+    const top = await runCli(['--help'], env());
+    assert.equal(top.code, 0);
+    assert.match(top.stdout, /session\s+.+\(list, search, open/);
+    assert.doesNotMatch(top.stdout, /--project <name>/);
+    assert.match(top.stdout, /help <command> <subcommand>/);
+    for (const flag of ['--port', '--open', '--dir', '--enable-terminal', '--terminal-shell', '--host', '--allowed-hosts', '--<app>-url', '--install', '--uninstall', '--yes']) {
+      assert.ok(top.stdout.includes(`  ${flag}`) || top.stdout.includes(`, ${flag}`), `top help lists ${flag}`);
+    }
+    const noun = await runCli(['help', 'task'], env());
+    assert.match(noun.stdout, /Subcommands:\n\s+list/);
+    const leaf = await runCli(['help', 'session', 'search'], env());
+    assert.equal(leaf.code, 0);
+    assert.match(leaf.stdout, /Usage: claude-code-kanban session search <text>/);
+    assert.match(leaf.stdout, /Examples:\n\s+claude-code-kanban session search/);
+    const flag = await runCli(['task', 'list', '--help'], env());
+    assert.match(flag.stdout, /--status <s>/);
+  });
+
+  it('exits non-zero on a noun without a verb, but not with --help', async () => {
+    assert.equal((await runCli(['session'], env())).code, 1);
+    assert.equal((await runCli(['session', '--help'], env())).code, 0);
+  });
+});
+
+describe('CLI argument parsing', () => {
+  const env = () => ({ CLAUDE_CONFIG_DIR: tempConfigDir(), PORT: '1' });
+  const usage = (cmd) => new RegExp(`Usage: claude-code-kanban ${cmd}`);
+
+  for (const [args, cmd] of [
+    [['session', 'search'], 'session search'],
+    [['session', 'plan'], 'session plan'],
+    [['session', 'agents'], 'session agents'],
+    [['task', 'list'], 'task list'],
+  ]) {
+    it(`prints leaf help for ${args.join(' ')} without arguments`, async () => {
+      const { code, stdout } = await runCli(args, env());
+      assert.equal(code, 1);
+      assert.match(stdout, usage(cmd));
+    });
+  }
+
+  it('rejects search text shorter than 3 characters', async () => {
+    const { code, stderr } = await runCli(['session', 'search', 'ab'], env());
+    assert.equal(code, 1);
+    assert.match(stderr, /at least 3 characters[\s\S]*help session search/);
+  });
+
+  it('rejects a bad search --limit', async () => {
+    const { code, stderr } = await runCli(['session', 'search', 'login', '--limit', '0'], env());
+    assert.equal(code, 1);
+    assert.match(stderr, /Invalid --limit value: 0/);
+  });
+
+  it('takes one task source only', async () => {
+    const { code, stderr } = await runCli(['task', 'list', 'abc', '--all'], env());
+    assert.equal(code, 1);
+    assert.match(stderr, /one of <session>, --project or --all[\s\S]*help task list/);
+  });
+
+  it('wants a value for --status', async () => {
+    const { code, stderr } = await runCli(['task', 'list', '--all', '--status'], env());
+    assert.equal(code, 1);
+    assert.match(stderr, /--status needs a value/);
+  });
+
+  it('reaches the server for task list --all and project list', async () => {
+    for (const args of [['task', 'list', '--all'], ['project', 'list']]) {
+      const { code, stderr } = await runCli(args, env());
+      assert.equal(code, 1);
+      assert.match(stderr, /Cannot reach cck server/);
+    }
+  });
+
+  it('doc list needs a session', async () => {
+    const { code, stderr } = await runCli(['doc', 'list'], { ...env(), PREVIEW_SESSION: '', CLAUDE_CODE_SESSION_ID: '' });
+    assert.equal(code, 1);
+    assert.match(stderr, /--session is required[\s\S]*help doc list/);
+  });
+
+  it('pane verbs call the pane routes of the resolved session', async () => {
+    const seen = [];
+    const pane = { id: 'p1', kind: 'url', target: 'http://localhost:8228/', title: 'Sideshow', addedAt: 1 };
+    const srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        seen.push(`${req.method} ${req.url} ${raw}`.trim());
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url.startsWith('/api/session/resolve')) return res.end('{"id":"abcdef12-full"}');
+        if (req.method === 'POST') return res.end(JSON.stringify({ pane, added: true, layout: {} }));
+        if (req.method === 'DELETE') return res.end('{"layout":{}}');
+        if (req.url.endsWith('/framing')) return res.end('{"frameable":false}');
+        res.end(JSON.stringify({ rev: 1, panes: [pane], updatedAt: 1 }));
+      });
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const cliEnv = { CLAUDE_CONFIG_DIR: tempConfigDir(), PORT: String(srv.address().port) };
+      const run = (args) => runCli(['pane', ...args, '--session', 'abcdef'], cliEnv);
+      const [add, rm, list] = await Promise.all([run(['add', 'http://localhost:8228', '--title', 'Sideshow']), run(['rm', 'p1']), run(['list'])]);
+      assert.equal(add.code, 0, add.stderr);
+      assert.match(add.stdout, /^p1 {2}Sideshow\nnote: localhost:8228 refuses framing/);
+      assert.equal(rm.code, 0, rm.stderr);
+      assert.match(list.stdout, /ID +KIND +TITLE +TARGET\np1 +url +Sideshow +http:\/\/localhost:8228\//);
+      assert.deepEqual(seen.filter((s) => !s.includes('/resolve')).sort(), [
+        'DELETE /api/panes/abcdef12-full/p1',
+        'GET /api/panes/abcdef12-full',
+        'GET /api/panes/abcdef12-full/p1/framing',
+        'POST /api/panes/abcdef12-full {"target":"http://localhost:8228/","title":"Sideshow"}',
+      ]);
+    } finally {
+      srv.close();
+    }
+  });
+});

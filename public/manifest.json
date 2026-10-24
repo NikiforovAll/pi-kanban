@@ -1,7 +1,7 @@
 {
-  "name": "Pi Kanban",
-  "short_name": "Pi Kanban",
-  "description": "Real-time Kanban dashboard for the pi coding agent",
+  "name": "Claude Code Kanban",
+  "short_name": "CC Kanban",
+  "description": "Real-time Kanban dashboard for observing Claude Code tasks",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#101114",
