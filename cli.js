@@ -4,6 +4,7 @@ const { resolvePiAgentDir, boardDir, displayPath, SESSION_ID_ENV } = require('./
 const { linkUrl } = require('./public/link-url');
 const { sessionProjectKey } = require('./public/project-match');
 const { dispatchLine, matchDispatches } = require('./lib/dispatch-reports');
+const { THINKING_LEVELS } = require('./lib/pi-agents');
 // Help is auto-generated from this table — keep flags/usage in sync with `run` behavior.
 const SESSION_FLAG = '--session <id>';
 const SESSION_FLAG_HELP = 'Session, full id or unique prefix (default: $PREVIEW_SESSION, else $PI_KANBAN_SESSION_ID)';
@@ -71,7 +72,7 @@ const COMMANDS = {
           [SESSION_FLAG]: SESSION_FLAG_HELP,
           '--json': 'Output JSON (the new pane, with frameable: true, false, or null when unknown)',
         },
-        notes: 'The board does not switch to the new pane; the user opens it. Prints the pane id. The same target added again prints the pane it already has. A URL on the board\'s or the hub\'s own origin is refused, and a file must be one the board can preview. A site whose headers refuse framing (X-Frame-Options, CSP frame-ancestors) is still added, but its pane shows an "Open in new tab" card, and a note line says so.',
+        notes: 'The board does not switch to the new pane; the user opens it. Prints the pane id. The same target added again prints the pane it already has. A URL on the board\'s own origin is refused, and a file must be one the board can preview. A site whose headers refuse framing (X-Frame-Options, CSP frame-ancestors) is still added, but its pane shows an "Open in new tab" card, and a note line says so.',
         examples: [
           'pi-kanban pane add http://localhost:5173',
           'pi-kanban pane add ./report.html --title Report',
@@ -331,7 +332,7 @@ const COMMANDS = {
           '--name <n>': 'Session name',
           '--group <g>': 'Add it to this group: a name, path or id. The groups it makes are transient (see `help group list`)',
           '--model <m>': 'pi model pattern, provider/id (see `pi --list-models`)',
-          '--thinking <level>': 'off, minimal, low, medium, high, xhigh or max',
+          '--thinking <level>': [...THINKING_LEVELS].join(', '),
           '--json': 'Output JSON',
           '-- <pi args>': 'Passed to pi as they are, e.g. --tools read,bash. No quotes, % or control characters; pi-kanban sets --session-id, --name, --model and --thinking',
         },
@@ -458,7 +459,7 @@ const SERVER_FLAGS = [
   ['--port <n>', 'PORT', 'Port (default 3460)'],
   ['--open', '', 'Open the board in the browser'],
   ['--dir <path>', 'PI_CODING_AGENT_DIR', 'pi agent dir (default ~/.pi/agent)'],
-  ['--enable-terminal', '', 'Turn on the embedded terminal'],
+  ['--no-terminal', '', 'Turn off the board terminal'],
   ['--terminal-shell <shell>', 'PK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
   ['--host <addr>', 'HOST', 'Listen address (default 127.0.0.1)'],
   ['--allowed-hosts <list>', 'ALLOWED_HOSTS', 'Extra Host header values, comma-separated'],

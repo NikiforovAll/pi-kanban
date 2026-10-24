@@ -4,8 +4,7 @@ const { readFileSync } = require('fs');
 const path = require('path');
 const { scan, HINT } = require('./escaping-scan');
 
-// Synced from the hub. escaping-baseline.json is this package's own: lower it when a
-// site is fixed, never raise it.
+// escaping-baseline.json: lower it when a site is fixed, never raise it.
 const baseline = JSON.parse(readFileSync(path.join(__dirname, 'escaping-baseline.json'), 'utf8'));
 
 for (const [file, limit] of Object.entries(baseline)) {

@@ -1,7 +1,7 @@
 //#region STATE
 // Set by the server in index.html: null for the default agent dir, a per-dir prefix otherwise.
 const STORAGE_NS = window.__STORAGE_NS__ ? `${window.__STORAGE_NS__}:` : '';
-// Theme is hub-wide (echoed to every app via hub:theme), so it stays shared across config dirs.
+// Theme is a user preference, not a board's, so it stays shared across config dirs.
 const THEME_KEY = 'theme';
 const COLOR_THEME_KEY = 'color-theme';
 // Shared too, so after a config-dir switch the cursor goes where it was on the board just left.
@@ -65,7 +65,7 @@ function namespacedStorage(area) {
   };
 }
 const store = namespacedStorage('localStorage');
-// Every config dir's board is served on the hub's one kanban origin, so sessionStorage is shared.
+// Boards for several config dirs can be served on one port, so sessionStorage is shared.
 const tabStore = namespacedStorage('sessionStorage');
 
 // The baseline "nothing is filtered" state: what resetState() returns to, what updateUrl() omits
@@ -75,7 +75,7 @@ const RECENT_PROJECT_HOURS = 24;
 
 let sessions = [];
 let currentSessionId = null;
-// Kept in the store because a config-dir switch in the hub reloads this page.
+// Kept in the store so a page reload keeps it.
 const SWAP_KEY = 'swap-sessions';
 const SWAP_HISTORY_MAX = 20;
 let swapHistory = readStoredList(SWAP_KEY).filter(Boolean);
@@ -91,8 +91,7 @@ let sessionLimit = SESSION_PAGE;
 let sessionsHasMore = false;
 // Narrows the sidebar to the open session only. Kept out of FILTER_DEFAULTS/updateUrl because it
 // is not a filter — it has no select, no summary token, and never reaches the session picker.
-// Persisted in localStorage rather than the URL: the hub recreates each iframe at the app's base
-// URL, so a query string would not survive a hub reload.
+// Persisted in localStorage rather than the URL, so opening the bare board URL keeps it.
 const ZEN_KEY = 'zenMode';
 let zenMode = store.getItem(ZEN_KEY) === 'true';
 // Group zen: the sidebar shows one group's subtree. A view of the moment, so it is not persisted.
@@ -156,7 +155,7 @@ const MSG_MAX_LOADED = 200;
 let currentProjectPath = null;
 let currentProjectSessionIds = [];
 // Session id -> dismissed-at. Kept for a day: past that the session has usually gone stale,
-// and a reload (the hub reloads this page on a config-dir switch) must not bring it back.
+// and a page reload must not bring it back.
 const DISMISSED_KEY = 'dismissed-sessions';
 const DISMISS_TTL_MS = 24 * 60 * 60 * 1000;
 const isDismissFresh = (at) => typeof at === 'number' && at > Date.now() - DISMISS_TTL_MS;
@@ -238,8 +237,7 @@ function persistLastView() {
     view: viewMode,
     session: currentSessionId,
     projectPath: viewMode === 'project' ? currentProjectPath : null,
-    // The project filter also lives in the URL, but the hub recreates each iframe at the app's
-    // base URL on reload, so the query string alone doesn't survive a hub refresh.
+    // The project filter also lives in the URL, but the bare board URL has no query string.
     project: filterProject,
   });
 }
@@ -842,7 +840,7 @@ async function fetchAgents(sessionId) {
     if (hash === lastAgentsHash) return;
     lastAgentsHash = hash;
     currentAgents = agents;
-    updateTeamColors(agents, data.teamColors);
+    updateTeamColors(agents);
     for (const k of Object.keys(ownerColorCache)) delete ownerColorCache[k];
     renderAgentFooter();
     if (currentSessionId === sessionId) renderKanban();
@@ -884,7 +882,6 @@ async function fetchProjectView(projectPath) {
   currentTasks = tasksResult;
   const seen = new Set();
   currentAgents = [];
-  const mergedColors = {};
   let mergedWaiting = null;
   for (let i = 0; i < agentResults.length; i++) {
     const r = agentResults[i];
@@ -897,11 +894,9 @@ async function fetchProjectView(projectPath) {
         currentAgents.push(a);
       }
     }
-    if (r.teamColors) Object.assign(mergedColors, r.teamColors);
     if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
   }
   currentWaiting = mergedWaiting;
-  Object.assign(teamColorMap, mergedColors);
 
   renderProjectView();
   renderAgentFooter();
@@ -930,7 +925,6 @@ async function refreshProjectAgents() {
         currentAgents.push(a);
       }
     }
-    if (r.teamColors) Object.assign(teamColorMap, r.teamColors);
     if (r.waitingForUser && !mergedWaiting) mergedWaiting = r.waitingForUser;
   }
   currentWaiting = mergedWaiting;
@@ -1470,7 +1464,7 @@ function renderToolItem(m, i, compact) {
   const agentLogBtn = resolveAgentLogBtn(m);
   const recipientColor = m.tool === 'SendMessage' && m.params?.to ? resolveNamedColor(teamColorMap[m.params.to]) : null;
   const borderStyle = recipientColor ? `border-left:3px solid ${recipientColor.color};` : '';
-  const compactClass = compact ? ' msg-tool-grouped' : '';
+  const compactClass = (compact ? ' msg-tool-grouped' : '') + (m.toolError ? ' msg-tool-error' : '');
   const combinedStyle = `style="${borderStyle}cursor:pointer"`;
   const itemClickAttr =
     m.tool === 'Agent' && m.agentId
@@ -2156,9 +2150,8 @@ const deferredPinPlacement = new Set();
 const openedStickyIds = new Set();
 
 // The server keeps the pins (`/api/session/pins`, lib/session-pins.js); the two sets are only the
-// page's copy. The localStorage lists are from before that. Each origin has its own (the hub's
-// proxied port, the standalone board), so each one merges its lists into the server's once, then
-// deletes them.
+// page's copy. The localStorage lists are from before that. Each origin has its own, so each one
+// merges its lists into the server's once, then deletes them.
 async function syncSessionPins() {
   try {
     const body = { pinned: readStoredList(PINNED_SESSIONS_KEY), sticky: readStoredList(STICKY_SESSIONS_KEY) };
@@ -2814,6 +2807,60 @@ function zoomDelta(e) {
   return ZOOM_KEYS[e.key] ?? ZOOM_KEYS[e.code];
 }
 
+// Set while #confirm-modal is open; settles the open confirmModal() promise.
+let closeConfirmModal = null;
+
+// chip: the object named in one line. items: [{state, label, meta}] rows, state in busy|wait|idle (a dot) or
+// omitted (no dot); steps: plain strings shown as what will happen; warn: a line under the list.
+function confirmModal({ title, message, okLabel, chip, items, steps, warn }) {
+  const modal = document.getElementById('confirm-modal');
+  document.getElementById('confirm-modal-title').textContent = title;
+  document.getElementById('confirm-modal-message').textContent = message;
+  const chipEl = document.getElementById('confirm-modal-chip');
+  chipEl.hidden = !chip;
+  chipEl.textContent = chip || '';
+  const listEl = document.getElementById('confirm-modal-list');
+  const rows = [
+    ...(items || []).map(
+      (it) =>
+        `<div class="confirm-row">${it.state ? `<span class="confirm-dot ${escapeHtml(it.state)}"></span>` : ''}<span class="confirm-row-label">${escapeHtml(it.label)}</span><span class="confirm-row-meta">${escapeHtml(it.meta || '')}</span></div>`,
+    ),
+    ...(steps || []).map(
+      (s) => `<div class="confirm-row confirm-step"><span class="confirm-row-label">${escapeHtml(s)}</span></div>`,
+    ),
+  ];
+  listEl.hidden = !rows.length;
+  listEl.innerHTML = rows.join('');
+  const warnEl = document.getElementById('confirm-modal-warn');
+  warnEl.hidden = !warn;
+  warnEl.textContent = warn || '';
+  const buttons = [document.getElementById('confirm-cancel-btn'), document.getElementById('confirm-ok-btn')];
+  buttons[1].textContent = okLabel;
+  const returnFocus = document.activeElement;
+  modal.classList.add('visible');
+  buttons[1].focus();
+
+  const onKey = (e) => {
+    if (matchKey(e, 'ArrowLeft', 'ArrowRight')) {
+      e.preventDefault();
+      buttons[e.key === 'ArrowLeft' ? 0 : 1].focus();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      (document.activeElement === buttons[0] ? buttons[0] : buttons[1]).click();
+    }
+  };
+  document.addEventListener('keydown', onKey);
+  return new Promise((resolve) => {
+    closeConfirmModal = (ok) => {
+      modal.classList.remove('visible');
+      document.removeEventListener('keydown', onKey);
+      closeConfirmModal = null;
+      if (!ok) restoreFocusTo(returnFocus, modal);
+      resolve(ok);
+    };
+  });
+}
+
 let _toastTimer = null;
 let _manualRefreshing = false;
 //#endregion
@@ -2851,10 +2898,6 @@ function showToast(msg, type, action, hint) {
   if (type) el.classList.add(`toast-${type}`);
   el.classList.add('visible');
   _toastTimer = setTimeout(hide, action ? 8000 : 2000);
-}
-
-function sendMessageAddress(peerName) {
-  return `SendMessage(${peerName})`;
 }
 
 async function copyText(text, what, okMsg = `Copied ${what}`) {
@@ -3337,7 +3380,7 @@ async function _toggleToolResultExpand(btn) {
 
 function buildToolContent(m) {
   let content = m.fullDetail || m.detail || '';
-  if (m.toolResult) content += `\n\n--- Output ---\n\n${sanitizeOutput(m.toolResultFull || m.toolResult)}`;
+  if (m.toolResult) content += `\n\n--- ${m.toolError ? 'Error' : 'Output'} ---\n\n${sanitizeOutput(m.toolResultFull || m.toolResult)}`;
   return content;
 }
 
@@ -3665,7 +3708,8 @@ function showAgentModal(agentId) {
   title.innerHTML = `${statusDot} ${escapeHtml(agent.type || 'unknown')}${modalNameLabel}`;
 
   const shortModel = shortModelName(agentModel(agent));
-  const shortId = agent.agentId ? agent.agentId.slice(0, 8) : '';
+  // pi ids are tc_<tool call id>_<child index>; the tail tells children apart.
+  const shortId = agent.agentId ? agent.agentId.slice(-8) : '';
   const chip = (label, value, opts = {}) => {
     const cls = opts.cls ? ` ${opts.cls}` : '';
     const style = opts.style ? ` style="${opts.style}"` : '';
@@ -4087,7 +4131,7 @@ function renderSessions() {
   if (zenMode) {
     sessionsList.innerHTML = `${renderSessionCard(zenSession)}
       <div class="zen-panel">
-        ${renderContextDetail(zenSession, { tokens: false }) || '<div class="zen-panel-empty">No context data for this session</div>'}
+        ${renderContextDetail(zenSession, { tokens: !getCtx(zenSession) }) || '<div class="zen-panel-empty">No context data for this session</div>'}
         ${renderScratchpadRow(zenSession)}
         ${renderLinkedDocsHtml(zenSession.id)}
         ${renderArtifactsHtml(zenSession.id)}
@@ -4592,22 +4636,14 @@ function renderKanban() {
   completedCount.textContent = completed.length;
 
   const emptyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>`;
-  const plusIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>`;
 
   const writes = [];
-  // Adding is a live text input inside the column, so a background refresh would blow it
-  // away mid-typing -- leave the column alone until the input is gone.
-  if (!addingTask) {
-    const addTile = canAddTask()
-      ? `<button type="button" class="column-add${pending.length ? '' : ' empty'}" onclick="startAddTask(this)" title="You can also ask the agent to add tasks with its todo tool.">${plusIcon}<span>Add task</span></button>`
-      : '';
-    writes.push([
-      pendingTasks,
-      pending.length > 0
-        ? pending.map(renderTaskCard).join('') + addTile
-        : addTile || `<div class="column-empty">${emptyIcon}<div>No pending tasks</div></div>`,
-    ]);
-  }
+  writes.push([
+    pendingTasks,
+    pending.length > 0
+      ? pending.map(renderTaskCard).join('')
+      : `<div class="column-empty">${emptyIcon}<div>No pending tasks</div></div>`,
+  ]);
 
   writes.push([
     inProgressTasks,
@@ -4647,77 +4683,6 @@ function renderKanban() {
   }
 }
 
-//#endregion
-
-//#region ADD_TASK
-let addingTask = false;
-
-// A task the user types is theirs to place, and the only session it can belong to is the
-// one on screen -- the project and all-sessions views span many task dirs, so there is no
-// single target to write into.
-function canAddTask() {
-  return viewMode === 'session' && !!currentSessionId;
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function startAddTask(tile) {
-  if (addingTask) return;
-  addingTask = true;
-
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'form-input column-add-input';
-  input.placeholder = 'Task subject, Enter to add';
-  // The input mutates the column outside setColumnHtml — drop the cache so the
-  // next render rebuilds instead of skipping on a stale match.
-  pendingTasks._lastHtml = null;
-  tile.replaceWith(input);
-  input.focus();
-
-  const reset = () => {
-    addingTask = false;
-    renderKanban();
-  };
-
-  const save = async () => {
-    // Enter and blur both submit, and Enter's own save disables the input -- which blurs
-    // it. Dropping both handlers first is what keeps that from posting the subject twice.
-    input.onkeydown = null;
-    input.onblur = null;
-
-    const subject = input.value.trim();
-    if (!subject) return reset();
-    input.disabled = true;
-    const sessionId = currentSessionId;
-    try {
-      const res = await api(apiPath`/api/tasks/${sessionId}`, { method: 'POST', body: { subject } });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // The response carries the finished task, and the watcher will resend it within the
-      // SSE debounce anyway -- so show it now rather than paying a session refetch for it.
-      const { task } = await res.json();
-      currentTasks.push({ ...task, sessionId });
-      addingTask = false;
-      renderKanban();
-    } catch (error) {
-      console.error('Failed to create task:', error);
-      showToast('Failed to create task', 'error');
-      reset();
-    }
-  };
-
-  input.onkeydown = (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      save();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      input.onblur = null;
-      reset();
-    }
-  };
-  input.onblur = () => save();
-}
 //#endregion
 
 //#region DRAG_DROP
@@ -6050,7 +6015,6 @@ function setFocusZone(zone, target) {
       if (card) card.classList.add('selected');
     } else {
       navigateVertical(1);
-      if (!selectedTaskId) document.querySelector('.column-add')?.focus();
     }
     if (selectedTaskId && detailPanel.classList.contains('visible')) {
       showTaskDetail(selectedTaskId, selectedSessionId);
@@ -6158,11 +6122,6 @@ async function showTaskDetail(taskId, sessionId = null) {
     chip.onclick = () => showTaskDetail(chip.dataset.depId, actualSessionId);
   }
 
-  // Setup button handlers (read-only in project view)
-  const deleteBtn = document.getElementById('delete-task-btn');
-  deleteBtn.style.display = isProjectView ? 'none' : '';
-  if (!isProjectView) deleteBtn.onclick = () => deleteTask(task.id, actualSessionId);
-
   if (!isProjectView) {
     const titleEl = detailContent.querySelector('.detail-title');
     if (titleEl) {
@@ -6209,7 +6168,7 @@ function editTitle(titleEl, task, sessionId) {
       const shift = e.shiftKey;
       save().then(() => {
         const target = shift
-          ? document.getElementById('delete-task-btn')
+          ? document.getElementById('expand-detail')
           : detailContent.querySelector('.detail-dep') || document.getElementById('close-detail');
         target?.focus();
       });
@@ -6293,104 +6252,8 @@ function initDetailLayout() {
 
 function closeDetailPanel() {
   detailPanel.classList.remove('visible');
-  document.getElementById('delete-task-btn').style.display = 'none';
   // Keep the task selected AND highlighted after closing (no dim-off).
   taskHighlightDimmed = false;
-}
-
-//#endregion
-
-//#region DELETE_TASK
-// Set while #confirm-modal is open; settles the open confirmModal() promise.
-let closeConfirmModal = null;
-
-// chip: the object named in one line. items: [{state, label, meta}] rows, state in busy|wait|idle (a dot) or
-// omitted (no dot); steps: plain strings shown as what will happen; warn: a line under the list.
-function confirmModal({ title, message, okLabel, chip, items, steps, warn }) {
-  const modal = document.getElementById('confirm-modal');
-  document.getElementById('confirm-modal-title').textContent = title;
-  document.getElementById('confirm-modal-message').textContent = message;
-  const chipEl = document.getElementById('confirm-modal-chip');
-  chipEl.hidden = !chip;
-  chipEl.textContent = chip || '';
-  const listEl = document.getElementById('confirm-modal-list');
-  const rows = [
-    ...(items || []).map(
-      (it) =>
-        `<div class="confirm-row">${it.state ? `<span class="confirm-dot ${escapeHtml(it.state)}"></span>` : ''}<span class="confirm-row-label">${escapeHtml(it.label)}</span><span class="confirm-row-meta">${escapeHtml(it.meta || '')}</span></div>`,
-    ),
-    ...(steps || []).map(
-      (s) => `<div class="confirm-row confirm-step"><span class="confirm-row-label">${escapeHtml(s)}</span></div>`,
-    ),
-  ];
-  listEl.hidden = !rows.length;
-  listEl.innerHTML = rows.join('');
-  const warnEl = document.getElementById('confirm-modal-warn');
-  warnEl.hidden = !warn;
-  warnEl.textContent = warn || '';
-  const buttons = [document.getElementById('confirm-cancel-btn'), document.getElementById('confirm-ok-btn')];
-  buttons[1].textContent = okLabel;
-  const returnFocus = document.activeElement;
-  modal.classList.add('visible');
-  buttons[1].focus();
-
-  const onKey = (e) => {
-    if (matchKey(e, 'ArrowLeft', 'ArrowRight')) {
-      e.preventDefault();
-      buttons[e.key === 'ArrowLeft' ? 0 : 1].focus();
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      (document.activeElement === buttons[0] ? buttons[0] : buttons[1]).click();
-    }
-  };
-  document.addEventListener('keydown', onKey);
-  return new Promise((resolve) => {
-    closeConfirmModal = (ok) => {
-      modal.classList.remove('visible');
-      document.removeEventListener('keydown', onKey);
-      closeConfirmModal = null;
-      if (!ok) restoreFocusTo(returnFocus, modal);
-      resolve(ok);
-    };
-  });
-}
-
-async function deleteTask(taskId, sessionId) {
-  const task = currentTasks.find((t) => t.id === taskId);
-  if (!task) return;
-  const ok = await confirmModal({
-    title: 'Delete this task?',
-    message: 'It is removed from the board. This cannot be undone.',
-    chip: task.subject,
-    okLabel: 'Delete task',
-  });
-  if (!ok) return;
-  const info = taskId === selectedTaskId ? getSelectedCardInfo() : null;
-  const colCards = info ? Array.from(COLUMNS[info.colIndex].el.querySelectorAll('.task-card')) : [];
-  const next = colCards[info?.cardIndex + 1] || colCards[info?.cardIndex - 1];
-
-  try {
-    const res = await api(apiPath`/api/tasks/${sessionId}/${taskId}`, { method: 'DELETE' });
-
-    if (res.ok) {
-      closeDetailPanel();
-      await refreshCurrentView();
-      if (info && focusZone === 'board') {
-        if (next) {
-          selectTask(next.dataset.taskId, next.dataset.sessionId);
-        } else {
-          selectedTaskId = null;
-          navigateVertical(1);
-        }
-      }
-    } else {
-      const error = await res.json().catch(() => ({}));
-      showToast(`Failed to delete task: ${error.error || 'Unknown error'}`, 'error');
-    }
-  } catch (error) {
-    console.error('Failed to delete task:', error);
-    showToast('Failed to delete task', 'error');
-  }
 }
 
 //#endregion
@@ -6418,7 +6281,6 @@ const SHORTCUT_TABS = [
         title: 'Board',
         rows: [
           { keys: ['Enter'], label: 'Toggle task detail panel' },
-          { keys: ['D'], label: 'Delete selected task' },
           { keys: ['E'], label: 'Expand / restore task detail panel' },
           { keys: ['N'], label: 'Toggle scratchpad (in the sidebar: the item under the cursor)' },
           { keys: ['Ctrl', 'E'], combo: true, label: 'Set the session scratchpad emoji (in the scratchpad)' },
@@ -6476,15 +6338,15 @@ const SHORTCUT_TABS = [
           { keys: ['Ctrl', 'Shift', 'L'], combo: true, label: 'Toggle session log' },
           { keys: ['Ctrl', 'Shift', 'M'], combo: true, label: 'Open last message' },
           { keys: ['↑', '↓'], label: 'Previous / next message in detail' },
-          { keys: ['Ctrl', 'Enter'], combo: true, label: 'Allow / approve the waiting prompt; send review comments' },
+          { keys: ['Ctrl', 'Enter'], combo: true, label: 'Send review comments' },
         ],
       },
       {
         title: 'Sessions',
         rows: [
-          { keys: ['Ctrl', 'Alt', 'N'], combo: true, hubMod: true, label: 'New session' },
-          { keys: ['Ctrl', 'Alt', 'R'], combo: true, hubMod: true, label: 'Resume session' },
-          { keys: ['Ctrl', 'Alt', 'S'], combo: true, hubMod: true, label: 'Swap to previous session' },
+          { keys: ['Ctrl', 'Alt', 'N'], combo: true, ctrlAlt: true, label: 'New session' },
+          { keys: ['Ctrl', 'Alt', 'R'], combo: true, ctrlAlt: true, label: 'Resume session' },
+          { keys: ['Ctrl', 'Alt', 'S'], combo: true, ctrlAlt: true, label: 'Swap to previous session' },
           { keys: ['Shift', 'C'], combo: true, label: 'Copy session id' },
           { keys: ['Ctrl', 'Shift', 'C'], combo: true, label: 'Copy session name' },
         ],
@@ -6499,10 +6361,10 @@ const SHORTCUT_TABS = [
         rows: [
           { keys: ['Ctrl', '`'], combo: true, label: 'Show / hide terminal' },
           { keys: ['Alt', '`'], combo: true, label: 'Focus terminal / page' },
-          { keys: ['Ctrl', 'Alt', '`'], combo: true, hubMod: true, label: 'Focus terminal / show card' },
+          { keys: ['Ctrl', 'Alt', '`'], combo: true, ctrlAlt: true, label: 'Focus terminal / show card' },
           { keys: ['Alt', 'Shift', '`'], combo: true, label: 'End terminal' },
           { keys: ['Ctrl', 'Shift', '`'], combo: true, label: 'All terminals' },
-          { keys: ['Ctrl', '+/−/0'], combo: true, label: 'Terminal text size' },
+          { keys: ['Ctrl', '+/−/0'], combo: true, label: 'Terminal text size (pi undo is Ctrl+_)' },
         ],
       },
       {
@@ -6536,7 +6398,7 @@ function termKbd() {
 // The keys of a help row as they read on this system. On macOS the Ctrl+Alt rows read Control+Option.
 function helpKeys(row, mac = IS_MAC) {
   if (!mac) return row.keys;
-  if (row.hubMod) return ['⌃', '⌥', ...row.keys.filter((k) => k !== 'Ctrl' && k !== 'Alt')];
+  if (row.ctrlAlt) return ['⌃', '⌥', ...row.keys.filter((k) => k !== 'Ctrl' && k !== 'Alt')];
   return row.keys.map((k) => MAC_KEYS[k] || k);
 }
 
@@ -7810,7 +7672,7 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
-  if (hubModDown(e) && /^Digit[1-9]$/.test(e.code) && selectPaneByNumber(Number(e.code.slice(5)))) {
+  if (ctrlAltDown(e) && /^Digit[1-9]$/.test(e.code) && selectPaneByNumber(Number(e.code.slice(5)))) {
     e.preventDefault();
     focusActivePane();
     return;
@@ -7881,7 +7743,7 @@ document.addEventListener('keydown', (e) => {
       else leaveTerminalPane();
       return;
     }
-    if (focusZone === 'sidebar' && !document.querySelector('.task-card, .column-add')) return;
+    if (focusZone === 'sidebar' && !document.querySelector('.task-card')) return;
     setFocusZone(focusZone === 'board' ? 'sidebar' : 'board');
     return;
   }
@@ -7950,12 +7812,6 @@ document.addEventListener('keydown', (e) => {
       return;
     }
 
-    if (matchKey(e, 'KeyD') && selectedTaskId) {
-      e.preventDefault();
-      deleteTask(selectedTaskId, selectedSessionId || currentSessionId);
-      return;
-    }
-
     if (matchKey(e, 'KeyE') && detailPanel.classList.contains('visible')) {
       e.preventDefault();
       setDetailExpanded(!detailPanel.classList.contains('expanded'));
@@ -8009,12 +7865,11 @@ document.addEventListener('keydown', (e) => {
       showToast('No session selected');
       return;
     }
-    const peerName = e.ctrlKey ? sessions.find((s) => s.id === contextSid)?.peerName : null;
     const [text, label] = e.ctrlKey
-      ? [peerName && sendMessageAddress(peerName), 'session name']
+      ? [sessions.find((s) => s.id === contextSid)?.customTitle, 'session name']
       : [contextSid, 'session id'];
     if (!text) {
-      showToast('No live session name: the session is not running');
+      showToast('The session has no name: set one with /name in pi');
       return;
     }
     copyText(text, label, `Copied ${label}: ${e.ctrlKey ? text : text.slice(0, 8)}`);
@@ -8908,7 +8763,7 @@ async function toastDelivery({ delivered, markdown }, noun) {
       copied ? `Copied the ${noun}. Paste it into the session.` : `Failed to copy the ${noun}`,
       'info',
       { label: 'Copy again', onClick: copy },
-      `Sessions get ${noun}s directly when the pi-kanban plugin runs there and board events are on.`,
+      `Sessions get ${noun}s directly when the pi-kanban extension runs there and board events are on.`,
     );
   };
   await copy();
@@ -10978,7 +10833,7 @@ let mermaidThemeKey = '';
 let colorProbe = null;
 const probedColors = new Map();
 
-// Mermaid's color parser knows only plain hex, rgb() and hsl(), and a hub theme may set oklch() or
+// Mermaid's color parser knows only plain hex, rgb() and hsl(), and a color theme may set oklch() or
 // relative color syntax; its initialize throws on one, and no diagram renders.
 function mermaidColor(value) {
   if (!value || value.startsWith('#')) return value;
@@ -11187,8 +11042,7 @@ function resolveNamedColor(colorName) {
   return namedColorMap[colorName.toLowerCase()] || null;
 }
 
-function updateTeamColors(agents, colors) {
-  if (colors) Object.assign(teamColorMap, colors);
+function updateTeamColors(agents) {
   for (const a of agents) {
     const name = a.type || a.name;
     if (name && a.color) teamColorMap[name] = a.color;
@@ -11928,15 +11782,13 @@ function showInfoModal(session, planContent, parentInfo) {
   // Each row: [label, value, { openPath?, abbrev?, copy? }] — `value` is authoritative
   // (tooltip + copy); `abbrev` only replaces the rendered text, `copy` the copied text.
   const infoRows = [];
-  infoRows.push(['Session', session.id, { openClaudeDir: true, openFile: session.jsonlPath }]);
-  if (session.peerName) {
-    infoRows.push(['Peer name', session.peerName, { copy: sendMessageAddress(session.peerName) }]);
-  }
+  infoRows.push(['Session', session.id, { openAgentDir: true, openFile: session.jsonlPath }]);
+  if (session.customTitle) infoRows.push(['Name', session.customTitle]);
   if (parentInfo?.parentSessionId) {
     infoRows.push([
       parentInfo.relation === 'compact' ? 'Continued from' : 'Forked from',
       parentInfo.parentSessionId,
-      { openClaudeDir: true, openFile: parentInfo.parentJsonlPath, openSession: parentInfo.parentSessionId },
+      { openAgentDir: true, openFile: parentInfo.parentJsonlPath, openSession: parentInfo.parentSessionId },
     ]);
   }
   if (session.hasPlan) {
@@ -11983,10 +11835,10 @@ function showInfoModal(session, planContent, parentInfo) {
     }
     const copyBtn = `<button onclick="copyWithFeedback('${escAttrJs(opts?.copy || value)}', this)" title="Copy">${ICON_COPY}</button>`;
     let openBtn = '';
-    if (opts?.openClaudeDir || opts?.openPath) {
-      const folder = opts.openClaudeDir ? '' : escapeHtml(opts.openPath);
+    if (opts?.openAgentDir || opts?.openPath) {
+      const folder = opts.openAgentDir ? '' : escapeHtml(opts.openPath);
       const file = opts.openFile ? escapeHtml(opts.openFile) : '';
-      openBtn = `<button data-folder="${folder}" data-file="${file}" data-pi-agent-dir="${opts.openClaudeDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.piAgentDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>`;
+      openBtn = `<button data-folder="${folder}" data-file="${file}" data-pi-agent-dir="${opts.openAgentDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.piAgentDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>`;
     }
     html += `<span class="row-actions">${copyBtn}${openBtn}</span>`;
   });
@@ -12349,7 +12201,7 @@ function initSessionPicker() {
 //#endregion
 
 //#region PROJECT_PICKER
-// Sets only this board's project filter; a later hub project.changed replaces it.
+// Sets only this board's project filter.
 let ppRows = [];
 let ppIdx = 0;
 let ppSource = null;
@@ -14488,7 +14340,7 @@ function terminalPaneFocused() {
 }
 
 // AltGr reaches the page as Ctrl+Alt; when it types a character (Polish AltGr+S is 'ś'), the press is text.
-function hubModDown(e) {
+function ctrlAltDown(e) {
   return e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey && !e.getModifierState?.('AltGraph');
 }
 
@@ -14508,7 +14360,7 @@ function inPageField(e) {
 
 // `probe` asks which keys the terminal frame hands back, and the frame sees keys only while it has focus.
 function terminalShortcut(e, probe = false) {
-  const ctrlAlt = hubModDown(e);
+  const ctrlAlt = ctrlAltDown(e);
   const ctrlShift = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
   // Ctrl+_ is undo in pi, so the zoom keys leave it to the terminal. An open ask card,
   // which sits in the terminal pane, takes them for its own text zoom.
@@ -14767,12 +14619,10 @@ window.addEventListener('message', (e) => {
 
 function terminalInitOptions(themeOptions) {
   return {
-    fontFamily:
-      appConfig.terminal.fontFamily ||
-      getComputedStyle(document.body).getPropertyValue('--font-mono').trim() ||
-      'monospace',
+    fontFamily: getComputedStyle(document.body).getPropertyValue('--font-mono').trim() || 'monospace',
     fontSize: currentTerminalFontSize(),
     scrollback: appConfig.terminal.scrollback,
+    windowsPty: appConfig.terminal.windowsPty,
     themeOptions,
   };
 }
@@ -17218,6 +17068,8 @@ if (urlState.search) {
 getJson('/api/config')
   .then((c) => {
     if (c) appConfig = c;
+    const thinking = document.getElementById('ns-thinking');
+    for (const level of appConfig.thinkingLevels || []) thinking.add(new Option(level));
   })
   .then(restorePendingSessions)
   .then(() =>

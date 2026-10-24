@@ -11,10 +11,10 @@ const MAC_KEYS = /^const MAC_KEYS = .*;$/m.exec(src)[0];
 
 // The page's own helpers, with the platform passed in the way the page's IS_MAC default does.
 const page = vm.runInNewContext(
-  `${MAC_KEYS}\n${fn('hubModDown')}\n${fn('helpKeys')}\n${fn('buildHelpShortcuts')}\n${tabs}\n({ hubModDown, helpKeys, buildHelpShortcuts, SHORTCUT_TABS })`,
+  `${MAC_KEYS}\n${fn('ctrlAltDown')}\n${fn('helpKeys')}\n${fn('buildHelpShortcuts')}\n${tabs}\n({ ctrlAltDown, helpKeys, buildHelpShortcuts, SHORTCUT_TABS })`,
   { IS_MAC: false, escapeHtml: String },
 );
-const { hubModDown, SHORTCUT_TABS } = page;
+const { ctrlAltDown, SHORTCUT_TABS } = page;
 // Arrays from the vm context have another prototype, so copy them for deepEqual.
 const helpKeys = (r, mac) => [...page.helpKeys(r, mac)];
 
@@ -26,16 +26,16 @@ const MAC = true;
 
 describe('session keys (new, resume, swap)', () => {
   it('are Ctrl+Alt, with no other modifier', () => {
-    assert.equal(hubModDown({ ...NONE, ctrlKey: true, altKey: true }), true);
-    assert.equal(hubModDown({ ...NONE, altKey: true, metaKey: true }), false);
-    assert.equal(hubModDown({ ...NONE, ctrlKey: true, altKey: true, shiftKey: true }), false);
-    assert.equal(hubModDown({ ...NONE, ctrlKey: true, altKey: true, metaKey: true }), false);
-    assert.equal(hubModDown({ ...NONE, altKey: true }), false);
+    assert.equal(ctrlAltDown({ ...NONE, ctrlKey: true, altKey: true }), true);
+    assert.equal(ctrlAltDown({ ...NONE, altKey: true, metaKey: true }), false);
+    assert.equal(ctrlAltDown({ ...NONE, ctrlKey: true, altKey: true, shiftKey: true }), false);
+    assert.equal(ctrlAltDown({ ...NONE, ctrlKey: true, altKey: true, metaKey: true }), false);
+    assert.equal(ctrlAltDown({ ...NONE, altKey: true }), false);
   });
 
   it('are not an AltGr press, which types a character', () => {
     const altGr = { ...NONE, ctrlKey: true, altKey: true, getModifierState: (m) => m === 'AltGraph' };
-    assert.equal(hubModDown(altGr), false);
+    assert.equal(ctrlAltDown(altGr), false);
   });
 });
 
@@ -59,8 +59,8 @@ describe('help dialog keys', () => {
   });
 
   it('only the Ctrl+Alt session keys are flagged', () => {
-    for (const label of ['New session', 'Resume session', 'Swap to previous session']) assert.equal(row(label).hubMod, true, label);
-    assert.equal(row('Show / hide terminal').hubMod, undefined);
+    for (const label of ['New session', 'Resume session', 'Swap to previous session']) assert.equal(row(label).ctrlAlt, true, label);
+    assert.equal(row('Show / hide terminal').ctrlAlt, undefined);
   });
 
   it('builds a row for each key', () => {

@@ -92,6 +92,7 @@
       term: null,
       fit: null,
       webgl: null,
+      initing: false,
       ws: null,
       attached: false,
       ackPending: 0,
@@ -167,12 +168,23 @@
       return !(ctrlOnly && e.code === 'KeyV');
     }
 
+    // xterm measures its cell when it opens or a font option changes, not when a web font finishes
+    // loading. Measured on the fallback font, the cell is shorter, fit picks more rows than the pane
+    // shows, and the first hello asks the PTY for that size.
     function init(o) {
-      if (state.term) return;
+      if (state.initing) return;
+      state.initing = true;
+      const loaded = doc.fonts?.load(`${o.fontSize}px ${o.fontFamily}`);
+      if (loaded) loaded.catch(() => {}).then(() => build(o));
+      else build(o);
+    }
+
+    function build(o) {
       const term = new win.Terminal({
         fontFamily: o.fontFamily,
         fontSize: o.fontSize,
         scrollback: o.scrollback,
+        windowsPty: o.windowsPty,
         cursorBlink: true,
         allowProposedApi: true,
         // xterm's default asks with confirm() and opens a window, which an installed app window blocks.
@@ -221,7 +233,10 @@
       doc.addEventListener('keydown', (e) => {
         if (e.target !== term.textarea) forwardClaimed(e);
       });
-      term.textarea.addEventListener('focus', () => up('focused'));
+      term.textarea.addEventListener('focus', () => {
+        up('focused');
+        send({ t: 'resize', cols: term.cols, rows: term.rows, claim: true });
+      });
       // xterm reports focus only when its textarea gains or loses it, not when an app turns focus reporting
       // (DECSET 1004) on. After a reload xterm is focused before the replayed output sets the mode, so the
       // app never gets a focus-in and draws its cursor as unfocused.

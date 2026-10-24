@@ -40,6 +40,7 @@ const { inlineHtmlAssets, MIME_BY_EXT } = require('./lib/inline-assets');
 const { buildDecision, decisionFileName, isDecisionFile, approvalsFrom, boardRefusal } = require('./lib/approvals');
 const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace } = require('./lib/board-dir');
 const { readTerminalConfig } = require('./lib/terminal');
+const { THINKING_LEVELS } = require('./lib/pi-agents');
 const { createTerminalClient } = require('./lib/terminal-client');
 const { createShowStore, mountShowRoutes, showBodyParser, SHOW_PATH } = require('./lib/show');
 const { createAskStore, mountAskRoutes, terminalAskRoutes, askBodyParser, ASK_PATH, SESSION_ASK_PATH, SESSION_ASK_ROUTES } = require('./lib/ask');
@@ -2112,6 +2113,7 @@ app.get('/api/config', (_req, res) => {
   res.json({
     scratchAvailable: !!whichSync('scratch'),
     terminal: terminal.clientConfig(),
+    thinkingLevels: [...THINKING_LEVELS],
   });
 });
 

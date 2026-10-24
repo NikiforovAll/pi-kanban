@@ -5,7 +5,7 @@ const { mkdtempSync, readFileSync, realpathSync, rmSync } = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { createTerminalService, shellArgs, piCommand, readTerminalConfig, resolveShell, piArgsFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
+const { createTerminalService, shellArgs, piCommand, readTerminalConfig, resolveShell, piArgsFor, withTuiMode, windowsPtyFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
 
 let WebSocket = null;
 let ptyAvailable = false;
@@ -164,6 +164,17 @@ describe('new session options', () => {
       ['--session-id', SESSION, '--name', 'Fix login', '--model', 'codemie/gpt-6-luna:high', '--thinking', 'xhigh']);
     assert.deepEqual(piArgsFor('new', SESSION, parseNewSpec({ cwd: '/p' })), ['--session-id', SESSION]);
   });
+  it('runs pi in regular TUI mode on Windows, unless the args name a mode', () => {
+    const args = ['--session', SESSION];
+    assert.deepEqual(withTuiMode(args, 'win32'), ['--session', SESSION, '--tui-mode', 'regular']);
+    assert.deepEqual(withTuiMode(args, 'linux'), args);
+    assert.deepEqual(withTuiMode(['--tui-mode=fullscreen'], 'win32'), ['--tui-mode=fullscreen']);
+    assert.equal(withTuiMode(null, 'win32'), null);
+  });
+  it('tells xterm about ConPTY on Windows only', () => {
+    assert.deepEqual(windowsPtyFor('win32', '10.0.26300'), { backend: 'conpty', buildNumber: 26300 });
+    assert.deepEqual(windowsPtyFor('linux', '6.8.0'), {});
+  });
   it('resumes a transcript under its own id', () => {
     const OLD = 'cccccccc-0000-0000-0000-000000000003';
     assert.deepEqual(piArgsFor('new', SESSION, parseNewSpec({ cwd: '/p', resume: OLD })), ['--session', OLD]);
@@ -241,7 +252,8 @@ describe('edit before run', () => {
     p.emit('prompt> ');
     await until(() => p.written.length > 0);
     await wait(150);
-    assert.deepEqual(p.written, [`\x1b[200~pi --session-id ${A} --name 'Fix login' -- 'line one\rline two'\x1b[201~`]);
+    const tui = process.platform === 'win32' ? ' --tui-mode regular' : '';
+    assert.deepEqual(p.written, [`\x1b[200~pi --session-id ${A} --name 'Fix login'${tui} -- 'line one\rline two'\x1b[201~`]);
     assert.equal(t.list()[0].edit, true);
     t.shutdown();
   });
@@ -506,26 +518,17 @@ describe('ptyEnv', () => {
 });
 
 describe('readTerminalConfig', () => {
-  it('is off by default and turns on from the flag or the PK_TERMINAL block', () => {
-    assert.equal(readTerminalConfig({ argv: [], env: {} }).enabled, false);
+  it('is on by default and turns off from the flag', () => {
+    assert.equal(readTerminalConfig({ argv: [], env: {} }).enabled, true);
     assert.equal(readTerminalConfig({ argv: [], env: {} }).maxSessions, 30);
     assert.equal(readTerminalConfig({ argv: ['--enable-terminal'], env: {} }).enabled, true);
-    const c = readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"enabled":true,"maxSessions":2}' } });
-    assert.equal(c.enabled, true);
-    assert.equal(c.maxSessions, 2);
+    assert.equal(readTerminalConfig({ argv: ['--no-terminal'], env: {} }).enabled, false);
   });
-  it('restores terminals unless the block turns it off', () => {
-    assert.equal(readTerminalConfig({ argv: [], env: {} }).restore, true);
-    assert.equal(readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"restore":false}' } }).restore, false);
-  });
-  it('takes the shell from the flag, then the env var, then the PK_TERMINAL block', () => {
-    const env = { PK_TERMINAL: '{"shell":"pwsh"}', PK_TERMINAL_SHELL: 'gitbash' };
+  it('takes the shell from the flag, then the env var', () => {
+    const env = { PK_TERMINAL_SHELL: 'gitbash' };
     assert.equal(readTerminalConfig({ argv: [], env }).shell, 'gitbash');
     assert.equal(readTerminalConfig({ argv: [], env, getArgValue: () => 'cmd' }).shell, 'cmd');
-    assert.equal(readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{"shell":"pwsh"}' } }).shell, 'pwsh');
-  });
-  it('ignores a malformed block', () => {
-    assert.equal(readTerminalConfig({ argv: [], env: { PK_TERMINAL: '{' } }).enabled, false);
+    assert.equal(readTerminalConfig({ argv: [], env: {} }).shell, null);
   });
 });
 
@@ -533,7 +536,7 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
   let srv;
   let port;
   before(async () => {
-    srv = startServer(['--enable-terminal', '--terminal-shell', SHELL]);
+    srv = startServer(['--terminal-shell', SHELL]);
     port = await srv.port;
   });
   after(() => stopServer(srv));
@@ -670,8 +673,9 @@ function fakePty({ holdExit = false } = {}) {
     spawn(_file, args, opts) {
       let onExit = () => {};
       const p = {
-        pid: 100000 + spawned.length, args, env: opts?.env, written: [], emit: () => {},
-        onData(cb) { p.emit = cb; }, onExit(cb) { onExit = cb; }, write(d) { p.written.push(d); }, resize() {}, pause() {}, resume() {},
+        pid: 100000 + spawned.length, args, env: opts?.env, written: [], resizes: [], emit: () => {},
+        onData(cb) { p.emit = cb; }, onExit(cb) { onExit = cb; }, write(d) { p.written.push(d); },
+        resize(cols, rows) { p.resizes.push([cols, rows]); }, pause() {}, resume() {},
         exit() { onExit({ exitCode: 0 }); },
         kill() { if (!holdExit) setImmediate(() => onExit({ exitCode: 0 })); },
       };
@@ -874,12 +878,11 @@ describe('terminal restore', () => {
   });
 });
 
-describe('terminal reopen', { skip: !WebSocket }, () => {
+describe('terminal sockets', { skip: !WebSocket }, () => {
   const A = 'aaaaaaaa-0000-0000-0000-000000000001';
 
-  it('starts a new PTY for an id whose ended PTY has not exited yet', async () => {
-    const pty = fakePty({ holdExit: true });
-    const t = createTerminalService({
+  function service(pty) {
+    return createTerminalService({
       config: { enabled: true, restore: false, shell: SHELL, maxSessions: 30, scrollback: 100 },
       net: { EXPOSED: false, upgradeVerdict: () => null },
       pty,
@@ -890,10 +893,19 @@ describe('terminal reopen', { skip: !WebSocket }, () => {
       resolveCwd: () => null,
       liveSessions: () => [],
     });
+  }
+
+  async function serve(pty) {
+    const t = service(pty);
     const server = http.createServer();
     server.on('upgrade', (req, socket, head) => t.handleUpgrade(req, socket, head));
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
-    const port = server.address().port;
+    return { t, server, port: server.address().port };
+  }
+
+  it('starts a new PTY for an id whose ended PTY has not exited yet', async () => {
+    const pty = fakePty({ holdExit: true });
+    const { t, server, port } = await serve(pty);
     const sockets = [];
     const ready = async () => {
       const got = await session(port, { id: A, mode: 'shell' }, (g) => g.control.some((m) => m.t === 'ready'));
@@ -917,13 +929,69 @@ describe('terminal reopen', { skip: !WebSocket }, () => {
       server.close();
     }
   });
+
+  it('replays a hidden cursor to a viewer that attaches later', async () => {
+    const pty = fakePty();
+    const { t, server, port } = await serve(pty);
+    const ready = (g) => g.control.some((m) => m.t === 'ready');
+    const first = await session(port, { id: A, mode: 'shell' }, ready);
+    const later = [];
+    try {
+      const [p] = pty.spawned;
+      const replay = async (data) => {
+        p.emit(data);
+        await wait(50);
+        const got = await session(port, { id: A, mode: 'shell' }, (g) => ready(g) && g.out.includes('prompt'));
+        later.push(got.ws);
+        return got.out;
+      };
+      assert.ok((await replay('\x1b[?25lprompt')).endsWith('\x1b[?25l'));
+      assert.ok(!(await replay('\x1b[?25h')).includes('\x1b[?25l'));
+    } finally {
+      for (const ws of [first.ws, ...later]) ws.terminate();
+      t.shutdown();
+      server.close();
+    }
+  });
+
+  it('sizes a shared PTY to the viewer that last attached, focused or typed', async () => {
+    const pty = fakePty();
+    const { t, server, port } = await serve(pty);
+    const ready = (g) => g.control.some((m) => m.t === 'ready');
+    const big = await session(port, { id: A, mode: 'shell' }, ready);
+    const small = await session(port, { id: A, mode: 'shell' }, ready);
+    try {
+      const [p] = pty.spawned;
+      const step = async (ws, msg) => {
+        ws.send(JSON.stringify(msg));
+        await wait(50);
+      };
+      await step(big.ws, { t: 'resize', cols: 200, rows: 60, claim: true });
+      await step(small.ws, { t: 'resize', cols: 100, rows: 30, claim: true });
+      await step(big.ws, { t: 'resize', cols: 210, rows: 60 });
+      assert.equal(p.resizes.length, 2, 'a layout change of a viewer that does not own the PTY');
+      await step(big.ws, { t: 'in', d: '/' });
+      await step(small.ws, { t: 'resize', cols: 90, rows: 30 });
+      await step(small.ws, { t: 'in', d: 'x' });
+      await step(small.ws, { t: 'in', d: 'y' });
+      small.ws.close();
+      await until(() => p.resizes.length === 5);
+      assert.deepEqual(p.resizes, [[200, 60], [100, 30], [210, 60], [90, 30], [210, 60]]);
+      assert.deepEqual(p.written, ['/', 'x', 'y']);
+    } finally {
+      big.ws.terminate();
+      small.ws.terminate();
+      t.shutdown();
+      server.close();
+    }
+  });
 });
 
 describe('terminal endpoint when disabled', { skip: !ptyAvailable }, () => {
   let srv;
   let port;
   before(async () => {
-    srv = startServer([]);
+    srv = startServer(['--no-terminal']);
     port = await srv.port;
   });
   after(() => stopServer(srv));

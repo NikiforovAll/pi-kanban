@@ -378,6 +378,7 @@ describe('Parser: readRecentMessages', () => {
     const msgs = tools();
     assert.equal(msgs.find((m) => m.tool === 'Read').toolResult, '# Demo\n\nTeh demo app.');
     assert.ok(msgs.find((m) => m.tool === 'Bash').toolResult.includes('Missing script'));
+    assert.deepEqual(msgs.filter((m) => m.toolError).map((m) => m.tool), ['Bash']);
   });
 
   it('gives an Edit its old and new strings', () => {

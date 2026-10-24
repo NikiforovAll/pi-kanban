@@ -146,6 +146,7 @@ describe('createTerminalFrame', () => {
         this.linkProvider = provider;
       }
       open() {}
+      refresh() {}
       attachCustomKeyEventHandler(fn) {
         this.keyFilter = fn;
       }
@@ -223,6 +224,28 @@ describe('createTerminalFrame', () => {
         ['pk-term:term', BOARD],
       ],
     );
+  });
+
+  it('opens the terminal only once the board font has loaded, or failed to', async () => {
+    for (const settle of ['resolve', 'reject']) {
+      const w = stubWindow();
+      const load = {};
+      w.win.document.fonts = {
+        load: (font) => {
+          load.font = font;
+          return new Promise((resolve, reject) => Object.assign(load, { resolve, reject }));
+        },
+      };
+      w.send(init);
+      w.send(init);
+      assert.equal(load.font, '13px mono');
+      assert.equal(w.terms.length, 0);
+      load[settle](new Error('no font'));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(w.terms.length, 1);
+      assert.equal(w.terms[0].options.fontFamily, 'mono');
+      assert.equal(w.posted.at(-1).message.type, 'pk-term:term');
+    }
   });
 
   it('hands OSC 8 and plain-text links to the board, with no confirm', () => {

@@ -280,7 +280,7 @@ const shortcut = appFunction('terminalShortcut', {
   toggleLastMessage,
   toggleSessionSticky: (id) => stickied.push(id),
   currentSessionId: 's1',
-  hubModDown: appFunction('hubModDown'),
+  ctrlAltDown: appFunction('ctrlAltDown'),
   zoomDelta: () => undefined,
   matchKey: () => false,
 });

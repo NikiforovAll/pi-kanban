@@ -1802,19 +1802,6 @@ body.booting .boot-splash {
   height: 16px;
 }
 
-.icon-btn-danger {
-  color: var(--text-muted);
-  background: transparent;
-  border-color: transparent;
-}
-
-.icon-btn-danger:hover,
-.icon-btn-danger:focus-visible {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border-color: var(--border);
-}
-
 /* theme picker: palette icon button + custom popover with per-theme swatches
    (swatch colors are generated into themes.css) */
 .theme-picker {
@@ -1987,69 +1974,21 @@ body.booting .boot-splash {
   padding-right: 8px;
 }
 
-.column-empty,
-.column-add {
+.column-empty {
   color: var(--text-muted);
   font-size: 12px;
   border: 1px dashed var(--border);
   border-radius: 8px;
   margin-top: 4px;
-}
-
-.column-empty {
   text-align: center;
   padding: 32px 16px;
 }
 
-.column-add {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  padding: 8px 16px;
-  font-family: inherit;
-  background: none;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.column-add.empty {
-  flex-direction: column;
-  padding: 32px 16px;
-}
-
-.column-add:hover,
-.column-add:focus-visible {
-  outline: none;
-  color: var(--text-primary);
-  border-color: var(--text-muted);
-  background: var(--bg-hover);
-}
-
-.column-empty svg,
-.column-add.empty svg {
+.column-empty svg {
   width: 24px;
   height: 24px;
   margin-bottom: 8px;
-}
-
-.column-empty svg {
   opacity: 0.5;
-}
-
-.column-add svg {
-  width: 16px;
-  height: 16px;
-  opacity: 0.7;
-  flex-shrink: 0;
-}
-
-.column-add-input {
-  margin-top: 4px;
-  font-size: 12px;
-  background: var(--bg-surface);
-  border-color: var(--accent);
 }
 
 /* #endregion */
@@ -5032,6 +4971,12 @@ body.show-resizing iframe {
 }
 .msg-tool .msg-text {
   color: var(--text-secondary);
+}
+.msg-item.msg-tool.msg-tool-error {
+  border-left-color: var(--danger);
+}
+.msg-tool-error .msg-text {
+  color: color-mix(in srgb, var(--danger) 70%, var(--text-primary));
 }
 .tool-count-badge {
   display: inline-flex;

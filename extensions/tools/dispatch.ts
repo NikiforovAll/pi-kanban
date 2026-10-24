@@ -76,7 +76,7 @@ export function registerDispatch(pi: ExtensionAPI) {
 			cwd: Type.Optional(Type.String({ description: "Folder to run in: absolute, or relative to this session's cwd (default: this session's cwd)" })),
 			name: Type.Optional(Type.String({ description: "Session name, kebab-case, e.g. fix-login-redirect" })),
 			model: Type.Optional(Type.String({ description: "pi model pattern, provider/id (default: pi's default)" })),
-			thinking: Type.Optional(Type.String({ description: "off, minimal, low, medium, high, xhigh or max" })),
+			thinking: Type.Optional(Type.String({ description: [...lib("pi-agents").THINKING_LEVELS].join(", ") })),
 			group: Type.Optional(Type.String({ description: "Board group for the session: a name, path or id. Leave it out unless the user names a group" })),
 		}),
 		annotations: { destructiveHint: false, openWorldHint: false },

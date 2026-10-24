@@ -24,9 +24,9 @@ const last = () => calls.at(-1);
 
 describe('apiPath', () => {
   it('encodes each value and leaves the literal parts as they are', () => {
-    const team = 'my team/x';
-    const agent = 'writer@team';
-    assert.equal(apiPath`/api/teams/${team}/agents/${agent}?x=1`, '/api/teams/my%20team%2Fx/agents/writer%40team?x=1');
+    const session = 'my session/x';
+    const agent = 'writer@a';
+    assert.equal(apiPath`/api/sessions/${session}/agents/${agent}?x=1`, '/api/sessions/my%20session%2Fx/agents/writer%40a?x=1');
   });
 
   it('gives the plain string when there are no values', () => {
