@@ -50,11 +50,11 @@
   "dependencies": {
     "chokidar": "^4.0.3",
     "express": "^5.3.0",
-    "open": "^11.0.4",
-    "typebox": "^1.4.3"
+    "open": "^11.0.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "pi": {
     "extensions": [
