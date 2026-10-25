@@ -22,7 +22,11 @@ vm.runInNewContext(
     one('paneStripItems'),
     one('isOpenItem'),
     one('openStripItems'),
-    'Object.assign(this, { paneStripItems, openStripItems, paneStripStops, getPaneGroups });',
+    fn('selectStripItem'),
+    fn('pickStripItem'),
+    fn('selectPaneByNumber'),
+    fn('cyclePaneStrip'),
+    'Object.assign(this, { paneStripItems, openStripItems, paneStripStops, getPaneGroups, cyclePaneStrip, selectPaneByNumber });',
   ].join('\n'),
   ctx,
 );
@@ -76,5 +80,48 @@ describe('pane groups in the strip', () => {
   it('a stored color that is not in the palette falls back to the first one', () => {
     setup({ panes: ['p1'], groups: [group('g', ['p1'], { color: 'red;background:url(x)' })] });
     assert.equal(ctx.getPaneGroups('s')[0].color, 'blue');
+  });
+});
+
+describe('tab keys with the terminal on screen', () => {
+  function withTerminal(panes) {
+    setup({ panes });
+    const seen = { active: 'board', terminal: true };
+    Object.assign(ctx, {
+      paneSessionId: () => 's',
+      wantsTerminal: () => seen.terminal,
+      setTerminalMode: (_sid, on) => {
+        seen.terminal = on;
+      },
+      syncTerminal: () => {},
+      getActivePaneId: () => seen.active,
+      selectPane: (id) => {
+        seen.active = id;
+      },
+    });
+    return seen;
+  }
+
+  it('[ and ] hide the terminal that covers the tabs, then switch', () => {
+    const seen = withTerminal(['p1', 'p2']);
+    assert.equal(ctx.cyclePaneStrip(1), true);
+    assert.deepEqual(seen, { active: 'p1', terminal: false });
+    assert.equal(ctx.cyclePaneStrip(-1), true);
+    assert.deepEqual(seen, { active: 'board', terminal: false });
+  });
+
+  it('the number keys hide the terminal too, but not for a tab that is not there', () => {
+    const seen = withTerminal(['p1', 'p2']);
+    assert.equal(ctx.selectPaneByNumber(9), false);
+    assert.deepEqual(seen, { active: 'board', terminal: true });
+    assert.equal(ctx.selectPaneByNumber(3), true);
+    assert.deepEqual(seen, { active: 'p2', terminal: false });
+  });
+
+  it('with only the board, the keys leave the terminal alone', () => {
+    const seen = withTerminal([]);
+    assert.equal(ctx.cyclePaneStrip(1), false);
+    assert.equal(ctx.selectPaneByNumber(1), false);
+    assert.deepEqual(seen, { active: 'board', terminal: true });
   });
 });

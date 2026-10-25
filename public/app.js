@@ -13358,22 +13358,30 @@ function selectStripItem({ ids, pair }) {
   selectPane(pair ? pair[pair.f || 'l'] : ids[0]);
 }
 
+// The terminal covers the tabs, so a key that picks one hides the terminal. With no panes, there is no tab to pick.
+function pickStripItem(sid, item) {
+  const term = wantsTerminal();
+  if (!item || (term && !paneLayout(sid).panes.length)) return false;
+  if (term) {
+    setTerminalMode(sid, false);
+    syncTerminal();
+  }
+  selectStripItem(item);
+  return true;
+}
+
 function selectPaneByNumber(n) {
   const sid = paneSessionId();
-  if (!sid || wantsTerminal()) return false;
-  const stop = paneStripStops(sid)[n - 1];
-  if (stop) selectStripItem(stop.items.find((it) => it.ids.includes(stop.group?.last)) || stop.items[0]);
-  return true;
+  const stop = sid && paneStripStops(sid)[n - 1];
+  return !!stop && pickStripItem(sid, stop.items.find((it) => it.ids.includes(stop.group?.last)) || stop.items[0]);
 }
 
 function cyclePaneStrip(step) {
   const sid = paneSessionId();
-  if (!sid || wantsTerminal()) return false;
-  const active = getActivePaneId(sid);
+  if (!sid) return false;
   const items = openStripItems(sid);
-  const i = items.findIndex((it) => it.ids.includes(active));
-  selectStripItem(items[(i + step + items.length) % items.length]);
-  return true;
+  const i = items.findIndex((it) => it.ids.includes(getActivePaneId(sid)));
+  return pickStripItem(sid, items[(i + step + items.length) % items.length]);
 }
 
 function updatePaneGroup(sid, groupId, change) {
