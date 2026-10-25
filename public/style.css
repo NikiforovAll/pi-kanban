@@ -6178,10 +6178,6 @@ body.show-resizing iframe {
   margin-left: auto;
   align-self: center;
   flex-shrink: 0;
-  /* Two .row-actions buttons wide (22px each, 4px gap), filled from the left, so a
-     row with one action puts it in the same column as the rows that have two. */
-  min-width: 48px;
-  justify-content: flex-start;
 }
 
 .linked-doc-item:hover .linked-doc-actions,
@@ -6263,9 +6259,9 @@ body.show-resizing iframe {
   color: var(--text-primary);
 }
 
-/* A linked file the previewer can't render opens in the editor — the dashed
-   underline keeps that different destination visible before the click. */
-.linked-doc-item.is-editor .linked-doc-link {
+/* A linked doc that does not open in the preview (the scratch viewer, or a file the
+   previewer can't render) — the dashed underline keeps that difference visible before the click. */
+.linked-doc-item.is-external .linked-doc-link {
   color: var(--text-secondary);
   text-decoration-style: dashed;
 }
@@ -7060,6 +7056,11 @@ body.light .msg-assistant .msg-text {
    show at the rounded corners. */
 .preview-html-frame.show-base {
   background: var(--bg-surface);
+}
+
+/* The server refuses a pane for a file it cannot preview. */
+.modal.preview-none #preview-pane-btn {
+  display: none;
 }
 
 .preview-fm {

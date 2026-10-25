@@ -20,7 +20,7 @@ const COMMANDS = {
         summary: 'Link a file or URL to a session, with no modal',
         usage: 'pi-kanban doc link <file|url> [--session <id>]',
         flags: {
-          '<file|url>': 'Any file type; one the preview cannot render opens in the editor. An http(s) URL opens in a new tab.',
+          '<file|url>': 'Any file type; one the preview cannot render shows a card with its path. An http(s) URL opens in a new tab.',
           [SESSION_FLAG]: SESSION_FLAG_HELP,
         },
         notes: 'The server keeps the link, so it shows when a browser tab opens later. Prefer this over `doc preview` while the user works.',

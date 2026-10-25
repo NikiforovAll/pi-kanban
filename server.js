@@ -13,7 +13,7 @@ const chokidar = require('chokidar');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { assertOpenTarget, openInEditor, whichSync, exeBehindShim } = require('./lib/open-editor');
+const { assertOpenTarget, whichSync, exeBehindShim } = require('./lib/open-editor');
 const { createNetGuard } = require('./lib/net-guard');
 const { isContained, realpathDeepest } = require('./lib/contain');
 const { resolveScratchSubdir, listScratchDir } = require('./lib/scratch-files');
@@ -776,7 +776,6 @@ function buildSessionObject(id, meta, overrides = {}) {
     hasRecentActivity: hasVisibleLogActivity(id, logAge),
     jsonlPath: meta.jsonlPath || null,
     tasksDir: null,
-    projectDir: meta.jsonlPath ? path.dirname(meta.jsonlPath) : null,
     scratchpadDir: getScratchpadDir(id, meta),
     ...getContextFields(meta),
     ...overrides,
@@ -1351,46 +1350,6 @@ app.get('/api/sessions/:sessionId/scratchpad-files', async (req, res) => {
 // #endregion
 
 // #region OPEN_TARGETS
-// API: Open folder (and optionally a file within it) in editor
-app.post('/api/open-folder', (req, res) => {
-  try {
-    const { folder, file } = req.body;
-    const targets = [folder ? assertOpenTarget(folder, 'folder') : PI_AGENT_DIR];
-    if (file) targets.push(assertOpenTarget(file, 'file'));
-    openInEditor(targets);
-    res.json({ success: true });
-  } catch (error) {
-    if (error.status) return res.status(error.status).json({ error: error.message });
-    console.error('Error opening folder:', error);
-    res.status(500).json({ error: 'Failed to open folder' });
-  }
-});
-
-// API: Open file in editor — either an existing path ({ file }) or content as a temp file ({ content, title })
-app.post('/api/open-in-editor', (req, res) => {
-  try {
-    const { content, title, file } = req.body;
-    if (file) {
-      const resolved = assertOpenTarget(file, 'file');
-      openInEditor([resolved]);
-      return res.json({ success: true, path: resolved });
-    }
-    if (!content) return res.status(400).json({ error: 'No content provided' });
-
-    const safeName = (title || 'message').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
-    const hash = crypto.createHash('md5').update(content).digest('hex').slice(0, 8);
-    const tmpFile = path.join(os.tmpdir(), `pi-kanban-${safeName}-${hash}.md`);
-    require('node:fs').writeFileSync(tmpFile, content, 'utf8');
-
-    openInEditor([tmpFile]);
-    res.json({ success: true, path: tmpFile });
-  } catch (error) {
-    if (error.status) return res.status(error.status).json({ error: error.message });
-    console.error('Error opening in editor:', error);
-    res.status(500).json({ error: 'Failed to open in editor' });
-  }
-});
-
 // Resolve a linked path to the pad the viewer wants: `<parent>/<name>` where
 // `<name>/scratchpad.json` exists. Accepts either the manifest or its directory.
 function resolveScratchpad(value) {
@@ -1694,7 +1653,6 @@ function lookupParentSession(sessionId) {
   const parent = inSessionRoots(parentPath) ? describeSessionFile(parentPath) : null;
   return {
     parentSessionId: parent?.sessionId || null,
-    parentJsonlPath: parent ? parentPath : null,
     relation: parent ? 'fork' : 'none',
     isCompact: false,
     isFork: !!parent,
@@ -2590,7 +2548,7 @@ async function validatePreviewFile(absPath) {
 async function readPreviewFile(absPath) {
   const { kind, size } = await statFileTarget(absPath);
   // A kind the previewer can't render is an answer, not a failure, reported the way
-  // /api/file/resolve reports it: the caller opens the file in the editor instead. A 400
+  // /api/file/resolve reports it: the caller shows the cannot-preview card instead. A 400
   // would only reach the browser console. A size refusal stays a 400 — that one is real.
   if (!kind) return { content: null, kind: null };
   enforcePreviewSize(kind, size);

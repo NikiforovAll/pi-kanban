@@ -3310,24 +3310,6 @@ async function postAndToast(url, body, label) {
   }
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-async function openMsgInEditor() {
-  const m = getDetailMsg();
-  if (!m) return;
-  // Write/Edit tool calls record the source path — open that directly instead
-  // of dumping the rendered modal body into a temp buffer.
-  const filePath =
-    m.type === 'tool_use' && (m.tool === 'Write' || m.tool === 'Edit')
-      ? m.params?.file_path || m.fullDetail || null
-      : null;
-  if (filePath) {
-    postAndToast('/api/open-in-editor', { file: filePath }, 'in editor');
-    return;
-  }
-  const title = m.type === 'tool_use' ? m.tool : m.compactSummary ? 'compact-summary' : m.type;
-  postAndToast('/api/open-in-editor', { content: getMessageDisplayContent(m), title }, 'in editor');
-}
-
 function formatDuration(ms) {
   if (!ms) return '0s';
   const s = Math.floor(ms / 1000);
@@ -9064,7 +9046,7 @@ function bindPreviewRelativeLinks(bodyEl, baseOf = () => currentPreviewPath) {
     if (isUrlRef(href)) return;
     const cleanHref = href.replace(/#.*$/, '');
     e.preventDefault();
-    openPreviewByPath(cleanHref, baseOf(a), openFileInEditor);
+    openPreviewByPath(cleanHref, baseOf(a));
   });
   bodyEl.dataset.relLinkBound = '1';
 }
@@ -9147,6 +9129,7 @@ function localImageUrl(src, base) {
 function openPreviewModal(filePath, content, kind, sessionId) {
   currentPreviewPath = filePath;
   previewSessionId = sessionId;
+  document.querySelector('#preview-modal .modal').classList.toggle('preview-none', !kind);
   const fileName = filePath.split(/[\\/]/).pop();
   document.getElementById('preview-modal-title').textContent = fileName;
   const bodyEl = document.getElementById('preview-modal-body');
@@ -9154,7 +9137,8 @@ function openPreviewModal(filePath, content, kind, sessionId) {
   document.querySelector('#preview-modal .modal').classList.toggle('preview-html', isHtml);
   bindPreviewRelativeLinks(bodyEl);
   if (isHtml) renderHtmlPreview(bodyEl, content);
-  else renderPreviewContent(bodyEl, filePath, content, kind);
+  else if (kind) renderPreviewContent(bodyEl, filePath, content, kind);
+  else bodyEl.innerHTML = cannotPreviewCardHtml(filePath);
   document.getElementById('preview-modal-meta').textContent = filePath;
   document.getElementById('preview-modal').classList.add('visible');
   // A preview the CLI opens finds focus in the terminal frame, whose keys never reach the board's Esc.
@@ -9173,9 +9157,9 @@ function openPreviewModal(filePath, content, kind, sessionId) {
   });
 }
 
-// Null for an image, which takes no comments.
+// Null for an image or a file with no preview, which take no comments.
 function fileReviewOpts(filePath, kind, contentEl, frame) {
-  if (kind === 'image') return null;
+  if (!kind || kind === 'image') return null;
   return {
     contentEl,
     frame,
@@ -9245,21 +9229,10 @@ function closePreviewModal() {
   previewFromTerminal = false;
 }
 
-function openFileInEditor(filePath) {
-  postAndToast('/api/open-in-editor', { file: filePath }, 'in editor');
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openPreviewInEditor() {
-  if (!currentPreviewPath) return;
-  openFileInEditor(currentPreviewPath);
-}
-
 // The server is the only place that knows what it can render, so a null `kind` is its
-// answer to "not previewable" rather than a failure: callers that have a fallback
-// destination pass `onUnsupported` instead of keeping a copy of the extension list here.
+// answer to "not previewable" rather than a failure, and the modal shows the cannot-preview card.
 // A link followed inside an open preview keeps the preview's session.
-async function openPreviewByPath(filePath, base, onUnsupported, sessionId = previewSessionId || currentSessionId) {
+async function openPreviewByPath(filePath, base, sessionId = previewSessionId || currentSessionId) {
   if (!filePath) return;
   try {
     const r = await api('/api/preview', { query: { path: filePath, base: base || null } });
@@ -9270,11 +9243,6 @@ async function openPreviewByPath(filePath, base, onUnsupported, sessionId = prev
     const data = await r.json();
     if (data.exists === false) {
       showToast('File not found', 'error');
-      return;
-    }
-    if (data.kind === null) {
-      if (onUnsupported) onUnsupported(data.path);
-      else showToast('Nothing to preview in this file');
       return;
     }
     openPreviewModal(data.path, data.content, data.kind, sessionId);
@@ -9315,7 +9283,7 @@ async function handlePreviewOpenEvent(data) {
     }
   }
   // The broadcast carries the path only — each tab fetches the document itself.
-  openPreviewByPath(filePath, undefined, undefined, currentSessionId);
+  openPreviewByPath(filePath, undefined, currentSessionId);
 }
 
 // Linked docs live in localStorage, so the CLI can only reach them through a tab:
@@ -9338,8 +9306,8 @@ function getSessionBaseDir(sessionId) {
 // Linked paths are stored as bare strings, so the row has to ask what each one is. The
 // server owns that answer — /api/file/resolve reports `kind` for any file, previewable
 // or not — and it is cached for the tab because a path's kind does not change under it.
-// A resolve that fails is cached as unpreviewable: the editor is the right destination
-// for a file the server cannot read either, and re-asking on every render of a panel the
+// A resolve that fails is cached as unpreviewable: the cannot-preview card fits a file
+// the server cannot read either, and re-asking on every render of a panel the
 // SSE tick repaints would be a poll.
 const previewKindByPath = new Map();
 const kindResolveInFlight = new Set();
@@ -9393,46 +9361,30 @@ async function loadSessionPads(sessionId) {
   for (const p of fresh) setSessionDocLink(sessionId, p, false);
 }
 
-// A scratchpad manifest opens in the external `scratch` viewer, not the editor —
+// A scratchpad manifest opens in the external `scratch` viewer, not the preview —
 // the raw JSON is a manifest, not the document the user linked.
 function isScratchpadPath(p) {
   return /(^|[\\/])scratchpad\.json$/i.test(p);
 }
 
-// `linkedDocOpener` is the only place a linked path is classified; the row's tag,
-// tooltip and action are all read from here, so a new destination is one entry.
+// `linkedDocOpener` is the only place a linked path is classified; the row's tag and
+// tooltip are read from here and its action from `openLinkedDoc`.
 const LINKED_DOC_OPENERS = {
   preview: { tag: '', hint: '', cls: '', noun: 'path' },
   url: { tag: '', hint: ' — opens in a new tab', cls: ' is-url', noun: 'URL' },
-  scratch: {
-    tag: '(scratchpad)',
-    hint: ' — opens in the scratch viewer',
-    cls: ' is-editor',
-    noun: 'path',
-    url: '/api/scratchpad/open',
-    body: (p) => ({ path: p }),
-    toast: 'in the scratch viewer',
-  },
-  editor: {
-    tag: '(editor)',
-    hint: ' — opens in editor',
-    cls: ' is-editor',
-    noun: 'path',
-    url: '/api/open-in-editor',
-    body: (p) => ({ file: p }),
-    toast: 'in editor',
-  },
+  scratch: { tag: '(scratchpad)', hint: ' — opens in the scratch viewer', cls: ' is-external', noun: 'path' },
+  card: { tag: '(no preview)', hint: ' — cannot preview', cls: ' is-external', noun: 'path' },
 };
 
 // The manifest is checked before previewability, not after: its `.json` is previewable
 // text, but the pad is what the user linked, so the viewer wins over the raw file.
-// Without the CLI there is nothing to launch, so it falls back to the editor.
+// Without the CLI there is nothing to launch, so it gets the cannot-preview card.
 function linkedDocOpener(p) {
   if (linkUrl(p)) return 'url';
-  if (isScratchpadPath(p)) return appConfig.scratchAvailable ? 'scratch' : 'editor';
+  if (isScratchpadPath(p)) return appConfig.scratchAvailable ? 'scratch' : 'card';
   // A path whose kind has not arrived yet renders as previewable, which is what the
-  // click does anyway — openPreviewByPath falls back to the editor on a null kind.
-  return previewKindByPath.get(p) === null ? 'editor' : 'preview';
+  // click does anyway — openPreviewByPath shows the card on a null kind.
+  return previewKindByPath.get(p) === null ? 'card' : 'preview';
 }
 
 // Every manifest is called scratchpad.json, so the pad's folder names it. Kept
@@ -9445,16 +9397,11 @@ function linkedDocLabel(p) {
 
 function openLinkedDoc(p, baseDir) {
   const opener = linkedDocOpener(p);
-  if (opener === 'url') {
-    openExternal(p);
-    return;
-  }
-  if (opener === 'preview') {
-    openPreviewByPath(p, baseDir, openFileInEditor);
-    return;
-  }
-  const { url, body, toast } = LINKED_DOC_OPENERS[opener];
-  postAndToast(url, body(p), toast);
+  if (opener === 'url') openExternal(p);
+  else if (opener === 'scratch') postAndToast('/api/scratchpad/open', { path: p }, 'in the scratch viewer');
+  // The server previews a manifest as JSON, so only a direct call gives it the card.
+  else if (opener === 'card' && isScratchpadPath(p)) openPreviewModal(p, '', null, previewSessionId || currentSessionId);
+  else openPreviewByPath(p, baseDir);
 }
 
 const LINKED_DOCS_COLLAPSED = 10;
@@ -9690,7 +9637,7 @@ const scratchFolders = new Map();
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
 function openScratchFile(filePath) {
-  openPreviewByPath(filePath, undefined, openFileInEditor);
+  openPreviewByPath(filePath);
 }
 
 function scratchRowHtml(f) {
@@ -9711,7 +9658,6 @@ function scratchRowHtml(f) {
     <span class="scratch-file-time">${formatDate(f.modifiedAt)}</span>
     <span class="row-actions scratch-file-actions">
       <button type="button" onclick="copyWithFeedback(this.closest('li').dataset.file, this)" title="Copy path" aria-label="Copy path">${ICON_COPY}</button>
-      <button type="button" onclick="${isDir ? 'openFolderInEditor' : 'openFileInEditor'}(this.closest('li').dataset.file)" title="Open in editor" aria-label="Open in editor">${ICON_OPEN_EXTERNAL}</button>
     </span>
     ${body}
   </li>`;
@@ -10798,14 +10744,6 @@ function agentModel(agent) {
   return agent.model || agent.modelAlias || '';
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openFolderInEditor(folder, file) {
-  const body = {};
-  if (folder) body.folder = folder;
-  if (file) body.file = file;
-  postAndToast('/api/open-folder', body, 'folder');
-}
-
 //#endregion
 
 //#region FILTERS
@@ -11489,7 +11427,6 @@ function renderScratchpadRow(session) {
     <span class="zen-scratchpad-path" title="${escapeHtml(dir)}">${escapeHtml(abbreviateScratchpadDir(dir))}</span>
     <span class="row-actions">
       <button onclick="copyWithFeedback('${escAttrJs(dir)}', this)" title="Copy">${ICON_COPY}</button>
-      <button data-folder="${escapeHtml(dir)}" onclick="openFolderInEditor(this.dataset.folder)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>
     </span>
   </div>
   ${renderScratchFilesHtml(session.id)}`;
@@ -11510,24 +11447,24 @@ function showInfoModal(session, parentInfo) {
   let html = '';
 
   // Session & project details as compact key-value rows
-  // Each row: [label, value, { openPath?, abbrev?, copy? }] — `value` is authoritative
+  // Each row: [label, value, { abbrev?, copy? }] — `value` is authoritative
   // (tooltip + copy); `abbrev` only replaces the rendered text, `copy` the copied text.
   const infoRows = [];
-  infoRows.push(['Session', session.id, { openAgentDir: true, openFile: session.jsonlPath }]);
+  infoRows.push(['Session', session.id]);
   if (session.customTitle) infoRows.push(['Name', session.customTitle]);
   if (parentInfo?.parentSessionId) {
     infoRows.push([
       parentInfo.relation === 'compact' ? 'Continued from' : 'Forked from',
       parentInfo.parentSessionId,
-      { openAgentDir: true, openFile: parentInfo.parentJsonlPath, openSession: parentInfo.parentSessionId },
+      { openSession: parentInfo.parentSessionId },
     ]);
   }
   if (session.project) {
     const projectName = session.project.split(/[/\\]/).pop();
-    infoRows.push(['Project', projectName, { openPath: session.projectDir }]);
-    infoRows.push(['Path', session.project, { openPath: session.project }]);
+    infoRows.push(['Project', projectName]);
+    infoRows.push(['Path', session.project]);
     if (session.cwd) {
-      infoRows.push(['CWD', session.cwd, { openPath: session.cwd }]);
+      infoRows.push(['CWD', session.cwd]);
     }
     if (session.gitBranch) {
       infoRows.push(['Branch', session.gitBranch]);
@@ -11537,14 +11474,10 @@ function showInfoModal(session, parentInfo) {
     }
   }
   if (session.tasksDir) {
-    infoRows.push(['Tasks Dir', session.tasksDir, { openPath: session.tasksDir }]);
+    infoRows.push(['Tasks Dir', session.tasksDir]);
   }
   if (session.scratchpadDir) {
-    infoRows.push([
-      'Scratchpad',
-      session.scratchpadDir,
-      { openPath: session.scratchpadDir, abbrev: abbreviateScratchpadDir(session.scratchpadDir) },
-    ]);
+    infoRows.push(['Scratchpad', session.scratchpadDir, { abbrev: abbreviateScratchpadDir(session.scratchpadDir) }]);
   }
   if (session.sharedTaskList) {
     infoRows.push(['Shared Tasks', session.sharedTaskList]);
@@ -11562,13 +11495,7 @@ function showInfoModal(session, parentInfo) {
       html += `<span style="${plainStyle}" title="${escapeHtml(value)}">${escapeHtml(opts?.abbrev || value)}</span>`;
     }
     const copyBtn = `<button onclick="copyWithFeedback('${escAttrJs(opts?.copy || value)}', this)" title="Copy">${ICON_COPY}</button>`;
-    let openBtn = '';
-    if (opts?.openAgentDir || opts?.openPath) {
-      const folder = opts.openAgentDir ? '' : escapeHtml(opts.openPath);
-      const file = opts.openFile ? escapeHtml(opts.openFile) : '';
-      openBtn = `<button data-folder="${folder}" data-file="${file}" data-pi-agent-dir="${opts.openAgentDir ? '1' : ''}" onclick="openFolderInEditor(this.dataset.piAgentDir ? undefined : this.dataset.folder, this.dataset.file || undefined)" title="Open in editor">${ICON_OPEN_EXTERNAL}</button>`;
-    }
-    html += `<span class="row-actions">${copyBtn}${openBtn}</span>`;
+    html += `<span class="row-actions">${copyBtn}</span>`;
   });
   html += `</div>`;
 
@@ -12630,9 +12557,18 @@ function markPaneFrameFocus() {
   view?.classList.add('frame-focus');
 }
 
-function paneCardHtml(title, text, button) {
-  const btn = button ? `<button class="btn btn-primary" data-pane-open>${escapeHtml(button)}</button>` : '';
+function paneCardHtml(title, text, button, action = 'data-pane-open') {
+  const btn = button ? `<button class="btn btn-primary" ${action}>${escapeHtml(button)}</button>` : '';
   return `<div class="pane-card"><div class="pane-card-box">${PANE_ICONS.warning}<h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p>${btn}</div></div>`;
+}
+
+function cannotPreviewCardHtml(filePath) {
+  return paneCardHtml(
+    'Cannot preview this file',
+    'pi-kanban cannot render this file.',
+    'Copy path',
+    `onclick="copyWithFeedback('${escAttrJs(filePath)}', this)"`,
+  );
 }
 
 // Returns the key of the view to show.
@@ -12727,13 +12663,14 @@ async function loadPaneView(sid, pane, view, scroll) {
     applyPaneLine(view);
     return;
   }
-  const [title, text] = !data
-    ? ['Preview unavailable', 'The server could not read this file.']
-    : data.exists === false
-      ? ['File not found', pane.target]
-      : ['Nothing to preview', 'pi-kanban cannot render this file.'];
-  const button = data && data.exists !== false ? 'Open in editor' : 'Try in preview';
-  view.insertAdjacentHTML('beforeend', paneCardHtml(title, text, button));
+  if (data && data.exists !== false) {
+    view.insertAdjacentHTML('beforeend', cannotPreviewCardHtml(data.path));
+    return;
+  }
+  const [title, text] = data
+    ? ['File not found', pane.target]
+    : ['Preview unavailable', 'The server could not read this file.'];
+  view.insertAdjacentHTML('beforeend', paneCardHtml(title, text, 'Try in preview'));
 }
 
 // The target is the message's pin id, `type|timestamp|text`. The log holds only the latest pages,
@@ -13445,7 +13382,7 @@ async function openPaneAtLine(sid, { path, line }, base) {
 }
 
 async function openPreviewAtLine({ path, line }, base) {
-  await openPreviewByPath(path, base, openFileInEditor);
+  await openPreviewByPath(path, base);
   if (currentPreviewPath) markSourceLine(document.getElementById('preview-modal-body'), line);
 }
 
@@ -16794,7 +16731,7 @@ function isLocalHref(href) {
 }
 
 function openLocalHref(href) {
-  openPreviewByPath(href.replace(/#.*$/, ''), undefined, openFileInEditor);
+  openPreviewByPath(href.replace(/#.*$/, ''));
 }
 
 // Capture, because the modals stop a click's propagation, and stopped here so a link in a message
