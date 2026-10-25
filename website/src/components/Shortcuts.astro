@@ -1,0 +1,56 @@
+---
+import fs from 'node:fs';
+import path from 'node:path';
+
+// The board's help modal and this page read the same SHORTCUT_TABS literal in public/app.js.
+const src = fs.readFileSync(path.resolve(process.cwd(), '../public/app.js'), 'utf8');
+const start = src.indexOf('const SHORTCUT_TABS = [');
+const end = src.indexOf('\n];', start);
+if (start < 0 || end < 0) throw new Error('SHORTCUT_TABS not found in public/app.js');
+const tabs: { title: string; groups: { title: string; rows: { keys: string[]; combo?: boolean; label: string }[] }[] }[] =
+  new Function(`return ${src.slice(start + 'const SHORTCUT_TABS = '.length, end + 2)}`)();
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+---
+
+{
+  tabs.map((tab) => (
+    <>
+      <h2 id={slug(tab.title)}>{tab.title}</h2>
+      {tab.groups.map((group) => (
+        <>
+          <h3 id={slug(`${tab.title} ${group.title}`)}>{group.title}</h3>
+          <table>
+            <thead>
+              <tr>
+                <th class="keys">Keys</th>
+                <th>What it does</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.rows.map((row) => (
+                <tr>
+                  <td class="keys">
+                    {row.keys.map((k, i) => (
+                      <>
+                        {i > 0 && (row.combo ? '+' : ' / ')}
+                        <kbd>{k}</kbd>
+                      </>
+                    ))}
+                  </td>
+                  <td>{row.label}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ))}
+    </>
+  ))
+}
+
+<style>
+  .keys {
+    width: 12rem;
+    white-space: nowrap;
+  }
+</style>

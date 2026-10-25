@@ -1,0 +1,47 @@
+---
+title: Companions
+description: Open pi-cost and pi-inspect as tabs of a session, and install the pi packages the board reads from.
+---
+
+import Shot from '../../../kit/Shot.astro';
+import Lightbox from '../../../kit/Lightbox.astro';
+
+pi-cost and pi-inspect are pi packages that also run on their own: `/cost` and `/inspect` in pi. When they are installed, the board opens them for a session as a tab next to **Board**, in the board's color theme.
+
+## pi-cost
+
+Cost, tokens, and models per message, session, and project, with actual and estimated spend.
+
+```sh
+pi install npm:pi-cost
+```
+
+Press `$` on a session, click the button in session info, or run `/kanban cost` in pi.
+
+<Shot themed="cost" set="nord" alt="pi-cost in a board tab: the cost of a session as a chart and a table of messages" />
+
+## pi-inspect
+
+The system prompt, tools, slash commands, skills, and context files of a session.
+
+```sh
+pi install npm:pi-inspect
+```
+
+Press `Shift+I` on a session, click the button in session info, or run `/kanban inspect` in pi.
+
+<Shot themed="inspect" set="nord" alt="pi-inspect in a board tab: the tools and context a session loaded, grouped by package" />
+
+The agent can open either one with the `companion_open` tool, and a shell with `pi-kanban session cost` or `pi-kanban session inspect`.
+
+## Packages
+
+`Shift+X` lists the pi packages the board reads from. Select one with `↑` / `↓` and press `Enter` to install or update it.
+
+<Shot themed="packages" set="nord" alt="The Packages dialog with the installed pi packages" />
+
+- [`pi-subagents`](https://www.npmjs.com/package/pi-subagents) starts named subagent sessions. The board shows them under each parent session.
+- [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) tracks todos. The board shows them as columns.
+- [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) asks you questions. The board shows them as cards.
+
+<Lightbox />

@@ -1,0 +1,45 @@
+---
+interface Props {
+  leaf: { summary: string; usage: string; flags?: Record<string, string>; notes?: string; examples?: string[] };
+}
+const { leaf } = Astro.props;
+const flags = Object.entries(leaf.flags ?? {});
+const notes = leaf.notes?.split(/`([^`]+)`/) ?? [];
+---
+
+<p>{leaf.summary}.</p>
+<pre><code>{leaf.usage}</code></pre>
+{
+  flags.length > 0 && (
+    <table>
+      <thead>
+        <tr>
+          <th>Argument</th>
+          <th>What it does</th>
+        </tr>
+      </thead>
+      <tbody>
+        {flags.map(([flag, desc]) => (
+          <tr>
+            <td>
+              <code>{flag}</code>
+            </td>
+            <td>{desc}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+{notes.length > 0 && <p>{notes.map((part, i) => (i % 2 ? <code>{part}</code> : part))}</p>}
+{leaf.examples?.length ? <pre><code>{leaf.examples.join('\n')}</code></pre> : null}
+
+<style>
+  pre {
+    overflow-x: auto;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.375rem;
+    background: var(--sl-color-gray-6);
+  }
+</style>

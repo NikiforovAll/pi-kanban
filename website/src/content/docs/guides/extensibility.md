@@ -41,7 +41,7 @@ pi-kanban session list
 
 Commands that act on one session take `--session` with a full id or a unique prefix. Without it, they use `$PREVIEW_SESSION`, else `$PI_KANBAN_SESSION_ID`.
 
-Run `pi-kanban help <command>` for the subcommands and flags. `pi-kanban skills get <name>` prints a skill guide that ships with this version.
+Run `pi-kanban help <command>` for the subcommands and flags, or see the [CLI reference](../../reference/cli/). `pi-kanban skills get <name>` prints a skill guide that ships with this version.
 
 ## Themes
 

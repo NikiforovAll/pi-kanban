@@ -3,7 +3,12 @@ title: Theming
 description: The light and dark modes and the 17 color themes of the board.
 ---
 
+import Shot from '../../../kit/Shot.astro';
+import Lightbox from '../../../kit/Lightbox.astro';
+
 The board has a light and a dark mode, and 17 color themes. Each color theme has a light and a dark variant.
+
+<Shot themed="themes" set="nord" alt="The color theme menu open over the board, with Nord selected" eager />
 
 ## Light and dark
 
@@ -40,3 +45,5 @@ The terminal takes its colors from the theme too, so pi's output follows the mod
 ## Where the choice is kept
 
 The board keeps the mode and the color theme in the browser's local storage (`theme` and `color-theme`). Each browser profile keeps its own choice. Nothing is written to disk on the server.
+
+<Lightbox />

@@ -1,0 +1,13 @@
+---
+title: Command line
+description: The pi-kanban command, its server flags, and the commands that talk to a running board.
+tableOfContents: false
+---
+
+import CliReference from '../../../components/CliReference.astro';
+
+The `pi-kanban` command starts the board. With a command, it talks to a running board instead. The pi skills use it, and you can too. `pi-kanban help <command>` prints the same text as this page.
+
+The commands find the board through `PK_URL`, then the `server.json` file the server writes, then port 3460. Commands that act on one session take `--session` with a full id or a unique prefix. Without it, they use `$PREVIEW_SESSION`, else `$PI_KANBAN_SESSION_ID`.
+
+<CliReference />

@@ -8,7 +8,7 @@ import Lightbox from '../../kit/Lightbox.astro';
 
 pi-kanban is an agent development environment for the pi coding agent. It runs pi sessions in a browser terminal and shows each session's todos, subagents, and linked docs next to it. The pi tools it adds let the agent show you cards, ask you questions, and hand tasks to other sessions.
 
-<Shot themed="terminal" alt="A pi session in the board terminal, with the session sidebar on the left and a show card at the top right" eager />
+<Shot themed="terminal" set="nord" alt="A pi session in the board terminal, with the session sidebar on the left and a show card at the top right" eager />
 
 ## Requirements
 
@@ -40,7 +40,7 @@ When pi runs in another terminal, run this inside pi to open the board with its 
 /kanban open
 ```
 
-Sessions, todos, and subagents appear on the board as pi works. See the [user guide](../guides/user-guide/) for every command and flag.
+Sessions, todos, and subagents appear on the board as pi works. See the [user guide](../guides/user-guide/) for a tour of the board, and the [CLI reference](../reference/cli/) for every command and flag.
 
 :::note[Security]
 The board listens on loopback only. The terminal needs a token that the board keeps in the URL fragment (`#t=...`), so the browser never sends it to a server. Do not share that URL.

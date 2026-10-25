@@ -1,0 +1,47 @@
+---
+title: Panes and docs
+description: Keep a plan, a dev server, or a report open as a tab next to the board, and link docs to a session.
+---
+
+import Shot from '../../../kit/Shot.astro';
+import Lightbox from '../../../kit/Lightbox.astro';
+
+<Shot themed="split" set="nord" alt="The board split with a markdown plan in a pane on the right" eager />
+
+## Panes
+
+A pane is a URL or a local file (markdown, HTML, text, or an image) that shows as a tab of the session, next to **Board**. A file pane refreshes on each save.
+
+| Tool | What it does |
+| --- | --- |
+| `pane_add`, `pane_rm`, `pane_list` | Add a URL or a local file as a tab next to the board, without switching to it |
+| `companion_open` | Open pi-cost or pi-inspect for the session as a tab |
+
+From a shell, `pi-kanban pane add | rm | list` does the same. See the [CLI reference](../../reference/cli/#pane).
+
+## Tabs and splits
+
+| Keys | What it does |
+| --- | --- |
+| `[` / `]` | Previous or next tab. A split counts as one. |
+| `Ctrl+Alt+1…9` | Go to a tab. The board is 1. |
+| `\|` | Split the tab with the one before it, or unsplit. You can also drag a tab onto a side. |
+| `{` / `}` | Focus the left or right side of a split |
+| `Alt+[` / `Alt+]` | Change the tab in the focused side |
+| `Alt+W` | Close the focused pane |
+| `Shift+F10` | Menu of the focused tab |
+
+## Linked docs
+
+| Tool | What it does |
+| --- | --- |
+| `link_doc`, `unlink_doc` | Link a file or URL to the session. Linked docs show on the session card and in session info. |
+| `preview_doc` | Open a file in the preview modal now |
+
+Click a linked doc to open it in the preview. A file the preview cannot show opens in your editor. From pi, `/kanban session link-doc` and `/kanban session view-doc` do the same.
+
+## Scratch folder
+
+Each pi session gets a scratch folder for notes, scripts, and logs. pi gets its path in the system prompt and in `$PI_SCRATCHPAD_DIR`, and session info shows it. The folder is deleted 7 days after the session ends.
+
+<Lightbox />

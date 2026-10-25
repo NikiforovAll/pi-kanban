@@ -1,0 +1,18 @@
+---
+title: Review
+description: Comment on a plan or any doc on the board, and send the comments to pi as one message.
+---
+
+import Shot from '../../../kit/Shot.astro';
+import Lightbox from '../../../kit/Lightbox.astro';
+
+<Shot themed="review" set="nord" alt="A plan in a pane with two highlighted quotes and their comments in a side panel" eager />
+
+1. Open the doc in a pane or in the preview. The agent can open it for you with `pane_add`.
+2. Select text and press `C`, or click the comment button next to the selection. Write your comment.
+3. Add more comments. Each one keeps the quoted text.
+4. Press `Ctrl+Enter` to send all the comments to pi as one message, with the quoted text and the file.
+
+When pi is busy, the message waits until the current turn ends.
+
+<Lightbox />

@@ -1,0 +1,61 @@
+---
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import CliLeaf from './CliLeaf.astro';
+
+// `pi-kanban help` and this page read the same COMMANDS and SERVER_FLAGS from cli.js.
+const { COMMANDS, SERVER_FLAGS } = createRequire(import.meta.url)(path.resolve(process.cwd(), '../cli.js'));
+
+type Leaf = { summary: string; usage: string; flags?: Record<string, string>; notes?: string; examples?: string[] };
+type Noun = Leaf & { verbs?: Record<string, Leaf> };
+const nouns = Object.entries(COMMANDS as Record<string, Noun>);
+---
+
+<h2 id="server">Server</h2>
+<p>Run <code>pi-kanban</code> with no command to start the board. A flag wins over its env var.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Flag</th>
+      <th>Env var</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    {
+      (SERVER_FLAGS as [string, string, string][]).map(([flag, env, desc]) => (
+        <tr>
+          <td>
+            <code>{flag}</code>
+          </td>
+          <td>{env && <code>{env}</code>}</td>
+          <td>{desc}</td>
+        </tr>
+      ))
+    }
+  </tbody>
+</table>
+
+{
+  nouns.map(([name, noun]) =>
+    noun.verbs ? (
+      <>
+        <h2 id={name}>{name}</h2>
+        <p>{noun.summary}.</p>
+        {Object.entries(noun.verbs).map(([verb, leaf]) => (
+          <>
+            <h3 id={`${name}-${verb}`}>
+              {name} {verb}
+            </h3>
+            <CliLeaf leaf={leaf} />
+          </>
+        ))}
+      </>
+    ) : (
+      <>
+        <h2 id={name}>{name}</h2>
+        <CliLeaf leaf={noun} />
+      </>
+    ),
+  )
+}

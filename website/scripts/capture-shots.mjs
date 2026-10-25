@@ -11,7 +11,11 @@ import { startCompanions } from './companions.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.resolve(here, '../../dist');
-const outDir = path.resolve(here, '../public/shots/themes');
+const args = process.argv.slice(2);
+const themeAt = args.indexOf('--color-theme');
+// The landing page uses the board's default theme; the docs use their own, in shots/<theme>.
+const COLOR_THEME = themeAt < 0 ? null : args.splice(themeAt, 2)[1];
+const outDir = path.resolve(here, `../public/shots/${COLOR_THEME ?? 'themes'}`);
 const PALETTE = 'pi';
 const PORT = 8799;
 
@@ -268,8 +272,7 @@ const views = [
   },
 ];
 
-const only = process.argv.slice(2);
-const wanted = views.filter((v) => !only.length || only.includes(v.name));
+const wanted = views.filter((v) => !args.length || args.includes(v.name));
 const companions = wanted.some((v) => v.companion) ? await startCompanions({ repoRoot: path.resolve(here, '../..'), sessionId: LIMITER }) : null;
 fs.mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch();
@@ -279,16 +282,17 @@ try {
       if (view.companion && !companions) continue;
       const context = await browser.newContext({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1.5, colorScheme: mode, reducedMotion: 'reduce' });
       await context.addInitScript(
-        ([m, terminal]) => {
+        ([m, terminal, colorTheme]) => {
           // Headless Chromium draws xterm's WebGL canvas at a device scale of 1, so the terminal comes out cropped. Its DOM renderer does not.
           const getContext = HTMLCanvasElement.prototype.getContext;
           HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
             return type === 'webgl2' ? null : getContext.call(this, type, ...rest);
           };
           localStorage.setItem('theme', m);
+          if (colorTheme) localStorage.setItem('color-theme', colorTheme);
           localStorage.setItem('terminal-sessions', JSON.stringify(terminal));
         },
-        [mode, view.terminal ?? []],
+        [mode, view.terminal ?? [], COLOR_THEME],
       );
       const page = await context.newPage();
       await page.goto(`http://localhost:${PORT}/`);

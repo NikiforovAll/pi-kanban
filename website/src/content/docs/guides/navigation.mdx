@@ -1,0 +1,34 @@
+---
+title: Navigation and zen
+description: Move around the board with the keyboard, and use zen mode to see one session or one group.
+---
+
+import Shot from '../../../kit/Shot.astro';
+import Lightbox from '../../../kit/Lightbox.astro';
+
+## Keyboard
+
+- `↑` / `↓` move through items, and `←` / `→` move between columns.
+- `Tab` switches between the sidebar and the board or the open pane tab.
+- `Enter` or `Space` opens the selected item.
+- `\` hides the sidebar.
+- `Esc` closes a panel.
+- `Ctrl` + `+` / `−` / `0` changes the modal text size.
+
+Press `?` on the board for the full list. The [keyboard shortcuts reference](../../reference/shortcuts/) has the same list.
+
+<Shot themed="shortcuts" set="nord" alt="Keyboard shortcuts help with Board, Session, and Terminal tabs" />
+
+## Zen mode: one session
+
+`Ctrl+Shift+Z` hides every other session. The sidebar shows the context use, cost, scratchpad, linked docs, and agents of the open session. Press it again to see all sessions.
+
+<Shot themed="zen" set="nord" alt="Zen mode: the sidebar shows only redis-rate-limiter with its context, cost, scratchpad, and agents" />
+
+## Zen mode: one group
+
+Select a group header in the sidebar and press `Ctrl+Shift+Z`. The sidebar then shows only the sessions in that group.
+
+<Shot themed="zen-group" set="nord" alt="Zen mode for the Release 2.4 group: the sidebar shows only its three sessions" />
+
+<Lightbox />

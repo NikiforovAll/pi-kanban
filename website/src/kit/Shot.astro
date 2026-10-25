@@ -5,14 +5,17 @@ import { DEFAULT_MODE, DEFAULT_PALETTE } from './palettes';
 interface Props {
   alt: string;
   src?: string;
-  /** Gallery view name: the image is shots/themes/<palette>-<view>-<mode>.webp and follows the site theme. */
+  /** Gallery view name: the image is shots/<set>/<palette>-<view>-<mode>.webp and follows the site theme. */
   themed?: string;
+  /** Folder under shots/: `themes` holds the board's default theme, other folders one board theme each. */
+  set?: string;
   eager?: boolean;
   width?: number;
   height?: number;
 }
-const { alt, src, themed, eager = false, width = 2400, height = 1350 } = Astro.props;
-const initial = url(themed ? `shots/themes/${DEFAULT_PALETTE}-${themed}-${DEFAULT_MODE}.webp` : src!);
+const { alt, src, themed, set = 'themes', eager = false, width = 2400, height = 1350 } = Astro.props;
+const dir = `shots/${set}/`;
+const initial = url(themed ? `${dir}${DEFAULT_PALETTE}-${themed}-${DEFAULT_MODE}.webp` : src!);
 // A themed image gets its src from an inline script. A src in the markup is fetched before the
 // swap script runs (by the preload scanner, and by Chrome's lazy loading up to ~2500px below the
 // fold), so a reader with a stored theme would download the default image as well.
@@ -24,7 +27,7 @@ const deferSrc = Boolean(themed);
     src={deferSrc ? undefined : initial}
     alt={alt}
     data-themed={themed}
-    data-dir={themed && url('shots/themes/')}
+    data-dir={themed && url(dir)}
     width={width}
     height={height}
     loading={eager ? 'eager' : 'lazy'}
