@@ -166,7 +166,9 @@ describe('themedSrcdoc', () => {
     withHeadFirst: appFunction('withHeadFirst'),
     THEME_BRIDGE_TAG: '<script>theme</script>',
     REVIEW_BRIDGE_TAG: '<script>review</script>',
+    SHOW_FRAME_BASE: 'body{base}',
     FRAME_SCROLLBAR_CSS: 'html{bar}',
+    USES_SHOW_TOKENS_RE: appConst('USES_SHOW_TOKENS_RE'),
   });
   const style = '<style id="pk-tokens">:root{--color-bg:#111}html{bar}</style>';
 
@@ -175,6 +177,13 @@ describe('themedSrcdoc', () => {
     assert.ok(doc.startsWith(`<!doctype html><html><head>${style}<meta charset="utf-8">`));
     assert.ok(!doc.includes('Content-Security-Policy'));
     assert.ok(doc.endsWith('<script>theme</script><script>review</script>'));
+  });
+
+  it('adds the card base styles to a page that reads the card tokens', () => {
+    for (const css of ['h1{color:var(--color-text)}', 'body{font:1rem var( --font-sans)}']) {
+      const doc = themed(`<!doctype html><html><head><style>${css}</style></head><body>b</body></html>`);
+      assert.ok(doc.startsWith('<!doctype html><html><head><style id="pk-tokens">:root{--color-bg:#111}body{base}html{bar}</style>'), css);
+    }
   });
 
   it('keeps the doctype first when the document has no html or head tag', () => {

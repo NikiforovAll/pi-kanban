@@ -15568,10 +15568,16 @@ function showSrcdoc(content, restoreY, extraHead = '') {
   return withHeadFirst(content, head) + bridge;
 }
 
-// An HTML file preview gets only the tokens, first in its head: its own :root rules win, and
-// a page that declares its defaults in :where(:root) follows the board theme.
+// An HTML file preview gets the tokens first in its head: its own :root rules win, and a page
+// that declares its defaults in :where(:root) follows the board theme. A page that reads the
+// card's tokens was written for a card, so it gets the card's base styles too; any other page
+// keeps the browser defaults it was written against. The bridge rewrites cssRules[0], so the
+// :root rule stays first.
+const USES_SHOW_TOKENS_RE = /var\(\s*--(?:color|font)-/;
+
 function themedSrcdoc(content) {
-  const head = `<style id="pk-tokens">:root{${showTokenCss()}}${FRAME_SCROLLBAR_CSS}</style>`;
+  const base = USES_SHOW_TOKENS_RE.test(content) ? SHOW_FRAME_BASE : '';
+  const head = `<style id="pk-tokens">:root{${showTokenCss()}}${base}${FRAME_SCROLLBAR_CSS}</style>`;
   return withHeadFirst(content, head) + THEME_BRIDGE_TAG + REVIEW_BRIDGE_TAG;
 }
 
