@@ -4,6 +4,7 @@ const STORAGE_NS = window.__STORAGE_NS__ ? `${window.__STORAGE_NS__}:` : '';
 // Theme is a user preference, not a board's, so it stays shared across config dirs.
 const THEME_KEY = 'theme';
 const COLOR_THEME_KEY = 'color-theme';
+const DEFAULT_COLOR_THEME = 'nord';
 // Shared too, so after a config-dir switch the cursor goes where it was on the board just left.
 const FOCUS_ZONE_KEY = 'focus-zone';
 const GLOBAL_KEYS = new Set([THEME_KEY, COLOR_THEME_KEY, FOCUS_ZONE_KEY]);
@@ -11642,18 +11643,18 @@ function loadTheme() {
   });
   buildThemeMenu();
   const colorTheme = store.getItem(COLOR_THEME_KEY);
-  if (colorTheme) document.body.dataset.colorTheme = colorTheme;
-  syncColorThemeSelect(colorTheme || 'ember');
+  if (colorTheme && colorTheme !== DEFAULT_COLOR_THEME) document.body.dataset.colorTheme = colorTheme;
+  syncColorThemeSelect(colorTheme || DEFAULT_COLOR_THEME);
 }
 
 const COLOR_THEMES = [
+  ['nord', 'Nord'],
   ['ember', 'Ember'],
   ['gruvbox', 'Gruvbox'],
   ['catppuccin', 'Catppuccin'],
   ['tokyo-night', 'Tokyo Night'],
   ['solarized', 'Solarized'],
   ['dracula', 'Dracula'],
-  ['nord', 'Nord'],
   ['rose-pine', 'Rosé Pine'],
   ['everforest', 'Everforest'],
   ['kanagawa', 'Kanagawa'],
@@ -11691,13 +11692,13 @@ function toggleThemeMenu(e) {
 
 function syncColorThemeSelect(id) {
   document.querySelectorAll('.theme-menu-item').forEach((el) => {
-    el.classList.toggle('on', el.dataset.themeId === (id || 'ember'));
+    el.classList.toggle('on', el.dataset.themeId === (id || DEFAULT_COLOR_THEME));
   });
 }
 
-// 'ember' (the :root default) has no override block — selecting it clears the attribute.
+// The default theme's block in themes.css matches a body without the attribute, so selecting it clears the attribute.
 function setColorTheme(id) {
-  if (!id || id === 'ember') {
+  if (!id || id === DEFAULT_COLOR_THEME) {
     delete document.body.dataset.colorTheme;
     store.removeItem(COLOR_THEME_KEY);
   } else {

@@ -979,7 +979,7 @@ body.booting .boot-splash {
 .mascot {
   width: 64px;
   height: 40px;
-  fill: #d97757;
+  fill: var(--accent);
   overflow: visible;
   transform-origin: 50% 100%;
 }

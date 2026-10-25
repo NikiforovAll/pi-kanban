@@ -39,7 +39,7 @@ body.light .theme-swatch-vitesse { --sw-bg: #f7f7f7; --sw-accent: #1c6b48; --sw-
 body.light .theme-swatch-synthwave { --sw-bg: #efecf6; --sw-accent: #c936a6; --sw-ink: #241b2f; --sw-border: #c5bcdd; }
 
 /* Ember */
-body:not([data-color-theme]):not(.light) {
+body[data-color-theme="ember"]:not(.light) {
   --accent: #e86f33;
   --accent-text: #f0a070;
   --accent-dim: rgba(232,111,51,0.25);
@@ -54,7 +54,7 @@ body:not([data-color-theme]):not(.light) {
   --text-tertiary: #9a9da5;
   --text-muted: #7d808a;
 }
-body.light:not([data-color-theme]) {
+body.light[data-color-theme="ember"] {
   --accent: #e86f33;
   --accent-text: #a0501c;
   --accent-dim: rgba(184,90,32,0.18);
@@ -70,7 +70,7 @@ body.light:not([data-color-theme]) {
   --text-muted: #767676;
 }
 @media (prefers-color-scheme: light) {
-body:not(.dark-forced):not([data-color-theme]) {
+body:not(.dark-forced)[data-color-theme="ember"] {
   --accent: #e86f33;
   --accent-text: #a0501c;
   --accent-dim: rgba(184,90,32,0.18);
@@ -337,7 +337,7 @@ body:not(.dark-forced)[data-color-theme="dracula"] {
 }
 
 /* Nord */
-body[data-color-theme="nord"]:not(.light) {
+body:not([data-color-theme]):not(.light) {
   --accent: #88c0d0;
   --accent-text: #a8d8e8;
   --accent-dim: rgba(136,192,208,0.25);
@@ -352,7 +352,7 @@ body[data-color-theme="nord"]:not(.light) {
   --text-tertiary: #aeb6c5;
   --text-muted: #7b88a1;
 }
-body.light[data-color-theme="nord"] {
+body.light:not([data-color-theme]) {
   --accent: #5e81ac;
   --accent-text: #44688f;
   --accent-dim: rgba(94,129,172,0.18);
@@ -368,7 +368,7 @@ body.light[data-color-theme="nord"] {
   --text-muted: #6b7589;
 }
 @media (prefers-color-scheme: light) {
-body:not(.dark-forced)[data-color-theme="nord"] {
+body:not(.dark-forced):not([data-color-theme]) {
   --accent: #5e81ac;
   --accent-text: #44688f;
   --accent-dim: rgba(94,129,172,0.18);
