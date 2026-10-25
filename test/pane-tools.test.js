@@ -65,6 +65,18 @@ describe('pane_add and companion_open', { skip: !canRunTs && 'needs Node with re
     const out = await openCompanion('s1', 'pi-cost');
     assert.equal(out.pane.companion, 'pi-cost');
     assert.deepEqual(requests.at(-1), { url: '/api/panes/s1', token: 'tok', body: { companion: 'pi-cost' } });
+    await openCompanion('s1', 'pi-inspect', 't1');
+    assert.deepEqual(requests.at(-1).body, { companion: 'pi-inspect', terminal: 't1' });
+  });
+
+  it('/kanban offers no completion for a command typed in full, so the first Enter runs it', async () => {
+    const { completionsFor } = await import('../extensions/kanban.ts');
+    const values = (p) => completionsFor(p)?.map((c) => c.value) ?? null;
+    assert.deepEqual(values('co'), ['cost']);
+    assert.equal(values('cost'), null);
+    assert.equal(values('session cost'), null);
+    assert.deepEqual(values('session in'), ['session inspect']);
+    assert.ok(values('session ').includes('session cost'));
   });
 
   it('sends a target without the token', async () => {

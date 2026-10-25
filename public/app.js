@@ -10124,6 +10124,11 @@ function setupEventSource() {
         applyPaneLayout(data.sessionId, data.layout);
       }
 
+      if (data.type === 'pane:open' && data.terminalId === showState.terminalId) {
+        setActivePaneId(data.sessionId, data.paneId);
+        showAddedPane(data.sessionId);
+      }
+
       if (data.type === 'pane:file-changed') {
         onPaneFileChanged(data.path);
       }

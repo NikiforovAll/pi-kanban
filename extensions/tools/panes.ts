@@ -53,8 +53,9 @@ export async function addPane(sessionId: string, cwd: string, params: { target: 
 }
 
 // The board starts the tool, which runs package code, so a companion pane takes the terminal token.
-export async function openCompanion(sessionId: string, companion: string) {
-	return postBoardJson(panesPath(sessionId), { companion }, { "x-terminal-token": terminalToken() });
+// With a board terminal id, the board tab that shows that terminal switches to the pane.
+export async function openCompanion(sessionId: string, companion: string, terminal?: string) {
+	return postBoardJson(panesPath(sessionId), { companion, terminal }, { "x-terminal-token": terminalToken() });
 }
 
 const paneLine = (out: { pane: { id: string; title: string }; added: boolean }) => `${out.pane.id}  ${out.pane.title}${out.added ? "" : " (already there)"}`;

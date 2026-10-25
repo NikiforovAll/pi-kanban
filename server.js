@@ -3064,17 +3064,22 @@ app.get('/api/panes/:sessionId', (req, res) => {
 
 app.post('/api/panes/:sessionId', async (req, res) => {
   try {
-    const { target, base, title, kind, show, companion } = req.body || {};
+    const { target, base, title, kind, show, companion, terminal } = req.body || {};
+    const { sessionId } = req.params;
+    let out;
     if (companion != null) {
       // The pane keeps the tool's own URL for this session, which only a started tool can give.
       const entry = await startCompanion(req, companion);
-      const pane = { kind: 'url', target: companionHost.url(entry, req.params.sessionId), title: title || companion, companion };
-      return res.json(panes.add(req.params.sessionId, pane));
+      const pane = { kind: 'url', target: companionHost.url(entry, sessionId), title: title || companion, companion };
+      out = panes.add(sessionId, pane);
+    } else {
+      if (typeof target !== 'string' || !target) throw previewError(400, 'target is required', 'bad_target');
+      // A message target is a session log message id, which the board resolves when it shows the pane.
+      const resolved = kind === 'message' ? { kind, target } : await resolvePaneTarget(target, base);
+      out = panes.add(sessionId, { ...resolved, title, show: show === true });
     }
-    if (typeof target !== 'string' || !target) throw previewError(400, 'target is required', 'bad_target');
-    // A message target is a session log message id, which the board resolves when it shows the pane.
-    const resolved = kind === 'message' ? { kind, target } : await resolvePaneTarget(target, base);
-    res.json(panes.add(req.params.sessionId, { ...resolved, title, show: show === true }));
+    if (typeof terminal === 'string') broadcast({ type: 'pane:open', sessionId, paneId: out.pane.id, terminalId: terminal });
+    res.json(out);
   } catch (error) {
     paneRouteError(res, error, 'POST /api/panes');
   }

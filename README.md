@@ -32,7 +32,7 @@ pi-kanban
 
 The board listens on `127.0.0.1:3460` and prints its URL with the access token. Open that URL and click **+ New** to start pi in the board terminal. Start the board with `--no-terminal` to only watch sessions.
 
-When pi runs in another terminal, run `/kanban open` in pi to open the board with its token. `/kanban session open | pin | sticky-pin | unpin | view-doc | link-doc` act on the current session.
+When pi runs in another terminal, run `/kanban open` in pi to open the board with its token. `/kanban session open | pin | sticky-pin | unpin | view-doc | link-doc` act on the current session, and `/kanban cost` and `/kanban inspect` open pi-cost and pi-inspect for it.
 
 ## The board
 

@@ -56,7 +56,10 @@ function ownSessionDir(dir: string): string | null {
 
 // A pi in the board terminal already runs inside the board page.
 const CAN_OPEN = !boardTerminalId();
-const SUBCOMMANDS = CAN_OPEN ? ["open", "session"] : ["session"];
+const COMPANION_OF = { cost: "pi-cost", inspect: "pi-inspect" } as const;
+type CompanionVerb = keyof typeof COMPANION_OF;
+const isCompanionVerb = (v: string): v is CompanionVerb => Object.hasOwn(COMPANION_OF, v);
+const SUBCOMMANDS = [...(CAN_OPEN ? ["open"] : []), "session", ...Object.keys(COMPANION_OF)];
 
 const SESSION_SUBCOMMANDS = [
 	"open",
@@ -69,10 +72,16 @@ const SESSION_SUBCOMMANDS = [
 	"inspect",
 ] as const;
 type SessionSub = (typeof SESSION_SUBCOMMANDS)[number];
-const COMPANION_OF = { cost: "pi-cost", inspect: "pi-inspect" } as const;
 
 // Whole commands, never an argument: Enter on a completion must not replace a typed path.
 const COMPLETIONS = [...SUBCOMMANDS, ...SESSION_SUBCOMMANDS.map((s) => `session ${s}`)];
+
+// pi's first Enter takes an offered completion, so a command typed in full offers none and runs.
+export function completionsFor(prefix: string) {
+	const typed = prefix.trimStart();
+	const items = COMPLETIONS.filter((c) => c.startsWith(typed) && c !== typed).map((c) => ({ value: c, label: c }));
+	return items.length ? items : null;
+}
 
 function splitArgs(args: string): string[] {
 	return args.trim().split(/\s+/).filter(Boolean);
@@ -287,12 +296,8 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	registerPaneTools(pi);
 
 	pi.registerCommand("kanban", {
-		description: `pi-kanban board: ${CAN_OPEN ? "open | " : ""}session <verb>`,
-		getArgumentCompletions: (prefix) => {
-			const typed = prefix.trimStart();
-			const items = COMPLETIONS.filter((c) => c.startsWith(typed)).map((c) => ({ value: c, label: c }));
-			return items.length ? items : null;
-		},
+		description: `pi-kanban board: ${CAN_OPEN ? "open | " : ""}session <verb> | cost | inspect`,
+		getArgumentCompletions: completionsFor,
 		handler: async (args, ctx) => {
 			const tokens = splitArgs(args);
 			const sub = tokens[0] || (CAN_OPEN ? "open" : "help");
@@ -311,10 +316,34 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					"  session unpin [<id>]",
 					"  session view-doc <file> [<id>]",
 					"  session link-doc <file> [<id>]",
-					"  session cost [<id>]       Add a pi-cost pane: cost, tokens and models",
-					"  session inspect [<id>]    Add a pi-inspect pane: what pi loaded",
+					"  cost [<id>]       Open pi-cost: cost, tokens and models (also session cost)",
+					"  inspect [<id>]    Open pi-inspect: what pi loaded (also session inspect)",
 				];
 				notify(lines.join("\n"));
+			}
+
+			// In the board terminal the board is on screen, so the pane opens there; elsewhere it waits as a tab.
+			async function companionCommand(verb: CompanionVerb, idArg: string | undefined) {
+				const id = idArg ?? ctx.sessionManager.getSessionId();
+				if (!id) {
+					notify(`Usage: /kanban ${verb} <session-id> (no current session to default to)`, "error");
+					return;
+				}
+				try {
+					const { pane, added } = await openCompanion(id, COMPANION_OF[verb], boardTerminalId() ?? undefined);
+					notify(
+						CAN_OPEN
+							? `${added ? "Added" : "Already there"}: ${pane.id}  ${pane.title}. Open its tab on the board.`
+							: `Opened ${pane.title} on the board.`,
+					);
+				} catch (e: any) {
+					notify(`${verb} failed: ${e?.message ?? e}`, "error");
+				}
+			}
+
+			if (isCompanionVerb(sub)) {
+				await companionCommand(sub, rest[0]);
+				return;
 			}
 
 			if (sub === "open" && CAN_OPEN) {
@@ -396,19 +425,8 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				if (verb === "cost" || verb === "inspect") {
-					const id = verbRest[0] ?? ctx.sessionManager.getSessionId() ?? null;
-					if (!id) {
-						notify(`Usage: /kanban session ${verb} <session-id> (no current session to default to)`, "error");
-						return;
-					}
-					const companion = COMPANION_OF[verb];
-					try {
-						const { pane, added } = await openCompanion(id, companion);
-						notify(`${added ? "Added" : "Already there"}: ${pane.id}  ${pane.title}. Open its tab on the board.`);
-					} catch (e: any) {
-						notify(`${verb} failed: ${e?.message ?? e}`, "error");
-					}
+				if (isCompanionVerb(verb)) {
+					await companionCommand(verb, verbRest[0]);
 					return;
 				}
 			}
