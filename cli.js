@@ -459,6 +459,7 @@ const SERVER_FLAGS = [
   ['--port <n>', 'PORT', 'Port (default 3460)'],
   ['--open', '', 'Open the board in the browser'],
   ['--dir <path>', 'PI_CODING_AGENT_DIR', 'pi agent dir (default ~/.pi/agent)'],
+  ['--session-dir <dir>', 'PI_CODING_AGENT_SESSION_DIR', 'pi session dir (default: sessionDir in pi settings)'],
   ['--no-terminal', '', 'Turn off the board terminal'],
   ['--terminal-shell <shell>', 'PK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
   ['--host <addr>', 'HOST', 'Listen address (default 127.0.0.1)'],

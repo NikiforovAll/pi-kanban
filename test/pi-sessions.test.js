@@ -31,10 +31,17 @@ const header = (sessionId, extra) => `${JSON.stringify({ type: 'session', versio
 
 describe('pi-sessions: roots', () => {
   let dir;
-  before(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-roots-')); });
+  before(() => { dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-roots-'))); });
   after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  const settings = (sessionDir) => fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ sessionDir }));
+  // readSettings caches by mtime, and two writes in a row can share one.
+  let tick = 0;
+  const writeSettings = (file, text) => {
+    fs.writeFileSync(file, text);
+    const t = new Date(Date.now() + ++tick * 1000);
+    fs.utimesSync(file, t, t);
+  };
+  const settings = (sessionDir) => writeSettings(path.join(dir, 'settings.json'), JSON.stringify({ sessionDir }));
 
   it('scans only the nested dir by default', () => {
     assert.deepEqual(sessionRoots(NESTED_ONLY), [{ dir: NESTED, flat: false }]);
@@ -64,8 +71,53 @@ describe('pi-sessions: roots', () => {
   it('ignores a blank or broken settings.json', () => {
     settings('  ');
     assert.equal(sessionRoots({ agentDir: dir, env: {} }).length, 1);
-    fs.writeFileSync(path.join(dir, 'settings.json'), '{');
+    writeSettings(path.join(dir, 'settings.json'), '{');
     assert.equal(sessionRoots({ agentDir: dir, env: {} }).length, 1);
+  });
+
+  it('prefers the --session-dir flag over the env dir and settings.json', () => {
+    settings('~/pi-sessions');
+    const flag = path.join(dir, 'flag');
+    assert.deepEqual(sessionRoots({ agentDir: dir, env: { [ENV_SESSION_DIR]: FLAT }, sessionDir: flag }), [{ dir: flag, flat: true }, { dir: path.join(dir, 'sessions'), flat: false }]);
+  });
+
+  it('adds the sessionDir of a project .pi/settings.json, relative to that cwd', () => {
+    settings('~/pi-sessions');
+    const cwd = path.join(dir, 'proj');
+    fs.mkdirSync(path.join(cwd, '.pi'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.pi', 'settings.json'), JSON.stringify({ sessionDir: 'pi-out' }));
+    const other = path.join(dir, 'other');
+    assert.deepEqual(sessionRoots({ agentDir: dir, env: {}, cwds: [cwd, other] }).map((r) => r.dir), [
+      path.join(os.homedir(), 'pi-sessions'),
+      path.join(cwd, 'pi-out'),
+      path.join(dir, 'sessions'),
+    ]);
+  });
+
+  it('ignores project settings when the env dir is set, as pi does', () => {
+    const cwd = path.join(dir, 'proj2');
+    fs.mkdirSync(path.join(cwd, '.pi'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.pi', 'settings.json'), JSON.stringify({ sessionDir: 'pi-out' }));
+    assert.deepEqual(sessionRoots({ agentDir: dir, env: { [ENV_SESSION_DIR]: FLAT }, cwds: [cwd] }).map((r) => r.dir), [FLAT, path.join(dir, 'sessions')]);
+  });
+
+  it('resolves a relative global sessionDir against each cwd', () => {
+    settings('rel');
+    const cwd = path.join(dir, 'a');
+    assert.equal(sessionRoots({ agentDir: dir, env: {} }).length, 1);
+    assert.equal(sessionRoots({ agentDir: dir, env: {}, cwds: [cwd] })[0].dir, path.join(cwd, 'rel'));
+  });
+
+  it('gives the long form of an 8.3 short path, even for a dir that does not exist yet', (t) => {
+    const tmp = os.tmpdir();
+    if (fs.realpathSync.native(tmp) === tmp) return t.skip('the temp dir has no short name here');
+    assert.equal(getSessionsRoot({ agentDir: dir, env: { [ENV_SESSION_DIR]: path.join(tmp, 'pk-none', 'new') } }), path.join(fs.realpathSync.native(tmp), 'pk-none', 'new'));
+  });
+
+  it('reads Git Bash drive paths and file URLs the way pi does', { skip: process.platform !== 'win32' }, () => {
+    assert.equal(getSessionsRoot({ agentDir: dir, env: { [ENV_SESSION_DIR]: '/c/pi/s' } }), 'C:\\pi\\s');
+    assert.equal(getSessionsRoot({ agentDir: dir, env: { [ENV_SESSION_DIR]: '/mnt/d/x' } }), 'D:\\x');
+    assert.equal(getSessionsRoot({ agentDir: dir, env: { [ENV_SESSION_DIR]: 'file:///C:/pi/u' } }), 'C:\\pi\\u');
   });
 });
 
@@ -153,7 +205,7 @@ describe('pi-sessions: layout edge cases', () => {
   let agentDir;
   let project;
   before(() => {
-    agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-layout-'));
+    agentDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-layout-')));
     project = path.join(agentDir, 'sessions', '--C--x--');
     const parent = '2026-01-01T00-00-00-000Z_p1';
     const run = path.join(project, parent, 'run-1', 'run-0');

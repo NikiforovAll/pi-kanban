@@ -23,6 +23,7 @@ It prints `pi-kanban running at http://localhost:3460` and the board URL with it
 | `--port <n>` | `PORT` | Port. Default 3460. When the port is taken, the server picks a free one. |
 | `--open` | | Open the board in the browser |
 | `--dir <path>` | `PI_CODING_AGENT_DIR` | pi agent dir. Default `~/.pi/agent`. |
+| `--session-dir <dir>` | `PI_CODING_AGENT_SESSION_DIR` | pi session dir. When neither is set, the board reads `sessionDir` from pi's `settings.json` and from each project's `.pi/settings.json`. |
 | `--no-terminal` | | Turn off the board terminal |
 | `--terminal-shell <shell>` | `PK_TERMINAL_SHELL` | `gitbash`, a program on `PATH`, or a path |
 | `--host <addr>` | `HOST` | Listen address. Default `127.0.0.1`. |

@@ -88,8 +88,9 @@ app.use(net.originGuard);
 const PI_AGENT_DIR = resolvePiAgentDir();
 const PK_DIR = boardDir(PI_AGENT_DIR);
 const TASKS_DIR = path.join(PK_DIR, 'tasks');
-const SESSION_ROOTS = sessionRoots({ agentDir: PI_AGENT_DIR });
-const SESSION_OPTS = { roots: SESSION_ROOTS };
+const SESSION_DIR_FLAG = getArgValue('session-dir');
+const rootsFor = (cwds) => sessionRoots({ agentDir: PI_AGENT_DIR, sessionDir: SESSION_DIR_FLAG, cwds });
+const SESSION_OPTS = { roots: rootsFor() };
 const SESSIONS_DIR = path.join(PK_DIR, 'live');
 const AGENT_ACTIVITY_DIR = path.join(PK_DIR, 'agent-activity');
 const CONTEXT_STATUS_DIR = path.join(PK_DIR, 'context-status');
@@ -708,11 +709,22 @@ function loadSessionMetadata() {
   }
 
   const metadata = {};
-
-  try {
-    for (const file of listSessionFiles(SESSION_OPTS)) {
+  const scanInto = (opts) => {
+    for (const file of listSessionFiles(opts)) {
       const entry = sessionMetadataOf(file);
       if (entry) metadata[entry.sessionId] = entry.meta;
+    }
+  };
+
+  try {
+    scanInto(SESSION_OPTS);
+    // A project .pi/settings.json can move a cwd's sessions to a dir of its own; the cwds come
+    // from the headers just read and from the live registry, so a new root needs one more pass.
+    const cwds = new Set([...Object.values(metadata), ...loadLiveSessions()].map((m) => m.cwd).filter(Boolean));
+    const added = syncSessionRoots(cwds);
+    if (added.length) {
+      scanInto({ roots: added });
+      broadcast({ type: 'metadata-update' });
     }
   } catch (e) {
     console.error('Error loading session metadata:', e);
@@ -1769,7 +1781,7 @@ function sanitizeAgentId(raw) {
   return path.basename(raw).replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-const inSessionRoots = (file) => typeof file === 'string' && SESSION_ROOTS.some((r) => isContained(file, r.dir));
+const inSessionRoots = (file) => typeof file === 'string' && SESSION_OPTS.roots.some((r) => isContained(file, r.dir));
 
 // pi-subagents runs each subagent as a child pi session and reports its file in the
 // tool result; the extension copies it into the agent record as sessionFile.
@@ -3389,12 +3401,35 @@ const onSessionFileEvent = (event, filePath) => {
   broadcast({ type: 'metadata-update' });
 };
 
-const projectsWatchers = SESSION_ROOTS.map((root) => chokidar.watch(root.dir, {
-  persistent: true,
-  ignoreInitial: true,
-  depth: root.flat ? 0 : 1,
-  awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 }
-}).on('all', onSessionFileEvent));
+const projectsWatchers = new Map();
+
+// Returns the roots that were not scanned before.
+function syncSessionRoots(cwds) {
+  const roots = rootsFor(cwds);
+  const added = roots.filter((r) => !projectsWatchers.has(r.dir));
+  SESSION_OPTS.roots = roots;
+  watchSessionRoots();
+  return added;
+}
+
+function watchSessionRoots() {
+  const want = new Set(SESSION_OPTS.roots.map((r) => r.dir));
+  for (const [dir, watcher] of projectsWatchers) {
+    if (want.has(dir)) continue;
+    watcher.close();
+    projectsWatchers.delete(dir);
+  }
+  for (const root of SESSION_OPTS.roots) {
+    if (projectsWatchers.has(root.dir)) continue;
+    projectsWatchers.set(root.dir, chokidar.watch(root.dir, {
+      persistent: true,
+      ignoreInitial: true,
+      depth: root.flat ? 0 : 1,
+      awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 }
+    }).on('all', onSessionFileEvent));
+  }
+}
+watchSessionRoots();
 
 const plansWatcher = chokidar.watch(planPaths(), {
   persistent: true,
