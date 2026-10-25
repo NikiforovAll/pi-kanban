@@ -15,7 +15,7 @@ function deadPid() {
 }
 
 describe('live session files', () => {
-  const entry = { sessionId: '01a16eb5-b912-7486-8548-41c706ab95bd', pid: process.pid, cwd: 'C:\\Users\\u\\sandbox', startedAt: 1, status: 'busy', statusUpdatedAt: 2, name: 'demo' };
+  const entry = { sessionId: '01a16eb5-b912-7486-8548-41c706ab95bd', pid: process.pid, cwd: 'C:\\Users\\u\\sandbox', sessionDir: 'C:\\Users\\u\\pi-out', startedAt: 1, status: 'busy', statusUpdatedAt: 2, name: 'demo' };
 
   it('writes the registry the server reads', async () => {
     const dir = tempDir();

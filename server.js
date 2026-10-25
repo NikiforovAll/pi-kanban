@@ -90,7 +90,12 @@ const PI_AGENT_DIR = resolvePiAgentDir();
 const PK_DIR = boardDir(PI_AGENT_DIR);
 const TASKS_DIR = path.join(PK_DIR, 'tasks');
 const SESSION_DIR_FLAG = getArgValue('session-dir');
-const rootsFor = (cwds) => sessionRoots({ agentDir: PI_AGENT_DIR, sessionDir: SESSION_DIR_FLAG, cwds });
+// A pi started with its own --session-dir reports that dir in the live registry. The board keeps
+// it, so those sessions stay listed after that pi exits and after a board restart.
+const SESSION_DIRS_FILE = path.join(PK_DIR, 'session-dirs.json');
+const savedSessionDirs = readJsonOrNull(SESSION_DIRS_FILE);
+const reportedSessionDirs = new Set(Array.isArray(savedSessionDirs) ? savedSessionDirs : []);
+const rootsFor = (cwds) => sessionRoots({ agentDir: PI_AGENT_DIR, sessionDir: SESSION_DIR_FLAG, cwds, sessionDirs: [...reportedSessionDirs] });
 const SESSION_OPTS = { roots: rootsFor() };
 const SESSIONS_DIR = path.join(PK_DIR, 'live');
 const AGENT_ACTIVITY_DIR = path.join(PK_DIR, 'agent-activity');
@@ -721,7 +726,11 @@ function loadSessionMetadata() {
     scanInto(SESSION_OPTS);
     // A project .pi/settings.json can move a cwd's sessions to a dir of its own; the cwds come
     // from the headers just read and from the live registry, so a new root needs one more pass.
-    const cwds = new Set([...Object.values(metadata), ...loadLiveSessions()].map((m) => m.cwd).filter(Boolean));
+    const live = loadLiveSessions();
+    const cwds = new Set([...Object.values(metadata), ...live].map((m) => m.cwd).filter(Boolean));
+    const known = reportedSessionDirs.size;
+    for (const s of live) if (s.sessionDir) reportedSessionDirs.add(s.sessionDir);
+    if (reportedSessionDirs.size !== known) writeJsonAtomicOrLog(SESSION_DIRS_FILE, [...reportedSessionDirs]);
     const added = syncSessionRoots(cwds);
     if (added.length) {
       scanInto({ roots: added });

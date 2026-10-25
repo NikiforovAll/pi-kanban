@@ -1,5 +1,5 @@
-import { join as joinPath } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { dirname, join as joinPath } from "node:path";
+import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
 import { linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
 import { registerDispatch } from "./tools/dispatch.js";
@@ -42,6 +42,12 @@ const { SESSION_ID_ENV } = lib("board-dir.js") as { SESSION_ID_ENV: string };
 const LIVE_DIR = joinPath(kanbanDir(), "live");
 const ACTIVITY_DIR = joinPath(kanbanDir(), "agent-activity");
 
+// pi's default dir is <agentDir>/sessions/<encoded cwd>, which the board scans already. Only a
+// dir pi was told to use (--session-dir, env, settings) goes in the live entry.
+function ownSessionDir(dir: string): string | null {
+	return dir && dirname(dir) !== joinPath(getAgentDir(), "sessions") ? dir : null;
+}
+
 // A pi in the board terminal already runs inside the board page.
 const CAN_OPEN = !boardTerminalId();
 const SUBCOMMANDS = CAN_OPEN ? ["open", "session"] : ["session"];
@@ -83,7 +89,7 @@ const EXIT_GUARD = Symbol.for("pi-kanban.live-exit-guard");
 function registerLiveState(pi: ExtensionAPI) {
 	if (process.env.PI_SUBAGENT_CHILD) return;
 
-	let session: { sessionId: string; cwd: string; name: string | null } | null = null;
+	let session: { sessionId: string; cwd: string; sessionDir: string | null; name: string | null } | null = null;
 	let status: "busy" | "idle" | "waiting" = "idle";
 	let statusUpdatedAt = Date.now();
 	let running = false;
@@ -119,7 +125,7 @@ function registerLiveState(pi: ExtensionAPI) {
 			statusUpdatedAt = Date.now();
 		}
 		if (!session) return;
-		const entry = { sessionId: session.sessionId, pid: process.pid, cwd: session.cwd, startedAt: PROCESS_STARTED_AT, status, statusUpdatedAt, name: session.name };
+		const entry = { sessionId: session.sessionId, pid: process.pid, cwd: session.cwd, sessionDir: session.sessionDir, startedAt: PROCESS_STARTED_AT, status, statusUpdatedAt, name: session.name };
 		const text = JSON.stringify(entry);
 		if (text === published) return;
 		published = text;
@@ -137,7 +143,7 @@ function registerLiveState(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (!sessionId) return;
-		session = { sessionId, cwd: ctx.sessionManager.getCwd(), name: ctx.sessionManager.getSessionName() ?? null };
+		session = { sessionId, cwd: ctx.sessionManager.getCwd(), sessionDir: ownSessionDir(ctx.sessionManager.getSessionDir()), name: ctx.sessionManager.getSessionName() ?? null };
 		running = false;
 		openPrompts = 0;
 		toolsInFlight.clear();

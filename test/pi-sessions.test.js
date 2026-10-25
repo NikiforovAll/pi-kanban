@@ -101,6 +101,17 @@ describe('pi-sessions: roots', () => {
     assert.deepEqual(sessionRoots({ agentDir: dir, env: { [ENV_SESSION_DIR]: FLAT }, cwds: [cwd] }).map((r) => r.dir), [FLAT, path.join(dir, 'sessions')]);
   });
 
+  it('adds the dirs pi processes reported', () => {
+    settings('  ');
+    const own = path.join(dir, 'own');
+    assert.deepEqual(sessionRoots({ agentDir: dir, env: {}, sessionDirs: [own, own] }), [
+      { dir: own, flat: true },
+      { dir: path.join(dir, 'sessions'), flat: false },
+    ]);
+    const flag = path.join(dir, 'flag');
+    assert.deepEqual(sessionRoots({ agentDir: dir, env: {}, sessionDir: flag, sessionDirs: [own] }).map((r) => r.dir), [flag, own, path.join(dir, 'sessions')]);
+  });
+
   it('resolves a relative global sessionDir against each cwd', () => {
     settings('rel');
     const cwd = path.join(dir, 'a');
