@@ -15487,7 +15487,7 @@ function initAsk() {
 //#endregion
 
 //#region SHOW
-// The card the session in the embedded terminal posts to with the show tool. It belongs to the
+// The card the session in the embedded terminal posts to with `pi-kanban show`. It belongs to the
 // terminal, not the session: /clear and the --resume picker change the session id, the terminal id
 // stays. Nothing here runs until the terminal view shows a terminal that has posts.
 const SHOW_MSG = 'pk-show:';

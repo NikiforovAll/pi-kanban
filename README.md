@@ -8,7 +8,7 @@ Agent PI - Agent Development Environment (ADE) for the [pi coding agent](https:/
 
 ## What it is
 
-pi-kanban runs pi sessions in a browser terminal and shows each session next to its work: todos as kanban columns, subagents, linked docs, and the full session log. The pi tools it adds let the agent show you cards, ask you questions, open files and pages as tabs, and hand tasks to new pi sessions.
+pi-kanban runs pi sessions in a browser terminal and shows each session next to its work: todos as kanban columns, subagents, linked docs, and the full session log. Its skills and its `ask` tool let the agent show you cards, ask you questions, open files and pages as tabs, and hand tasks to new pi sessions.
 
 - **Documentation:** https://nikiforovall.blog/pi-kanban/
 - **Live demo:** https://nikiforovall.blog/pi-kanban/demo/ (sample sessions, runs in your browser, no install)
@@ -22,7 +22,7 @@ pi install npm:pi-kanban
 npm install -g pi-kanban
 ```
 
-The first command adds the `/kanban` command and the board tools to pi. The second installs the `pi-kanban` command, which runs the board.
+The first command gives pi the `/kanban` command, the `ask` tool, and the skills that drive the board. The second installs the `pi-kanban` command, which runs the board.
 
 ## Start the board
 
