@@ -209,9 +209,10 @@ describe('new session options', () => {
 describe('edit before run', () => {
   const A = 'aaaaaaaa-0000-0000-0000-000000000001';
 
-  function service(live = [], shell = 'bash', resolveCwd = () => null) {
+  function service(live = [], shell = 'bash', resolveCwd = () => null, hooks = {}) {
     const pty = fakePty();
     const t = createTerminalService({
+      ...hooks,
       config: { enabled: true, restore: false, shell, maxSessions: 30, scrollback: 100 },
       net: { EXPOSED: false },
       pty,
@@ -284,6 +285,32 @@ describe('edit before run', () => {
     await t.startNew({ id: A, cwd: os.tmpdir(), name: 'Fix login' });
     assert.ok(pty.spawned[0].args.join(' ').includes(`--session-id ${A}`));
     assert.equal(t.list()[0].edit, false);
+    t.shutdown();
+  });
+
+  it('writes the file of a plain new session first, and removes it on exit', async () => {
+    const PARENT = 'bbbbbbbb-0000-0000-0000-000000000002';
+    const created = [];
+    const removed = [];
+    const hooks = {
+      sessionFile: (id, cwd, create) => { created.push([id, cwd, create]); return `file-${id}`; },
+      removeIfNoMessages: (file) => removed.push(file),
+    };
+    const { t, pty } = service([], 'bash', (id) => (id === PARENT ? os.tmpdir() : null), hooks);
+    await t.startNew({ id: A, cwd: os.tmpdir() });
+    await t.startNew({ id: SESSION, forkOf: PARENT });
+    await t.startNew({ id: 'cccccccc-0000-0000-0000-000000000003', resume: PARENT, cwd: os.tmpdir() });
+    assert.equal(pty.spawned.length, 3);
+    assert.deepEqual(created, [[A, os.tmpdir(), true]]);
+    pty.spawned.forEach((p) => p.exit());
+    assert.deepEqual(removed, [`file-${A}`]);
+    t.shutdown();
+  });
+
+  it('starts the session when the file cannot be written', async () => {
+    const { t, pty } = service([], 'bash', () => null, { sessionFile: () => { throw new Error('EEXIST'); } });
+    assert.equal((await t.startNew({ id: A, cwd: os.tmpdir() })).id, A);
+    assert.equal(pty.spawned.length, 1);
     t.shutdown();
   });
 });
@@ -813,10 +840,11 @@ describe('terminal restore', () => {
   const GAP_MS = 60;
   const SAVE_MS = 20;
 
-  function service(restore, initial, { live = [], dead = new Set(), rekeys = [] } = {}) {
+  function service(restore, initial, { live = [], dead = new Set(), rekeys = [], hooks = {} } = {}) {
     const store = { data: initial, loads: 0, saves: 0 };
     const pty = fakePty();
     const t = createTerminalService({
+      ...hooks,
       config: { enabled: true, restore, shell: SHELL, maxSessions: 30, scrollback: 100 },
       net: { EXPOSED: false },
       pty,
@@ -857,6 +885,17 @@ describe('terminal restore', () => {
     t.shutdown();
     await wait(SAVE_MS * 3);
     assert.deepEqual(store.data.sessions, [B]);
+  });
+
+  it('removes the file of a restored session that has no message when it exits', async () => {
+    const removed = [];
+    const hooks = { sessionFile: (id, cwd, create) => (create ? null : `${cwd}/file-${id}`), removeIfNoMessages: (file) => removed.push(file) };
+    const { t, pty } = service(true, { sessions: [A] }, { hooks });
+    t.restore();
+    await until(() => pty.spawned.length === 1);
+    pty.spawned[0].exit();
+    assert.deepEqual(removed, [`${os.tmpdir()}/file-${A}`]);
+    t.shutdown();
   });
 
   it('does not save a terminal started with restore off', async () => {

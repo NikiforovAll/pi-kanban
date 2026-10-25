@@ -9,6 +9,9 @@ const {
   getSessionsRoot,
   encodeProjectDir,
   decodeProjectDir,
+  newSessionDir,
+  createSessionFile,
+  removeIfNoMessages,
   listSessionFiles,
   readSessionHeader,
   describeSessionFile,
@@ -141,6 +144,50 @@ describe('pi-sessions: project dir names', () => {
   it('decodes them back', () => {
     assert.equal(decodeProjectDir('--C--work-demo--'), 'C:\\work\\demo');
     assert.equal(decodeProjectDir('--home-dev-app--'), '/home/dev/app');
+  });
+});
+
+describe('pi-sessions: the file of a new session', () => {
+  let dir;
+  before(() => { dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-new-'))); });
+  after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('goes where pi writes a new session: the env dir, then settings, then the project folder', () => {
+    const cwd = path.join(dir, 'proj');
+    assert.equal(newSessionDir(cwd, { agentDir: dir, env: {} }), path.join(dir, 'sessions', encodeProjectDir(cwd)));
+    fs.mkdirSync(path.join(cwd, '.pi'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.pi', 'settings.json'), JSON.stringify({ sessionDir: 'pi-out' }));
+    assert.equal(newSessionDir(cwd, { agentDir: dir, env: {} }), path.join(cwd, 'pi-out'));
+    assert.equal(newSessionDir(cwd, { agentDir: dir, env: { [ENV_SESSION_DIR]: FLAT } }), FLAT);
+  });
+
+  it('holds only the header', () => {
+    const out = path.join(dir, 'out');
+    const file = createSessionFile(out, id(9), dir);
+    assert.match(path.basename(file), new RegExp(`^\\d{4}-\\d\\d-\\d\\dT\\d\\d-\\d\\d-\\d\\d-\\d{3}Z_${id(9)}\\.jsonl$`));
+    const text = fs.readFileSync(file, 'utf8');
+    assert.equal(text.indexOf('\n'), text.length - 1);
+    const { timestamp, ...rest } = readSessionHeader(file);
+    assert.deepEqual(rest, { type: 'session', version: 3, id: id(9), cwd: dir });
+  });
+
+  it('is removed when it holds no message, and kept when it does or is not a pi session', () => {
+    const write = (name, first, ...entries) => {
+      const file = path.join(dir, name);
+      fs.writeFileSync(file, first + entries.map((e) => `${JSON.stringify(e)}\n`).join(''));
+      return file;
+    };
+    const empty = write('empty.jsonl', header(id(10)), { type: 'model_change', id: 'm1' });
+    const used = write('used.jsonl', header(id(10)), { type: 'message', id: 'u1', message: { role: 'user', content: 'hi' } });
+    const other = write('other.jsonl', '{"type":"note"}\n');
+    for (const f of [empty, used, other, path.join(dir, 'gone.jsonl')]) removeIfNoMessages(f);
+    assert.deepEqual([empty, used, other].map((f) => fs.existsSync(f)), [false, true, true]);
+  });
+
+  it('is found again in its folder by the id', () => {
+    const out = path.join(dir, 'again');
+    const file = createSessionFile(out, id(11), dir);
+    assert.equal(findSessionFile(id(11), { roots: [{ dir: out, flat: true }] }), file);
   });
 });
 
