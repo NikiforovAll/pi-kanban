@@ -60,7 +60,7 @@ const { createDispatchReports, parseReport } = require('./lib/dispatch-reports')
 const { createModelCache, listPiModels } = require('./lib/pi-models');
 const { createWorktreeStore } = require('./lib/worktrees');
 const { createScratchpadDirResolver, defaultScratchpadRoot } = require('./lib/scratchpad-dir');
-const { readGitBranch, sessionGitBranch } = require('./lib/git-branch');
+const { readGitBranch } = require('./lib/git-branch');
 const { createLinkedDocStore, linkUrl } = require('./lib/linked-docs');
 const { createPaneStore, isOwnOrigin } = require('./lib/panes');
 const { probeFraming, parseOrigin } = require('./lib/frame-policy');
@@ -303,18 +303,13 @@ function boardEventsEnabled() {
 }
 
 function checkWaitingForUser(agentDir, logMtime) {
-  try {
-    const data = JSON.parse(readFileSync(path.join(agentDir, '_waiting.json'), 'utf8'));
-    if (data.status === 'waiting' && data.timestamp) {
-      const waitTime = new Date(data.timestamp).getTime();
-      const age = Date.now() - waitTime;
-      if (age >= PERMISSION_TTL_MS) return null;
-      // After grace period, check if session resumed activity (user already responded)
-      if (movedOnSince(waitTime, logMtime)) return null;
-      return data;
-    }
-  } catch { /* skip — missing or invalid */ }
-  return null;
+  const data = readJsonOrNull(path.join(agentDir, '_waiting.json'));
+  if (data?.status !== 'waiting' || !data.timestamp) return null;
+  const waitTime = new Date(data.timestamp).getTime();
+  if (Date.now() - waitTime >= PERMISSION_TTL_MS) return null;
+  // After grace period, check if session resumed activity (user already responded)
+  if (movedOnSince(waitTime, logMtime)) return null;
+  return data;
 }
 
 function agentDisplayName(agent) {
@@ -330,7 +325,7 @@ function getContextFields(meta) {
   const reply = meta?.lastReply;
   return {
     context: contextOf(reply, readSettings(MODEL_WINDOWS_PATH) || {}),
-    cache: reply ? { ttl: meta.cacheTtl || null, ...reply, modelName: modelDisplayName(reply.model) } : null,
+    cache: reply ? { ...reply, modelName: modelDisplayName(reply.model) } : null,
     totals: meta?.totals || null,
   };
 }
@@ -761,7 +756,7 @@ function buildSessionObject(id, meta, overrides = {}) {
     project: meta.project || null,
     cwd: meta.cwd || null,
     description: meta.description || null,
-    gitBranch: sessionGitBranch(meta, !!worktree, getGitBranch),
+    gitBranch: getGitBranch(meta.cwd || meta.project),
     worktree,
     customTitle: meta.customTitle || null,
     firstPrompt: meta.firstPrompt || null,
@@ -960,6 +955,7 @@ app.get('/api/sessions', async (req, res) => {
         for (const dir of readdirSync(AGENT_ACTIVITY_DIR, { withFileTypes: true })) {
           if (!dir.isDirectory() || sessionsMap.has(dir.name)) continue;
           const agentDir = path.join(AGENT_ACTIVITY_DIR, dir.name);
+          if (!existsSync(path.join(agentDir, '_waiting.json'))) continue;
           const meta = metadata[dir.name] || {};
           const logStat = getSessionLogStat(meta);
           const waiting = checkWaitingForUser(agentDir, logStat.mtime);

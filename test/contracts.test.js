@@ -461,8 +461,6 @@ describe('Parser: buildAgentProgressMap', () => {
 });
 
 describe('Parser: readSessionInfoFromJsonl', () => {
-  const CLAUDE_ONLY = ['gitBranch', 'agentName', 'logicalParentUuid', 'compactBoundaryUuid', 'cacheTtl'];
-
   it('reads the header, the name and the first prompt', () => {
     const info = readSessionInfoFromJsonl(PI.chat);
     assert.equal(info.projectPath, 'C:\\work\\demo');
@@ -471,11 +469,6 @@ describe('Parser: readSessionInfoFromJsonl', () => {
     assert.equal(info.customTitle, 'Greeting');
     assert.equal(info.firstPrompt, 'Say hello in one word.');
     assert.equal(info.parentSessionPath, null);
-  });
-
-  it('leaves the fields pi does not write null', () => {
-    const info = readSessionInfoFromJsonl(PI.tools);
-    for (const k of CLAUDE_ONLY) assert.equal(info[k], null, k);
   });
 
   it('reads the parent session path of a fork', () => {
@@ -522,7 +515,7 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   it('returns null fields for a missing file and for a file without a pi header', () => {
     for (const p of ['/nonexistent/path.jsonl', CLAUDE_TRANSCRIPT]) {
       const info = readSessionInfoFromJsonl(p);
-      for (const k of ['projectPath', 'customTitle', 'sessionId', 'firstPrompt', 'title', 'lastReply', 'scratchpadDir', ...CLAUDE_ONLY]) assert.equal(info[k], null, `${p} ${k}`);
+      for (const k of ['projectPath', 'customTitle', 'sessionId', 'firstPrompt', 'title', 'lastReply', 'scratchpadDir']) assert.equal(info[k], null, `${p} ${k}`);
     }
   });
 
@@ -536,9 +529,8 @@ describe('Parser: readSessionInfoFromJsonl', () => {
   }));
 
   describe('lastReply', () => {
-    const T = (s) => `2026-01-01T00:00:${String(s).padStart(2, '0')}.000Z`;
-    const user = (s, extra) => piUser('hi', { timestamp: T(s), ...extra });
-    const reply = (s, opts) => piReply(piText('ok'), { timestamp: T(s), ...opts });
+    const user = (extra) => piUser('hi', extra);
+    const reply = (opts) => piReply(piText('ok'), opts);
     const usage = (read, write) => ({ input_tokens: 1, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 2 });
     let dir;
     let p;
@@ -548,27 +540,27 @@ describe('Parser: readSessionInfoFromJsonl', () => {
     });
     afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-    it('takes the last reply, timed by the request before it, as the file grows', () => {
-      writeFileSync(p, piSession([user(1), reply(5, { usage: { input: 1, output: 2, cacheRead: 100, cacheWrite: 300 } })]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 300) });
-      appendFileSync(p, piLine(user(10, { id: 'e3', parentId: 'e2' })) + piLine(reply(14, { id: 'e4', parentId: 'e3', model: 'claude-fable-5-1' })));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(10)), model: 'claude-fable-5-1', provider: 'codemie', usage: usage(100, 0) });
+    it('takes the last reply as the file grows', () => {
+      writeFileSync(p, piSession([user(), reply({ usage: { input: 1, output: 2, cacheRead: 100, cacheWrite: 300 } })]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 300) });
+      appendFileSync(p, piLine(user({ id: 'e3', parentId: 'e2' })) + piLine(reply({ id: 'e4', parentId: 'e3', model: 'claude-fable-5-1' })));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { model: 'claude-fable-5-1', provider: 'codemie', usage: usage(100, 0) });
     });
 
     it('ignores a reply on an abandoned branch', () => {
-      writeFileSync(p, piSession([user(1), reply(5), user(10), reply(12, { model: 'claude-fable-5-1' }), user(20, { id: 'e5', parentId: 'e2' })]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 0) });
+      writeFileSync(p, piSession([user(), reply(), user(), reply({ model: 'claude-fable-5-1' }), user({ id: 'e5', parentId: 'e2' })]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 0) });
     });
 
     it('a compaction after the reply clears its usage', () => {
-      writeFileSync(p, piSession([user(1), reply(5), { type: 'compaction', summary: 's', firstKeptEntryId: 'e1', tokensBefore: 10, timestamp: T(50) }]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: null });
+      writeFileSync(p, piSession([user(), reply(), { type: 'compaction', summary: 's', firstKeptEntryId: 'e1', tokensBefore: 10 }]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { model: 'gpt-6-luna', provider: 'codemie', usage: null });
     });
 
     it('skips a reply that stopped on a provider error', () => {
-      const failed = reply(12, { model: 'claude-fable-5-1', stopReason: 'error', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
-      writeFileSync(p, piSession([user(1), reply(5), user(10), failed]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 0) });
+      const failed = reply({ model: 'claude-fable-5-1', stopReason: 'error', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+      writeFileSync(p, piSession([user(), reply(), user(), failed]));
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 0) });
     });
   });
 

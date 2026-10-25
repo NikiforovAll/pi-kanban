@@ -1,10 +1,10 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const { mkdtempSync, readFileSync, realpathSync, rmSync } = require('node:fs');
+const { mkdtempSync, readFileSync, rmSync } = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const { tempAgentDir, startServer: startServerWith, stopServer } = require('./server-harness');
 const { createTerminalService, shellArgs, oneShotArgs, piCommand, readTerminalConfig, clientConfigFor, resolveShell, piArgsFor, withTuiMode, windowsPtyFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
 
 let WebSocket = null;
@@ -19,40 +19,8 @@ const TOKEN = 'a'.repeat(64);
 const SESSION = '11111111-2222-3333-4444-555555555555';
 const SHELL = process.platform === 'win32' ? 'cmd.exe' : 'sh';
 
-function tempAgentDir() {
-  // os.tmpdir() can be an 8.3 short path, and libuv's Windows watcher asserts on an event
-  // under one (fs-event.c), which kills the server the first time it writes to .pi-kanban.
-  return realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pk-term-')));
-}
-
-function startServer(extraArgs, { dir = tempAgentDir(), token = TOKEN } = {}) {
-  const env = { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, PK_TERMINAL_TOKEN: token };
-  if (!token) delete env.PK_TERMINAL_TOKEN;
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js'), ...extraArgs], {
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const port = new Promise((resolve, reject) => {
-    let buf = '';
-    child.stdout.on('data', (d) => {
-      buf += d;
-      const m = buf.match(/running at http:\/\/localhost:(\d+)/);
-      if (m) resolve(Number(m[1]));
-    });
-    child.on('exit', (code) => reject(new Error(`server exited ${code}`)));
-  });
-  return { child, dir, port };
-}
-
-function stopServer(s, { keepDir = false } = {}) {
-  if (process.platform === 'win32') spawn('taskkill', ['/pid', String(s.child.pid), '/f', '/t'], { stdio: 'ignore' });
-  else s.child.kill();
-  // A child that outlives the kill must not keep the test process alive through its pipes.
-  s.child.stdout.destroy();
-  s.child.stderr.destroy();
-  s.child.unref();
-  if (keepDir) return;
-  try { rmSync(s.dir, { recursive: true, force: true }); } catch { /* locked by the dying child */ }
+function startServer(extraArgs, { dir, token = TOKEN } = {}) {
+  return startServerWith(extraArgs, { dir, env: { PK_TERMINAL_TOKEN: token || undefined } });
 }
 
 // Windows loopback sometimes fails a connect with ETIMEDOUT under load, before any byte reaches the server.

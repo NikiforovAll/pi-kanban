@@ -10150,74 +10150,7 @@ function formatCost(usd) {
   return `$${usd.toFixed(2)}`;
 }
 
-const CACHE_TTL = { '5m': { ms: 5 * 60000, write: 1.25 }, '1h': { ms: 60 * 60000, write: 2 } };
-// List input price, $ per million tokens. Most specific prefix first.
-const INPUT_PRICE_PER_MTOK = [
-  ['claude-fable-5', 10],
-  ['claude-mythos-5', 10],
-  ['claude-opus-5-5', 4],
-  ['claude-opus-5', 5],
-  ['claude-opus-4', 5],
-  ['claude-sonnet-5', 2],
-  ['claude-sonnet-4', 3],
-  ['claude-haiku-4', 1],
-];
-
-// Same token count Claude Code prices in its own estimated_cache_write_usd.
-function cacheRewrite(usage, modelId, writeRate) {
-  const price = INPUT_PRICE_PER_MTOK.find(([prefix]) => modelId?.startsWith(prefix))?.[1];
-  const tokens =
-    (usage?.input_tokens || 0) +
-    (usage?.cache_read_input_tokens || 0) +
-    (usage?.cache_creation_input_tokens || 0) +
-    (usage?.output_tokens || 0);
-  if (!price || !tokens) return null;
-  return { tokens, usd: (tokens / 1e6) * price * writeRate };
-}
-
-function formatCacheLeft(expiresAt, expiredText) {
-  const left = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
-  if (left === 0) return { text: expiredText, color: 'var(--text-muted)' };
-  const text = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
-  const color = left < 120 ? CONTEXT_COLORS.red : left < 300 ? CONTEXT_COLORS.orange : CONTEXT_COLORS.green;
-  return { text, color };
-}
-
-let cacheTimerInterval = null;
-
-function tickCacheTimers() {
-  const els = document.querySelectorAll('.cache-timer');
-  if (!els.length) {
-    clearInterval(cacheTimerInterval);
-    cacheTimerInterval = null;
-    return;
-  }
-  if (!isOnScreen()) return;
-  for (const el of els) {
-    const { text, color } = formatCacheLeft(Number(el.dataset.expires), el.dataset.expiredText);
-    if (el.textContent === text) continue;
-    el.textContent = text;
-    el.style.color = color;
-  }
-}
-
-function renderCacheTimer({ at, ttl, usage, model }) {
-  const cache = CACHE_TTL[ttl];
-  if (!at || !cache) return '';
-  const expiresAt = at + cache.ms;
-  const rewrite = cacheRewrite(usage, model, cache.write);
-  const expiredText = rewrite ? `expired · ~${formatCost(rewrite.usd)}` : 'expired';
-  const { text, color } = formatCacheLeft(expiresAt, expiredText);
-  cacheTimerInterval ??= setInterval(tickCacheTimers, 1000);
-  const clock = new Date(expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const cost = rewrite
-    ? ` It writes ${formatTokens(rewrite.tokens / 1000)} tokens again, about ${formatCost(rewrite.usd)} at list price.`
-    : '';
-  const title = `Prompt cache, ${ttl} TTL. Expires at ${clock}; the next request after that writes it again.${cost}`;
-  return `<div class="stat-item" title="${escapeHtml(title)}"><span class="stat-label">Cache</span><span class="stat-value cache-timer" data-expires="${escapeHtml(expiresAt)}" data-expired-text="${escapeHtml(expiredText)}" style="color:${color}">${text}</span></div>`;
-}
-
-// The Cache row and the current-usage rows come from the last reply (session.cache), the totals,
+// The current-usage rows come from the last reply (session.cache), the totals,
 // cost and duration from the whole transcript (session.totals).
 function renderContextDetail(session, { tokens = true, costLink = true } = {}) {
   const ctx = getCtx(session);
@@ -10263,7 +10196,6 @@ function renderContextDetail(session, { tokens = true, costLink = true } = {}) {
             ${usageRows}
             ${totalRows}
             ${totals ? `<div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(totals.costUsd)}">${formatCost(totals.costUsd)}</span></div>` : ''}
-            ${reply ? renderCacheTimer(reply) : ''}
             ${totals?.durationMs != null ? `<div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(totals.durationMs)}</span></div>` : ''}
             ${totals && costLink ? `<button class="detail-context-open" data-session="${escapeHtml(session.id)}" onclick="openCompanion('pi-cost', this.dataset.session)">Open in pi-cost</button>` : ''}
           </div>
