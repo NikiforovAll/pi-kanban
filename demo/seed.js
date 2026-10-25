@@ -333,8 +333,29 @@ function writeShowPosts(pad, sessionId, at) {
   write(path.join(dir, 'index.json'), JSON.stringify({ sessionId, posts }, null, 2));
 }
 
+// The lib modules write to the agent dir and scratchpad root the env names, so a missing env
+// var would put fake sessions into the user's real ~/.pi/agent.
+function assertSeedDirs(root) {
+  const os = require('node:os');
+  const { getAgentDir, longPath } = require('../lib/agent-dir');
+  const { defaultScratchpadRoot } = require('../lib/scratchpad-dir');
+  const base = longPath(root);
+  const inside = (dir) => {
+    const rel = path.relative(base, longPath(dir));
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  const agentDir = getAgentDir();
+  if (path.relative(agentDir, longPath(path.join(os.homedir(), '.pi', 'agent'))) === '') {
+    throw new Error(`seedFiles refuses the default agent dir ${agentDir}; set PI_CODING_AGENT_DIR under ${root}`);
+  }
+  for (const [name, dir] of [['PI_CODING_AGENT_DIR', agentDir], ['PI_KANBAN_TMPDIR', defaultScratchpadRoot()]]) {
+    if (!inside(dir)) throw new Error(`seedFiles writes only under ${root}, but ${name} resolves to ${dir}`);
+  }
+}
+
 // Everything the board reads from disk. Returns the paths the HTTP seeding needs.
 async function seedFiles({ root, now = Date.now() }) {
+  assertSeedDirs(root);
   const { getAgentDir } = require('../lib/agent-dir');
   const { defaultScratchpadRoot, scratchpadPath } = require('../lib/scratchpad-dir');
   const { encodeProjectDirName } = require('../lib/board-dir');
@@ -343,10 +364,12 @@ async function seedFiles({ root, now = Date.now() }) {
   const { startLines, endLines } = require('../lib/pi-agents');
   const { createDispatchedStore } = require('../lib/retention');
   const { MODEL_WINDOWS_FILE, recordModelWindows } = require('../lib/model-windows');
+  const { COMPANIONS } = require('../lib/companions');
 
   const at = minutesAgo(now);
   const agentDir = getAgentDir();
   const kanban = path.join(agentDir, 'kanban');
+  write(path.join(agentDir, 'settings.json'), JSON.stringify({ packages: COMPANIONS.map((c) => c.source) }, null, 2));
   const projects = projectFiles(path.join(root, 'code'));
   const padRoot = defaultScratchpadRoot();
   const pads = {
