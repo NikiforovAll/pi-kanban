@@ -68,23 +68,6 @@ async function postShow(api, { sessionId, ...card }, token, terminal = TERMINAL)
   return r;
 }
 
-async function until(check, ms = 3000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const v = check();
-    if (v) return v;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return check();
-}
-
-// Writes a claim's file and waits for its refresh, so no late event lands in a later check.
-async function write(b, post, text) {
-  const since = b.events.length;
-  fs.writeFileSync(post.path, text);
-  assert.ok(await until(() => b.events.slice(since).some((e) => e.type === 'show:posted' && e.id === post.id)));
-}
-
 describe('show routes', () => {
   let root;
   let b;
@@ -103,6 +86,11 @@ describe('show routes', () => {
   });
 
   const showDir = (id) => path.join(root, id, 'scratchpad', '.pi-kanban', 'show');
+  const card = (name, text = name) => {
+    const file = path.join(root, name);
+    fs.writeFileSync(file, text);
+    return file;
+  };
 
   it('answers an empty card before the first post', async () => {
     const r = await api.call('GET', showUrl());
@@ -110,46 +98,35 @@ describe('show routes', () => {
     assert.deepEqual(r.body, { sessionId: null, posts: [] });
   });
 
-  it('claims a markdown card in the scratchpad and sends show:posted without the content', async () => {
-    const r = await postShow(api, { sessionId: A, title: 'Plan' });
+  it('keeps a post in the scratchpad index and sends show:posted without the content', async () => {
+    const file = card('plan.md', '# Plan');
+    const r = await postShow(api, { sessionId: A, title: 'Plan', file });
     assert.equal(r.status, 200);
-    const file = path.join(showDir(A), `${r.body.id}.md`);
-    assert.deepEqual({ ...r.body, id: undefined }, { id: undefined, title: 'Plan', key: null, index: 1, count: 1, replaced: false, path: file });
+    assert.deepEqual({ ...r.body, id: undefined }, { id: undefined, title: 'Plan', key: null, index: 1, count: 1, replaced: false });
     const index = JSON.parse(fs.readFileSync(path.join(showDir(A), 'index.json'), 'utf8'));
     assert.equal(index.sessionId, A);
-    assert.deepEqual(index.posts.map((p) => [p.id, p.kind, p.file]), [[r.body.id, 'markdown', null]]);
-    const { path: _, ...shown } = r.body;
-    assert.deepEqual(b.events.at(-1), { type: 'show:posted', terminalId: TERMINAL, sessionId: A, ...shown });
-
-    await write(b, r.body, '# Plan');
-    const got = await api.call('GET', `${showUrl()}/${r.body.id}`);
-    assert.deepEqual(got.body, { id: r.body.id, title: 'Plan', key: null, kind: 'markdown', content: '# Plan', file: null, path: file, url: null });
+    assert.deepEqual(index.posts.map((p) => [p.id, p.kind, p.file]), [[r.body.id, 'markdown', file]]);
+    assert.deepEqual(b.events.at(-1), { type: 'show:posted', terminalId: TERMINAL, sessionId: A, ...r.body });
   });
 
   it('replaces a keyed post in place, keeping its id and position', async () => {
-    const first = await postShow(api, { sessionId: A, title: 'Diagram', key: 'arch' });
-    await write(b, first.body, 'v1');
-    await write(b, (await postShow(api, { sessionId: A, title: 'Notes' })).body, 'n');
-    const again = await postShow(api, { sessionId: A, title: 'Diagram v2', key: 'arch', kind: 'html' });
-    const html = path.join(showDir(A), `${first.body.id}.html`);
-    assert.deepEqual(again.body, { id: first.body.id, title: 'Diagram v2', key: 'arch', index: 2, count: 3, replaced: true, path: html });
-    assert.equal(fs.existsSync(path.join(showDir(A), `${first.body.id}.md`)), false);
-    await write(b, again.body, '<p>v2</p>');
+    const first = await postShow(api, { sessionId: A, title: 'Diagram', key: 'arch', file: card('arch.md') });
+    await postShow(api, { sessionId: A, title: 'Notes', file: card('notes.md') });
+    const v2 = card('arch-v2.md', 'v2');
+    const again = await postShow(api, { sessionId: A, title: 'Diagram v2', key: 'arch', file: v2 });
+    assert.deepEqual(again.body, { id: first.body.id, title: 'Diagram v2', key: 'arch', index: 2, count: 3, replaced: true });
     const list = await api.call('GET', showUrl());
     assert.deepEqual(list.body.posts.map((p) => p.title), ['Plan', 'Diagram v2', 'Notes']);
     const got = await api.call('GET', `${showUrl()}/${first.body.id}`);
-    assert.equal(got.body.kind, 'html');
-    assert.equal(got.body.content, '<p>v2</p>');
+    assert.equal(got.body.file, v2);
+    assert.equal(got.body.content, 'v2');
   });
 
   it('posts a file by path and reads it on each GET', async () => {
-    const md = path.join(root, 'doc.md');
-    fs.writeFileSync(md, 'one');
-    const png = path.join(root, 'shot.png');
-    fs.writeFileSync(png, 'x');
+    const md = card('doc.md', 'one');
+    const png = card('shot.png');
     const r = await postShow(api, { sessionId: A, title: 'Doc', file: md });
     assert.equal(r.status, 200);
-    assert.equal(r.body.path, null);
     fs.writeFileSync(md, 'two');
     const got = await api.call('GET', `${showUrl()}/${r.body.id}`);
     assert.deepEqual(got.body, { id: r.body.id, title: 'Doc', key: null, kind: 'markdown', content: 'two', file: md, path: md, url: null });
@@ -182,7 +159,7 @@ describe('show routes', () => {
   });
 
   it('answers 401 without the token, 404 for no live terminal, 409 for no transcript', async () => {
-    const body = { sessionId: A, title: 't' };
+    const body = { sessionId: A, title: 't', file: card('t.md') };
     const before = b.events.length;
     assert.equal((await postShow(api, body, null)).status, 401);
     assert.equal((await postShow(api, body, 'wrong')).status, 401);
@@ -199,15 +176,16 @@ describe('show routes', () => {
   });
 
   it('answers 400 for a bad body', async () => {
+    const file = card('bad.md');
     const bad = [
-      { title: 't' },
-      { sessionId: 'nope', title: 't' },
-      { sessionId: A },
-      { sessionId: A, title: 't', kind: 'svg' },
-      { sessionId: A, title: 't', key: 7 },
+      { title: 't', file },
+      { sessionId: 'nope', title: 't', file },
+      { sessionId: A, file },
+      { sessionId: A, title: 't', key: 7, file },
+      { sessionId: A, title: 't' },
       { sessionId: A, title: 't', file: 'relative.md' },
-      { sessionId: A, title: 't', base: 'relative/repo' },
-      { sessionId: A, title: 't', base: path.join(root, 'no-such-repo') },
+      { sessionId: A, title: 't', file, base: 'relative/repo' },
+      { sessionId: A, title: 't', file, base: path.join(root, 'no-such-repo') },
     ];
     for (const body of bad) {
       const r = await postShow(api, body);
@@ -217,25 +195,19 @@ describe('show routes', () => {
   });
 
   it('keeps the base of a post in the list, so its links resolve against it', async () => {
-    const r = await postShow(api, { sessionId: A, title: 'Stack', key: 'stack', base: root });
+    const file = card('stack.md');
+    const r = await postShow(api, { sessionId: A, title: 'Stack', key: 'stack', file, base: root });
     assert.equal(r.status, 200);
     const list = await api.call('GET', showUrl());
     assert.equal(list.body.posts.find((p) => p.id === r.body.id).base, root);
-    await postShow(api, { sessionId: A, title: 'Stack', key: 'stack' });
+    await postShow(api, { sessionId: A, title: 'Stack', key: 'stack', file });
     const again = await api.call('GET', showUrl());
     assert.equal(again.body.posts.find((p) => p.id === r.body.id).base, null);
   });
 
-  it('refuses inline content and names the claim form', async () => {
-    const r = await postShow(api, { sessionId: A, title: 't', content: 'c' });
-    assert.equal(r.status, 400);
-    assert.match(r.body.error, /call show with only title and key to get a file/);
-  });
-
   it('switches the card to a new session id and saves the map', async () => {
     const saves = b.state.saves;
-    const r = await postShow(api, { sessionId: B, title: 'After clear' });
-    await write(b, r.body, 'b');
+    const r = await postShow(api, { sessionId: B, title: 'After clear', file: card('b.md', 'b') });
     assert.deepEqual({ index: r.body.index, count: r.body.count }, { index: 1, count: 1 });
     assert.equal(b.state.saves, saves + 1);
     assert.deepEqual(b.state.map, { [TERMINAL]: B });
@@ -243,7 +215,7 @@ describe('show routes', () => {
     assert.equal(list.body.sessionId, B);
     assert.deepEqual(list.body.posts.map((p) => p.title), ['After clear']);
     assert.ok(fs.existsSync(path.join(showDir(A), 'index.json')));
-    await write(b, (await postShow(api, { sessionId: B, title: 'Second' })).body, 'b2');
+    await postShow(api, { sessionId: B, title: 'Second', file: card('b2.md') });
     assert.equal(b.state.saves, saves + 1);
   });
 
@@ -261,16 +233,15 @@ describe('show routes', () => {
     }
   });
 
-  it('DELETE of one post drops it and its file and sends show:removed', async () => {
+  it('DELETE of one post drops it and sends show:removed', async () => {
     const posts = (await api.call('GET', showUrl())).body.posts;
-    const id = posts.find((p) => p.title === 'Second').id;
+    const { id, file } = posts.find((p) => p.title === 'Second');
     const url = `${showUrl()}/${id}`;
     assert.equal((await api.call('DELETE', url, undefined, 'wrong')).status, 401);
     assert.equal((await api.call('DELETE', `${showUrl(OTHER_TERMINAL)}/${id}`)).status, 404);
     assert.equal((await api.call('DELETE', url)).status, 204);
     assert.deepEqual(b.events.at(-1), { type: 'show:removed', terminalId: TERMINAL, sessionId: B, id, count: posts.length - 1 });
-    assert.deepEqual(b.state.removed.at(-1), { sessionId: B, paths: [path.join(showDir(B), `${id}.md`)] });
-    assert.equal(fs.existsSync(path.join(showDir(B), `${id}.md`)), false);
+    assert.deepEqual(b.state.removed.at(-1), { sessionId: B, paths: [file] });
     assert.deepEqual((await api.call('GET', showUrl())).body.posts.map((p) => p.title), ['After clear']);
     assert.equal((await api.call('GET', url)).status, 404);
     assert.equal((await api.call('DELETE', url)).status, 404);
@@ -308,69 +279,12 @@ describe('show routes', () => {
   it('DELETE removes the current session\'s show folder and sends show:cleared', async () => {
     const [left] = (await api.call('GET', showUrl())).body.posts;
     const r = await api.call('DELETE', showUrl());
-    assert.deepEqual(b.state.removed.at(-1), { sessionId: B, paths: [path.join(showDir(B), `${left.id}.md`)] });
+    assert.deepEqual(b.state.removed.at(-1), { sessionId: B, paths: [left.file] });
     assert.equal(r.status, 204);
     assert.equal(fs.existsSync(showDir(B)), false);
     assert.ok(fs.existsSync(showDir(A)));
     assert.deepEqual(b.events.at(-1), { type: 'show:cleared', terminalId: TERMINAL, sessionId: B });
     assert.deepEqual((await api.call('GET', showUrl())).body, { sessionId: B, posts: [] });
-  });
-});
-
-describe('show claims', () => {
-  let root;
-  let b;
-  let api;
-
-  before(async () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-show-claim-'));
-    b = board(root);
-    api = await listen(b.app);
-  });
-
-  after(() => {
-    api.server.close();
-    b.store.prune(() => false);
-    fs.rmSync(root, { recursive: true, force: true });
-  });
-
-  const refreshes = (id, since) => b.events.slice(since).filter((e) => e.id === id && e.type === 'show:posted');
-
-  it('names a file it does not create, and the card waits for it', async () => {
-    const r = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan' });
-    assert.equal(r.status, 200);
-    assert.equal(r.body.path, path.join(root, A, 'scratchpad', '.pi-kanban', 'show', `${r.body.id}.md`));
-    assert.equal(fs.existsSync(r.body.path), false);
-    const got = await api.call('GET', `${showUrl()}/${r.body.id}`);
-    assert.equal(got.body.waiting, true);
-    assert.equal(got.body.content, null);
-  });
-
-  it('refreshes the card on each write, once per settled save', async () => {
-    const { body: claim } = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan' });
-    const since = b.events.length;
-    fs.writeFileSync(claim.path, '# v1');
-    fs.appendFileSync(claim.path, '\nmore');
-    assert.ok(await until(() => refreshes(claim.id, since).length === 1));
-    const ev = refreshes(claim.id, since)[0];
-    assert.deepEqual(ev, { type: 'show:posted', terminalId: TERMINAL, sessionId: A, id: claim.id, title: 'Plan', key: 'plan', index: 1, count: 1, replaced: true });
-    assert.equal((await api.call('GET', `${showUrl()}/${claim.id}`)).body.content, '# v1\nmore');
-
-    const before = (await api.call('GET', showUrl())).body.posts[0].updatedAt;
-    await new Promise((r) => setTimeout(r, 20));
-    fs.writeFileSync(claim.path, '# v2');
-    assert.ok(await until(() => refreshes(claim.id, since).length === 2));
-    assert.notEqual((await api.call('GET', showUrl())).body.posts[0].updatedAt, before);
-  });
-
-  it('keeps the file on a second claim with the same key, and renames it for a new kind', async () => {
-    const { body: md } = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan' });
-    assert.equal(fs.readFileSync(md.path, 'utf8'), '# v2');
-    const { body: html } = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan', kind: 'html' });
-    assert.equal(html.id, md.id);
-    assert.equal(html.path, md.path.replace(/\.md$/, '.html'));
-    assert.equal(fs.existsSync(md.path), false);
-    assert.equal(fs.readFileSync(html.path, 'utf8'), '# v2');
   });
 });
 
@@ -397,7 +311,7 @@ describe('show store', () => {
         resolveDir: (id) => ([A, B].includes(id) ? path.join(root, id) : null),
         startedSession: (id) => ({ [OTHER_TERMINAL]: A, [UNKNOWN]: B })[id] ?? null,
       });
-      store.post(TERMINAL, { sessionId: A, title: 'Plan', key: 'plan', kind: 'markdown', file: null });
+      store.post(TERMINAL, { sessionId: A, title: 'Plan', key: 'plan', kind: 'markdown', file: path.join(root, 'plan.md') });
       store.prune((id) => id !== TERMINAL);
       saves = 0;
       const { sessionId, posts } = store.list(OTHER_TERMINAL);
@@ -406,6 +320,24 @@ describe('show store', () => {
       assert.equal(saves, 1);
       assert.equal(store.sessionOf(UNKNOWN), null, 'a started session with no posts stays unmapped');
       assert.equal(saves, 1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips the posts without a file that pi-kanban 1.0 kept', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-show-old-'));
+    try {
+      const dir = path.join(root, A, 'scratchpad', '.pi-kanban', 'show');
+      fs.mkdirSync(dir, { recursive: true });
+      const posts = [
+        { id: B, title: 'Old', key: 'old', kind: 'markdown', file: null },
+        { id: UNKNOWN, title: 'New', key: null, kind: 'markdown', file: path.join(root, 'new.md') },
+      ];
+      fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({ sessionId: A, posts }));
+      const { store } = board(root, { [TERMINAL]: A });
+      assert.deepEqual(store.list(TERMINAL).posts.map((p) => p.title), ['New']);
+      assert.equal(store.get(TERMINAL, B), null);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
