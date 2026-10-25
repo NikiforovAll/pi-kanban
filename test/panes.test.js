@@ -50,6 +50,14 @@ describe('pane store', () => {
     assert.equal(open().get('s1').panes[0].show, true);
   });
 
+  it('keeps the companion of a url pane only, on disk', () => {
+    const { open } = memoryStore();
+    const panes = open();
+    assert.equal(panes.add('s1', { ...url(1), companion: 'pi-cost' }).pane.companion, 'pi-cost');
+    assert.equal('companion' in panes.add('s1', { kind: 'html', target: 'C:\\pad\\a.html', companion: 'pi-cost' }).pane, false);
+    assert.equal(open().get('s1').panes[0].companion, 'pi-cost');
+  });
+
   it('drops the show panes of removed posts and keeps a plain pane of the same file', () => {
     const panes = memoryStore().open();
     panes.add('s1', { kind: 'html', target: 'C:\\pad\\a.html', show: true });

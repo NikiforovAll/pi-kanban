@@ -5577,6 +5577,12 @@ function sgOpenMenu(x, y, kind, ref) {
       : '') +
     (canEnd
       ? '<button class="sg-menu-item" role="menuitem" data-sg-action="end" title="Alt+Shift+`">End terminal</button>'
+      : '') +
+    (kind === 'session'
+      ? companions
+          .filter((c) => c.optional)
+          .map((c) => `<button class="sg-menu-item" role="menuitem" data-sg-companion="${escapeHtml(c.id)}">Open in ${escapeHtml(c.pkg)}</button>`)
+          .join('')
       : '');
   menu.setAttribute('aria-label', actions ? 'Session actions' : `Move ${label} to group`);
   menu.dataset.sgKind = kind;
@@ -5632,6 +5638,7 @@ document.addEventListener('click', (e) => {
   sgCloseMenu();
   if (item.dataset.sgAction === 'fork') return forkSession(sgRef);
   if (item.dataset.sgAction === 'end') return closeTerminalSession(sgRef);
+  if (item.dataset.sgCompanion) return openCompanion(item.dataset.sgCompanion, sgRef);
   if (move === '__none__') {
     sgDetach(sgKind, sgRef);
     persistSessionGroups();
@@ -7538,6 +7545,61 @@ async function pollCompanionInstall() {
   }
   companionInstall = null;
   await fetchCompanions();
+}
+
+// pi-cost and pi-inspect run as children of the board (lib/companion-host.js) and show in a url
+// pane. The board sends them its colors over postMessage, the embed contract the tools follow.
+const COMPANION_COLORS = {
+  bgDeep: '--bg-deep', bgSurface: '--bg-surface', bgElevated: '--bg-elevated', bgHover: '--bg-hover',
+  border: '--border',
+  textPrimary: '--text-primary', textSecondary: '--text-secondary', textTertiary: '--text-tertiary', textMuted: '--text-muted',
+  accent: '--accent', accentText: '--accent-text',
+  success: '--success', warning: '--warning', error: '--danger',
+};
+
+async function openCompanion(id, sid) {
+  const c = companions.find((x) => x.id === id);
+  if (!c?.scope) return showCompanions(id);
+  const started = await paneRequest('POST', apiPath`/api/companions/${id}/start`, { session: sid });
+  if (started.error) return showToast(started.error, 'error');
+  const onScreen = await postPane(sid, { target: started.url, title: c.pkg, companion: id });
+  if (onScreen) syncPanes();
+  toastPaneAdded(sid, onScreen, c.pkg);
+}
+
+// The tool stops with the board and can come back on another port, so each load starts it.
+async function companionPaneSrc(pane) {
+  const started = await paneRequest('POST', apiPath`/api/companions/${pane.companion}/start`, {});
+  if (started.error) return pane.target;
+  const u = new URL(pane.target);
+  u.port = String(started.port);
+  u.searchParams.set('embed', '1');
+  return u.href;
+}
+
+function companionTheme() {
+  return { type: 'pi-companion:theme', mode: isLightTheme() ? 'light' : 'dark', colors: readThemeVars(COMPANION_COLORS) };
+}
+
+function postCompanionTheme(frames, msg = companionTheme()) {
+  for (const f of frames) f.contentWindow?.postMessage(msg, new URL(f.src).origin);
+}
+
+window.addEventListener('message', (e) => {
+  if (e.data?.type !== 'pi-companion:ready') return;
+  const frame = [...document.querySelectorAll('.companion-frame')].find((f) => f.contentWindow === e.source);
+  if (frame) postCompanionTheme([frame]);
+});
+
+let sentCompanionTheme = '';
+function syncCompanionTheme() {
+  const frames = [...document.querySelectorAll('.companion-frame')];
+  if (!frames.length) return;
+  const msg = companionTheme();
+  const key = JSON.stringify(msg);
+  if (key === sentCompanionTheme) return;
+  sentCompanionTheme = key;
+  postCompanionTheme(frames, msg);
 }
 //#endregion
 
@@ -10399,6 +10461,7 @@ function renderContextDetail(session, { tokens = true } = {}) {
             ${totals ? `<div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(totals.costUsd)}">${formatCost(totals.costUsd)}</span></div>` : ''}
             ${reply ? renderCacheTimer(reply) : ''}
             ${totals?.durationMs != null ? `<div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(totals.durationMs)}</span></div>` : ''}
+            ${totals ? `<button class="detail-context-open" data-session="${escapeHtml(session.id)}" onclick="closeTeamModal(); openCompanion('pi-cost', this.dataset.session)">Open in pi-cost</button>` : ''}
           </div>
         </div>`;
 }
@@ -13221,16 +13284,17 @@ async function loadPaneView(sid, pane, view, scroll) {
     return;
   }
   if (pane.kind === 'url') {
+    const src = pane.companion ? await companionPaneSrc(pane) : pane.target;
     const frame = document.createElement('iframe');
-    frame.className = 'pane-frame pane-url-frame modal-zoomable';
+    frame.className = `pane-frame pane-url-frame modal-zoomable${pane.companion ? ' companion-frame' : ''}`;
     frame.setAttribute('sandbox', PANE_URL_SANDBOX);
     frame.setAttribute('referrerpolicy', 'no-referrer');
     frame.title = pane.title;
-    frame.src = pane.target;
+    frame.src = src;
     view.appendChild(frame);
     view.insertAdjacentHTML('beforeend', paneUrlBarHtml());
-    // Framed at once; a refusal found by the probe swaps the frame for the card.
-    if ((await probePaneFraming(sid, pane)) === false) {
+    // Framed at once; a refusal found by the probe swaps the frame for the card. The board runs a companion, which allows it.
+    if (!pane.companion && (await probePaneFraming(sid, pane)) === false) {
       frame.remove();
       loadPaneView(sid, pane, view);
       if (sid === paneSessionId()) syncPanes();
@@ -16069,11 +16133,14 @@ function createShowFrame(title, srcdoc) {
   return frame;
 }
 
-function showTokens() {
+function readThemeVars(map) {
   const css = getComputedStyle(document.body);
+  return Object.fromEntries(Object.entries(map).map(([key, v]) => [key, css.getPropertyValue(v).trim()]));
+}
+
+function showTokens() {
   const mode = isLightTheme() ? 'light' : 'dark';
-  const out = { ...SHOW_FONTS, '--color-scheme': mode };
-  for (const [token, v] of Object.entries(SHOW_TOKENS)) out[token] = css.getPropertyValue(v).trim();
+  const out = { ...SHOW_FONTS, '--color-scheme': mode, ...readThemeVars(SHOW_TOKENS) };
   for (const [kind, colors] of Object.entries(SHOW_PALETTE[mode])) {
     for (const [i, c] of colors.entries()) out[`--color-${kind}-${i + 1}`] = c;
   }
@@ -16201,6 +16268,7 @@ new MutationObserver(() => {
     sentTokens = key;
     return { type: `${SHOW_MSG}tokens`, tokens };
   });
+  syncCompanionTheme();
 }).observe(document.body, { attributes: true, attributeFilter: ['class', 'data-color-theme', 'style'] });
 
 // Builds the message only when a frame is there, because showTokens forces a style recalc.

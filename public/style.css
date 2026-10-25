@@ -1374,6 +1374,19 @@ body.booting .boot-splash {
 .detail-context-stats .stat-value {
   color: var(--text-primary);
 }
+.detail-context-stats .detail-context-open {
+  grid-column: 1 / -1;
+  justify-self: end;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  cursor: pointer;
+}
+.detail-context-stats .detail-context-open:hover {
+  text-decoration: underline;
+}
 .detail-context-stats .stat-divider {
   grid-column: 1 / -1;
   border-top: 1px solid var(--border);

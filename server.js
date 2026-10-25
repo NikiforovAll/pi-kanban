@@ -17,7 +17,8 @@ const { resolveScratchSubdir, listScratchDir } = require('./lib/scratch-files');
 const { fileUrlToPath } = require('./lib/file-url');
 const { httpError: previewError } = require('./lib/http-error');
 const { getAutoCompact } = require('./lib/auto-compact');
-const { companionStatus, installPlan, refreshLatest } = require('./lib/companions');
+const { COMPANIONS, companionStatus, installPlan, refreshLatest } = require('./lib/companions');
+const { createCompanionHost } = require('./lib/companion-host');
 
 const {
   readRecentMessages: _readRecentMessagesUncached,
@@ -2291,6 +2292,16 @@ app.get('/api/companions', (req, res) => {
   });
 });
 
+const companionHost = createCompanionHost({ agentDir: PI_AGENT_DIR, dir: path.join(PK_DIR, 'companions') });
+process.on('exit', companionHost.stop);
+
+app.post('/api/companions/:id/start', async (req, res) => {
+  const entry = await companionHost.start(req.params.id);
+  if (entry.error) return res.status(entry.status).json({ error: entry.error });
+  const session = typeof req.body?.session === 'string' ? req.body.session : null;
+  res.json({ url: companionHost.url(entry, session), port: entry.port });
+});
+
 // `pi install` and `pi update` write the user's settings and run package code, so they take the terminal token.
 app.post('/api/companions/install', terminalRoute(async (req, res) => {
   if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
@@ -3128,11 +3139,12 @@ app.get('/api/panes/:sessionId', (req, res) => {
 
 app.post('/api/panes/:sessionId', async (req, res) => {
   try {
-    const { target, base, title, kind, show } = req.body || {};
+    const { target, base, title, kind, show, companion } = req.body || {};
     if (typeof target !== 'string' || !target) throw previewError(400, 'target is required', 'bad_target');
     // A message target is a session log message id, which the board resolves when it shows the pane.
     const resolved = kind === 'message' ? { kind, target } : await resolvePaneTarget(target, base);
-    res.json(panes.add(req.params.sessionId, { ...resolved, title, show: show === true }));
+    const hosted = COMPANIONS.some((c) => c.optional && c.id === companion) ? companion : null;
+    res.json(panes.add(req.params.sessionId, { ...resolved, title, show: show === true, companion: hosted }));
   } catch (error) {
     paneRouteError(res, error, 'POST /api/panes');
   }

@@ -748,7 +748,8 @@ describe('package install', () => {
 
     p.emit('Installed npm:pi-subagents\r\n');
     p.exit();
-    await until(() => t.installStatus(id)?.exited);
+    // The exit waits for xterm's timer-driven write queue, which a loaded test run can hold up.
+    await until(() => t.installStatus(id)?.exited, 5000);
     const status = t.installStatus(id);
     assert.equal(status.command, 'pi install npm:pi-subagents');
     assert.equal(status.code, 0);
