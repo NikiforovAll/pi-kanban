@@ -98,6 +98,25 @@ describe('companionStatus', () => {
     assert.equal(asked.length, 3);
   });
 
+  it('expands a leading ~ in a local path the way pi does', () => {
+    const home = path.join(root, 'home');
+    const checkout = path.join(home, 'dev', 'pi-cost');
+    const tildeAgent = path.join(root, 'tilde-agent');
+    fs.mkdirSync(checkout, { recursive: true });
+    fs.mkdirSync(tildeAgent, { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: 'pi-cost', version: '0.2.0' }));
+    fs.writeFileSync(path.join(tildeAgent, 'settings.json'), JSON.stringify({ packages: [' ~/dev/pi-cost'] }));
+    const saved = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const cost = companionStatus({ agentDir: tildeAgent, cwd: null }).find((c) => c.id === 'pi-cost');
+      assert.deepEqual([cost.scope, cost.dir], ['global', checkout]);
+    } finally {
+      if (saved === undefined) delete process.env.HOME;
+      else process.env.HOME = saved;
+    }
+  });
+
   it('treats a missing settings file as no packages', () => {
     const rows = companionStatus({ agentDir: path.join(root, 'none'), cwd: null });
     assert.ok(rows.every((c) => c.scope === null));
