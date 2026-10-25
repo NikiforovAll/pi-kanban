@@ -532,6 +532,19 @@ describe('ptyEnv', () => {
       assert.equal(ptyEnv({ piAgentDir: '/c' }).PI_SUBAGENT_CHILD, undefined);
     });
   });
+
+  it('turns on the hardware cursor unless the user set PI_HARDWARE_CURSOR', () => {
+    const saved = process.env.PI_HARDWARE_CURSOR;
+    delete process.env.PI_HARDWARE_CURSOR;
+    try {
+      assert.equal(ptyEnv({ piAgentDir: '/c' }).PI_HARDWARE_CURSOR, '1');
+    } finally {
+      if (saved !== undefined) process.env.PI_HARDWARE_CURSOR = saved;
+    }
+    withEnv({ PI_HARDWARE_CURSOR: '0' }, () => {
+      assert.equal(ptyEnv({ piAgentDir: '/c' }).PI_HARDWARE_CURSOR, '0');
+    });
+  });
 });
 
 describe('readTerminalConfig', () => {
