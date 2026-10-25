@@ -2,11 +2,11 @@
 
 ## Architecture
 
-pi-kanban is an agent development environment (ADE) for the [pi coding agent](https://pi.dev). The board runs pi sessions in a browser terminal and shows each session's todos, subagents, and linked docs. It reads pi's session JSONL files from `~/.pi/agent/sessions/**/*.jsonl`. The pi tools it adds let the agent post cards, ask the user, add panes, and dispatch tasks to other sessions through the board.
+pi-kanban is an agent development environment (ADE) for the [pi coding agent](https://pi.dev). The board runs pi sessions in a browser terminal and shows each session's todos, subagents, and linked docs. It reads pi's session JSONL files from `~/.pi/agent/sessions/**/*.jsonl`. Its skills teach the agent the `pi-kanban` CLI to post cards, add panes, and dispatch tasks to other sessions through the board; its `ask` tool asks the user on a card.
 
 ### Runtime pieces
 
-1. **`server.js`** — Express server and the `pi-kanban` bin. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-sessions.js`, `lib/pi-transcript.js` and `lib/parsers.js`), plus terminal, dispatch, show/ask, pane, preview, and "open in editor" APIs. With a subcommand (`pi-kanban doc|pane|session|group|task|project|dispatch|terminal|skills`), it runs `cli.js` against a running board instead.
+1. **`server.js`** — Express server and the `pi-kanban` bin. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-sessions.js`, `lib/pi-transcript.js` and `lib/parsers.js`), plus terminal, dispatch, show/ask, pane, preview, and "open in editor" APIs. With a subcommand (`pi-kanban doc|pane|show|session|group|task|project|dispatch|terminal|skills`), it runs `cli.js` against a running board instead.
 
 2. **Board terminal** — on by default, `--no-terminal` turns it off. `lib/terminal.js` keeps one PTY per session and serves it over a WebSocket behind the Host, Origin, and token gates. The PTYs live in a forked host process (`lib/terminal-host.js`, driven over IPC by `lib/terminal-client.js`), so a closed socket does not end pi. The token goes to the browser in the URL fragment (`#t=...`). `public/terminal.html` and `public/terminal-frame.js` render it with xterm.
 
@@ -17,15 +17,15 @@ pi-kanban is an agent development environment (ADE) for the [pi coding agent](ht
 ### pi tools (`extensions/tools/`)
 
 - **`board-api.ts`** — finds the board (`PK_URL`, then the `server.json` beacon, then port 3460), wraps fetch, and loads the board's CommonJS `lib/` modules. A down board raises `BoardDownError`.
-- **`panes.ts`** — `pane_add`, `pane_rm`, `pane_list`, `link_doc`, `unlink_doc`, `preview_doc`, `companion_open`.
-- **`show-ask.ts`** — `show` posts a card file: an overlay in the board terminal, else a pane tab. `ask` opens a modal and long-polls for the answer, with a pi TUI fallback when the board is down.
-- **`dispatch.ts`** — `dispatch_start`, `dispatch_list`, `dispatch_wait`, `dispatch_end`, and the worker's `dispatch_report`.
+- **`panes.ts`** — link, preview and companion helpers for the `/kanban` command. Panes, docs, cards and dispatch are CLI verbs (`pi-kanban pane|doc|show|session|dispatch`), taught by the skills in `skills/`.
+- **`ask.ts`** — `ask` opens a modal and long-polls for the answer, with a pi TUI fallback when the board is down.
+- **`dispatch.ts`** — the worker's `dispatch_report` tool and prompt, active only in a dispatched session.
 - **`inbox.ts`** — long-polls `/api/sessions/:id/events` and delivers board messages (review comments, card answers, task moves) to pi as user messages. The ack rides on the next poll.
 - **`scratchpad.ts`** — a folder per session, given to pi in the system prompt and `$PI_SCRATCHPAD_DIR`, pruned 7 days after the session ends.
 
 ### Board-mediated dispatch
 
-The parent never talks to the worker. `dispatch_start` POSTs `/api/dispatch` with the terminal token, and the board starts a new pi session in its terminal and records it as dispatched (with parent and group). The worker calls `dispatch_report` once, which POSTs `/api/dispatch/:session/report` (no token: the worker holds none, and `lib/net-guard.js` refuses cross-site requests). `lib/dispatch-reports.js` keeps the report on the dispatch marker, so it survives a late `dispatch_wait` poll, an ended worker terminal, or a board restart.
+The parent never talks to the worker. `pi-kanban dispatch start` POSTs `/api/dispatch` with the terminal token, and the board starts a new pi session in its terminal and records it as dispatched (with parent and group). The worker calls `dispatch_report` once, which POSTs `/api/dispatch/:session/report` (no token: the worker holds none, and `lib/net-guard.js` refuses cross-site requests). `lib/dispatch-reports.js` keeps the report on the dispatch marker, so it survives a late `dispatch wait` poll, an ended worker terminal, or a board restart.
 
 ### Session parsing (`lib/pi-sessions.js`, `lib/pi-transcript.js`, `lib/parsers.js`)
 

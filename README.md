@@ -45,19 +45,24 @@ When pi runs in another terminal, run `/kanban open` in pi to open the board wit
 
 Press `?` on the board for the keyboard shortcuts.
 
-## pi tools
+## What pi gets
+
+pi works the board through the `pi-kanban` command. The package's skills tell pi which command to run, so only the skill names and descriptions sit in the system prompt until pi needs one.
+
+| Skill | What pi does with it |
+| --- | --- |
+| `kanban` | Add a URL or a file as a tab next to the board (`pane add`, `pane list`, `pane rm`), link a file or URL to the session (`doc link`, `doc unlink`), preview a file now (`doc preview`), and open pi-cost or pi-inspect for the session (`session cost`, `session inspect`) |
+| `show` | Write a markdown or HTML card and post it with `pi-kanban show <file>`. It shows over the board terminal, or as a tab when pi runs in another terminal. |
+| `ask` | Write an HTML question for the `ask` tool |
+| `visualize` | Write a full HTML explainer page and add it as a tab |
+| `dispatch` | Hand a task to a new pi session in the board terminal (`dispatch start`) and get its report back (`dispatch wait`, `dispatch list`, `dispatch end`) |
 
 | Tool | What it does |
 | --- | --- |
-| `show` | Post a markdown or HTML card. It shows over the board terminal, or as a tab when pi runs in another terminal. |
 | `ask` | Show an HTML question in a modal and wait for the answer. pi asks in its own prompt when the board is down. |
-| `dispatch_start`, `dispatch_wait`, `dispatch_list`, `dispatch_end` | Hand a task to a new pi session in the board terminal and get its report back |
-| `dispatch_report` | The worker's report, kept by the board until the parent reads it |
-| `pane_add`, `pane_rm`, `pane_list` | Add a URL or a local file as a tab next to the board |
-| `companion_open` | Open pi-cost or pi-inspect for the session as a tab next to the board |
-| `link_doc`, `unlink_doc`, `preview_doc` | Link a file or URL to the session, or open it in the preview |
+| `dispatch_report` | The worker's report, kept by the board until the parent reads it. Only a dispatched session has it. |
 
-Each session also gets a scratchpad folder, given to pi in the system prompt and in `$PI_SCRATCHPAD_DIR`. The `pi-kanban` command talks to a running board too: run `pi-kanban help`.
+Each session also gets a scratchpad folder, given to pi in the system prompt and in `$PI_SCRATCHPAD_DIR`. Run `pi-kanban help` for every command.
 
 ## Companion pi packages
 
@@ -79,7 +84,7 @@ The board terminal runs commands as you, so the board is locked to your machine:
 - It listens on loopback (`127.0.0.1`) by default. `--host` changes this. Do not expose the board to a network you do not trust.
 - It refuses requests whose `Host` header is not local (`--allowed-hosts` adds names), and cross-site requests that change data.
 - Only the terminal and dispatch need the token. Anyone who can reach the board can read your pi session history, which is one more reason to keep it on loopback.
-- The terminal needs a random token. The board keeps it in the URL fragment (`#t=...`), which the browser never sends to a server. Do not share the board URL.
+- The terminal needs a random token. The board keeps it in the URL fragment (`#t=...`), which the browser never sends to a server. The browser keeps it in local storage, and the server keeps it across restarts in `<agent dir>/kanban/terminal-secret.json`, readable only by you. Do not share the board URL. If you did, start the board with `--new-token`.
 
 ## License
 
