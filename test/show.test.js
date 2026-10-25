@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
-const { createShowStore, mountShowRoutes, showBodyParser, SHOW_PATH } = require('../lib/show');
+const { createShowStore, mountShowRoutes, showBodyParser, SESSION_SHOW_PATH } = require('../lib/show');
 
 const TOKEN = 't'.repeat(64);
 const TERMINAL = 'dddddddd-0000-0000-0000-000000000001';
@@ -15,7 +15,7 @@ const UNKNOWN = 'aaaaaaaa-0000-0000-0000-000000000009';
 
 function board(root, saved = {}) {
   const events = [];
-  const state = { saves: 0, map: saved, removed: [] };
+  const state = { saves: 0, map: saved, removed: [], panes: [] };
   const store = createShowStore({
     load: () => state.map,
     onChange: () => { state.saves++; state.map = store.prune(() => true); },
@@ -23,7 +23,7 @@ function board(root, saved = {}) {
     onPosted: (e) => events.push({ type: 'show:posted', ...e }),
   });
   const app = express();
-  app.use(SHOW_PATH, showBodyParser());
+  app.use(SESSION_SHOW_PATH, showBodyParser());
   app.use(express.json({ limit: '1mb' }));
   mountShowRoutes(app, {
     store,
@@ -37,6 +37,10 @@ function board(root, saved = {}) {
     },
     broadcast: (e) => events.push(e),
     onRemoved: (sessionId, paths) => state.removed.push({ sessionId, paths }),
+    addPane: async (sessionId, card) => {
+      state.panes.push({ sessionId, ...card });
+      return { pane: { id: 'p1', title: card.title }, added: true };
+    },
   });
   return { app, store, events, state };
 }
@@ -55,6 +59,14 @@ async function listen(app) {
 }
 
 const showUrl = (terminalId = TERMINAL) => `/api/terminals/${terminalId}/show`;
+async function postShow(api, { sessionId, ...card }, token, terminal = TERMINAL) {
+  const r = await api.call('POST', `/api/sessions/${sessionId}/show`, { ...card, terminal }, token);
+  if (r.status === 200) {
+    assert.equal(r.body.shown, 'overlay');
+    delete r.body.shown;
+  }
+  return r;
+}
 
 async function until(check, ms = 3000) {
   const end = Date.now() + ms;
@@ -99,7 +111,7 @@ describe('show routes', () => {
   });
 
   it('claims a markdown card in the scratchpad and sends show:posted without the content', async () => {
-    const r = await api.call('POST', showUrl(), { sessionId: A, title: 'Plan' });
+    const r = await postShow(api, { sessionId: A, title: 'Plan' });
     assert.equal(r.status, 200);
     const file = path.join(showDir(A), `${r.body.id}.md`);
     assert.deepEqual({ ...r.body, id: undefined }, { id: undefined, title: 'Plan', key: null, index: 1, count: 1, replaced: false, path: file });
@@ -115,10 +127,10 @@ describe('show routes', () => {
   });
 
   it('replaces a keyed post in place, keeping its id and position', async () => {
-    const first = await api.call('POST', showUrl(), { sessionId: A, title: 'Diagram', key: 'arch' });
+    const first = await postShow(api, { sessionId: A, title: 'Diagram', key: 'arch' });
     await write(b, first.body, 'v1');
-    await write(b, (await api.call('POST', showUrl(), { sessionId: A, title: 'Notes' })).body, 'n');
-    const again = await api.call('POST', showUrl(), { sessionId: A, title: 'Diagram v2', key: 'arch', kind: 'html' });
+    await write(b, (await postShow(api, { sessionId: A, title: 'Notes' })).body, 'n');
+    const again = await postShow(api, { sessionId: A, title: 'Diagram v2', key: 'arch', kind: 'html' });
     const html = path.join(showDir(A), `${first.body.id}.html`);
     assert.deepEqual(again.body, { id: first.body.id, title: 'Diagram v2', key: 'arch', index: 2, count: 3, replaced: true, path: html });
     assert.equal(fs.existsSync(path.join(showDir(A), `${first.body.id}.md`)), false);
@@ -135,14 +147,14 @@ describe('show routes', () => {
     fs.writeFileSync(md, 'one');
     const png = path.join(root, 'shot.png');
     fs.writeFileSync(png, 'x');
-    const r = await api.call('POST', showUrl(), { sessionId: A, title: 'Doc', file: md });
+    const r = await postShow(api, { sessionId: A, title: 'Doc', file: md });
     assert.equal(r.status, 200);
     assert.equal(r.body.path, null);
     fs.writeFileSync(md, 'two');
     const got = await api.call('GET', `${showUrl()}/${r.body.id}`);
     assert.deepEqual(got.body, { id: r.body.id, title: 'Doc', key: null, kind: 'markdown', content: 'two', file: md, path: md, url: null });
 
-    const img = await api.call('POST', showUrl(), { sessionId: A, title: 'Shot', file: png });
+    const img = await postShow(api, { sessionId: A, title: 'Shot', file: png });
     const gotImg = await api.call('GET', `${showUrl()}/${img.body.id}`);
     assert.equal(gotImg.body.kind, 'image');
     assert.equal(gotImg.body.content, null);
@@ -155,30 +167,30 @@ describe('show routes', () => {
   it('draws an SVG file as HTML without its prolog', async () => {
     const svg = path.join(root, 'pic.svg');
     fs.writeFileSync(svg, '<?xml version="1.0"?>\n<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x">\n<svg viewBox="0 0 2 1"/>');
-    const r = await api.call('POST', showUrl(), { sessionId: A, title: 'Pic', file: svg });
+    const r = await postShow(api, { sessionId: A, title: 'Pic', file: svg });
     const got = await api.call('GET', `${showUrl()}/${r.body.id}`);
     assert.equal(got.body.kind, 'html');
     assert.equal(got.body.content, '\n<svg viewBox="0 0 2 1"/>');
   });
 
   it('refuses a file that is missing or cannot be shown', async () => {
-    const missing = await api.call('POST', showUrl(), { sessionId: A, title: 'x', file: path.join(root, 'nope.md') });
+    const missing = await postShow(api, { sessionId: A, title: 'x', file: path.join(root, 'nope.md') });
     assert.equal(missing.status, 400);
     assert.match(missing.body.error, /file not found/);
     fs.writeFileSync(path.join(root, 'blob.bin'), 'x');
-    assert.equal((await api.call('POST', showUrl(), { sessionId: A, title: 'x', file: path.join(root, 'blob.bin') })).status, 400);
+    assert.equal((await postShow(api, { sessionId: A, title: 'x', file: path.join(root, 'blob.bin') })).status, 400);
   });
 
   it('answers 401 without the token, 404 for no live terminal, 409 for no transcript', async () => {
     const body = { sessionId: A, title: 't' };
     const before = b.events.length;
-    assert.equal((await api.call('POST', showUrl(), body, null)).status, 401);
-    assert.equal((await api.call('POST', showUrl(), body, 'wrong')).status, 401);
+    assert.equal((await postShow(api, body, null)).status, 401);
+    assert.equal((await postShow(api, body, 'wrong')).status, 401);
     assert.equal((await api.call('DELETE', showUrl(), undefined, 'wrong')).status, 401);
-    const gone = await api.call('POST', showUrl(OTHER_TERMINAL), body);
+    const gone = await postShow(api, body, undefined, OTHER_TERMINAL);
     assert.equal(gone.status, 404);
     assert.equal((await api.call('DELETE', showUrl(OTHER_TERMINAL))).status, 404);
-    const unknown = await api.call('POST', showUrl(), { ...body, sessionId: UNKNOWN });
+    const unknown = await postShow(api, { ...body, sessionId: UNKNOWN });
     assert.equal(unknown.status, 409);
     assert.ok(unknown.body.error);
     assert.equal(b.events.length, before);
@@ -198,31 +210,31 @@ describe('show routes', () => {
       { sessionId: A, title: 't', base: path.join(root, 'no-such-repo') },
     ];
     for (const body of bad) {
-      const r = await api.call('POST', showUrl(), body);
+      const r = await postShow(api, body);
       assert.equal(r.status, 400, JSON.stringify(body));
       assert.equal(typeof r.body.error, 'string');
     }
   });
 
   it('keeps the base of a post in the list, so its links resolve against it', async () => {
-    const r = await api.call('POST', showUrl(), { sessionId: A, title: 'Stack', key: 'stack', base: root });
+    const r = await postShow(api, { sessionId: A, title: 'Stack', key: 'stack', base: root });
     assert.equal(r.status, 200);
     const list = await api.call('GET', showUrl());
     assert.equal(list.body.posts.find((p) => p.id === r.body.id).base, root);
-    await api.call('POST', showUrl(), { sessionId: A, title: 'Stack', key: 'stack' });
+    await postShow(api, { sessionId: A, title: 'Stack', key: 'stack' });
     const again = await api.call('GET', showUrl());
     assert.equal(again.body.posts.find((p) => p.id === r.body.id).base, null);
   });
 
   it('refuses inline content and names the claim form', async () => {
-    const r = await api.call('POST', showUrl(), { sessionId: A, title: 't', content: 'c' });
+    const r = await postShow(api, { sessionId: A, title: 't', content: 'c' });
     assert.equal(r.status, 400);
     assert.match(r.body.error, /call show with only title and key to get a file/);
   });
 
   it('switches the card to a new session id and saves the map', async () => {
     const saves = b.state.saves;
-    const r = await api.call('POST', showUrl(), { sessionId: B, title: 'After clear' });
+    const r = await postShow(api, { sessionId: B, title: 'After clear' });
     await write(b, r.body, 'b');
     assert.deepEqual({ index: r.body.index, count: r.body.count }, { index: 1, count: 1 });
     assert.equal(b.state.saves, saves + 1);
@@ -231,7 +243,7 @@ describe('show routes', () => {
     assert.equal(list.body.sessionId, B);
     assert.deepEqual(list.body.posts.map((p) => p.title), ['After clear']);
     assert.ok(fs.existsSync(path.join(showDir(A), 'index.json')));
-    await write(b, (await api.call('POST', showUrl(), { sessionId: B, title: 'Second' })).body, 'b2');
+    await write(b, (await postShow(api, { sessionId: B, title: 'Second' })).body, 'b2');
     assert.equal(b.state.saves, saves + 1);
   });
 
@@ -267,10 +279,30 @@ describe('show routes', () => {
   it('DELETE of one file post keeps the session\'s file', async () => {
     const file = path.join(root, 'keep.md');
     fs.writeFileSync(file, '# keep');
-    const r = await api.call('POST', showUrl(), { sessionId: B, title: 'File', file });
+    const r = await postShow(api, { sessionId: B, title: 'File', file });
     assert.equal((await api.call('DELETE', `${showUrl()}/${r.body.id}`)).status, 204);
     assert.deepEqual(b.state.removed.at(-1), { sessionId: B, paths: [file] });
     assert.ok(fs.existsSync(file));
+  });
+
+  it('the session route posts to the named terminal\'s overlay, or adds a tab with no terminal', async () => {
+    const file = path.join(root, 'card.md');
+    fs.writeFileSync(file, '# card');
+    const url = `/api/sessions/${B}/show`;
+    const overlay = await api.call('POST', url, { title: 'Card', file, key: 'card', terminal: TERMINAL });
+    assert.equal(overlay.status, 200);
+    assert.equal(overlay.body.shown, 'overlay');
+    assert.equal(overlay.body.key, 'card');
+    assert.ok((await api.call('GET', showUrl())).body.posts.some((p) => p.id === overlay.body.id));
+    assert.equal((await api.call('POST', url, { title: 'Card', file, terminal: TERMINAL }, null)).status, 401);
+    assert.equal((await api.call('POST', url, { title: 'Card', file, terminal: OTHER_TERMINAL })).status, 404);
+
+    const pane = await api.call('POST', url, { title: 'Card', file, key: 'card' }, null);
+    assert.deepEqual(pane.body, { shown: 'pane', pane: { id: 'p1', title: 'Card' }, added: true });
+    assert.deepEqual(b.state.panes.at(-1), { sessionId: B, file, title: 'Card' });
+    assert.equal((await api.call('POST', url, { title: 'Card', file: 'card.md' }, null)).status, 400);
+    assert.equal((await api.call('POST', url, { file }, null)).status, 400);
+    assert.equal((await api.call('DELETE', `${showUrl()}/${overlay.body.id}`)).status, 204);
   });
 
   it('DELETE removes the current session\'s show folder and sends show:cleared', async () => {
@@ -305,7 +337,7 @@ describe('show claims', () => {
   const refreshes = (id, since) => b.events.slice(since).filter((e) => e.id === id && e.type === 'show:posted');
 
   it('names a file it does not create, and the card waits for it', async () => {
-    const r = await api.call('POST', showUrl(), { sessionId: A, title: 'Plan', key: 'plan' });
+    const r = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan' });
     assert.equal(r.status, 200);
     assert.equal(r.body.path, path.join(root, A, 'scratchpad', '.pi-kanban', 'show', `${r.body.id}.md`));
     assert.equal(fs.existsSync(r.body.path), false);
@@ -315,7 +347,7 @@ describe('show claims', () => {
   });
 
   it('refreshes the card on each write, once per settled save', async () => {
-    const { body: claim } = await api.call('POST', showUrl(), { sessionId: A, title: 'Plan', key: 'plan' });
+    const { body: claim } = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan' });
     const since = b.events.length;
     fs.writeFileSync(claim.path, '# v1');
     fs.appendFileSync(claim.path, '\nmore');
@@ -332,9 +364,9 @@ describe('show claims', () => {
   });
 
   it('keeps the file on a second claim with the same key, and renames it for a new kind', async () => {
-    const { body: md } = await api.call('POST', showUrl(), { sessionId: A, title: 'Plan', key: 'plan' });
+    const { body: md } = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan' });
     assert.equal(fs.readFileSync(md.path, 'utf8'), '# v2');
-    const { body: html } = await api.call('POST', showUrl(), { sessionId: A, title: 'Plan', key: 'plan', kind: 'html' });
+    const { body: html } = await postShow(api, { sessionId: A, title: 'Plan', key: 'plan', kind: 'html' });
     assert.equal(html.id, md.id);
     assert.equal(html.path, md.path.replace(/\.md$/, '.html'));
     assert.equal(fs.existsSync(md.path), false);

@@ -40,7 +40,6 @@
     "cli.js",
     "lib/",
     "public/",
-    "skill-guides/",
     "skills/",
     "extensions/",
     "README.md",

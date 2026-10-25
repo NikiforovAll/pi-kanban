@@ -1,7 +1,8 @@
 import { dirname, join as joinPath } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, resolveTarget, terminalToken } from "./tools/board-api.js";
-import { linkDoc, openCompanion, previewDoc } from "./tools/panes.js";
+import { linkDoc, openCompanion, previewDoc } from "./tools/kanban-command.js";
+import { addCliToPath } from "./tools/cli-path.js";
 import { registerDispatch } from "./tools/dispatch.js";
 import { registerInbox } from "./tools/inbox.js";
 import { registerScratchpad } from "./tools/scratchpad.js";
@@ -56,22 +57,12 @@ function ownSessionDir(dir: string): string | null {
 
 // A pi in the board terminal already runs inside the board page.
 const CAN_OPEN = !boardTerminalId();
-const COMPANION_OF = { cost: "pi-cost", inspect: "pi-inspect" } as const;
-type CompanionVerb = keyof typeof COMPANION_OF;
-const isCompanionVerb = (v: string): v is CompanionVerb => Object.hasOwn(COMPANION_OF, v);
-const SUBCOMMANDS = [...(CAN_OPEN ? ["open"] : []), "session", ...Object.keys(COMPANION_OF)];
+const { PANE_COMPANIONS } = lib("companions.js") as { PANE_COMPANIONS: { id: string; verb: string; shows: string }[] };
+const companionOf = (verb: string) => PANE_COMPANIONS.find((c) => c.verb === verb);
+const COMPANION_VERBS = PANE_COMPANIONS.map((c) => c.verb);
+const SUBCOMMANDS = [...(CAN_OPEN ? ["open"] : []), "session", ...COMPANION_VERBS];
 
-const SESSION_SUBCOMMANDS = [
-	"open",
-	"pin",
-	"sticky-pin",
-	"unpin",
-	"view-doc",
-	"link-doc",
-	"cost",
-	"inspect",
-] as const;
-type SessionSub = (typeof SESSION_SUBCOMMANDS)[number];
+const SESSION_SUBCOMMANDS = ["open", "pin", "sticky-pin", "unpin", "view-doc", "link-doc", ...COMPANION_VERBS];
 
 // Whole commands, never an argument: Enter on a completion must not replace a typed path.
 const COMPLETIONS = [...SUBCOMMANDS, ...SESSION_SUBCOMMANDS.map((s) => `session ${s}`)];
@@ -256,6 +247,7 @@ function registerModelWindows(pi: ExtensionAPI) {
 }
 
 export default function kanbanExtension(pi: ExtensionAPI) {
+	addCliToPath();
 	registerLiveState(pi);
 	registerModelWindows(pi);
 	registerScratchpad(pi);
@@ -294,7 +286,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("kanban", {
-		description: `pi-kanban board: ${CAN_OPEN ? "open | " : ""}session <verb> | cost | inspect`,
+		description: `pi-kanban board: ${CAN_OPEN ? "open | " : ""}session <verb> | ${COMPANION_VERBS.join(" | ")}`,
 		getArgumentCompletions: completionsFor,
 		handler: async (args, ctx) => {
 			const tokens = splitArgs(args);
@@ -314,21 +306,20 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					"  session unpin [<id>]",
 					"  session view-doc <file> [<id>]",
 					"  session link-doc <file> [<id>]",
-					"  cost [<id>]       Open pi-cost: cost, tokens and models (also session cost)",
-					"  inspect [<id>]    Open pi-inspect: what pi loaded (also session inspect)",
+					...PANE_COMPANIONS.map((c) => `  ${`${c.verb} [<id>]`.padEnd(17)} Open ${c.id}: ${c.shows} (also session ${c.verb})`),
 				];
 				notify(lines.join("\n"));
 			}
 
 			// In the board terminal the board is on screen, so the pane opens there; elsewhere it waits as a tab.
-			async function companionCommand(verb: CompanionVerb, idArg: string | undefined) {
+			async function companionCommand({ verb, id: companion }: { verb: string; id: string }, idArg: string | undefined) {
 				const id = idArg ?? ctx.sessionManager.getSessionId();
 				if (!id) {
 					notify(`Usage: /kanban ${verb} <session-id> (no current session to default to)`, "error");
 					return;
 				}
 				try {
-					const { pane, added } = await openCompanion(id, COMPANION_OF[verb], boardTerminalId() ?? undefined);
+					const { pane, added } = await openCompanion(id, companion, boardTerminalId() ?? undefined);
 					notify(
 						CAN_OPEN
 							? `${added ? "Added" : "Already there"}: ${pane.id}  ${pane.title}. Open its tab on the board.`
@@ -339,8 +330,9 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			if (isCompanionVerb(sub)) {
-				await companionCommand(sub, rest[0]);
+			const subCompanion = companionOf(sub);
+			if (subCompanion) {
+				await companionCommand(subCompanion, rest[0]);
 				return;
 			}
 
@@ -355,7 +347,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			}
 
 			if (sub === "session") {
-				const verb = rest[0] as SessionSub | undefined;
+				const verb = rest[0];
 				const verbRest = rest.slice(1);
 
 				if (!verb) {
@@ -363,7 +355,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				if (!(SESSION_SUBCOMMANDS as readonly string[]).includes(verb)) {
+				if (!SESSION_SUBCOMMANDS.includes(verb)) {
 					notify(`Unknown session verb: ${verb}. Try: ${SESSION_SUBCOMMANDS.join(", ")}`, "error");
 					return;
 				}
@@ -423,8 +415,9 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				if (isCompanionVerb(verb)) {
-					await companionCommand(verb, verbRest[0]);
+				const verbCompanion = companionOf(verb);
+				if (verbCompanion) {
+					await companionCommand(verbCompanion, verbRest[0]);
 					return;
 				}
 			}

@@ -5,9 +5,12 @@ const { linkUrl } = require('./public/link-url');
 const { sessionProjectKey } = require('./public/project-match');
 const { dispatchLine, matchDispatches, reportText, WAIT_MAX_MS } = require('./lib/dispatch-reports');
 const { THINKING_LEVELS } = require('./lib/pi-agents');
+const { PANE_COMPANIONS } = require('./lib/companions');
 // Help is auto-generated from this table — keep flags/usage in sync with `run` behavior.
 const SESSION_FLAG = '--session <id>';
 const SESSION_FLAG_HELP = 'Session, full id or unique prefix (default: $PREVIEW_SESSION, else $PI_KANBAN_SESSION_ID)';
+const OR_SESSION_FLAG = '; `--session <id>` works too';
+const SESSION_ID_HELP = `Full session id, or a unique prefix${OR_SESSION_FLAG}`;
 
 const COMMANDS = {
   doc: {
@@ -157,7 +160,7 @@ const COMMANDS = {
         summary: 'Focus a session in the browser (Active tab)',
         usage: 'pi-kanban session open <id>',
         flags: {
-          '<id>': 'Full session id, or a unique prefix',
+          '<id>': SESSION_ID_HELP,
         },
         examples: ['pi-kanban session open $PI_KANBAN_SESSION_ID'],
         run: runSessionOpenCli,
@@ -166,7 +169,7 @@ const COMMANDS = {
         summary: 'Show full session stats (metadata + context window + cost) and the transcript path',
         usage: 'pi-kanban session view <id> [--json]',
         flags: {
-          '<id>': 'Full session id, or a unique prefix',
+          '<id>': SESSION_ID_HELP,
           '--json': 'Output JSON instead of formatted sections',
         },
         notes: 'To learn what a session did, read its transcript (a .jsonl file, newest lines last).',
@@ -177,34 +180,26 @@ const COMMANDS = {
         summary: 'List the subagents a session has run, and whether it waits for the user',
         usage: 'pi-kanban session agents <id> [--json]',
         flags: {
-          '<id>': 'Full session id, or a unique prefix',
+          '<id>': SESSION_ID_HELP,
           '--json': 'Output JSON ({agents, waitingForUser})',
         },
-        notes: 'Needs the pi-kanban hooks in this config dir (pi-kanban --install); without them the list is empty.',
+        notes: 'The pi-kanban pi package records the runs of pi-subagents. Without both packages in pi, the list is empty.',
         examples: ['pi-kanban session agents $PI_KANBAN_SESSION_ID'],
         run: runSessionAgentsCli,
       },
-      cost: {
-        summary: 'Open pi-cost for a session as a board tab: its cost, tokens and models',
-        usage: 'pi-kanban session cost [<id>]',
-        flags: { '<id>': 'Full session id, or a unique prefix (default: $PI_KANBAN_SESSION_ID)' },
+      ...Object.fromEntries(PANE_COMPANIONS.map((c) => [c.verb, {
+        summary: `Open ${c.id} for a session as a board tab: ${c.shows}`,
+        usage: `pi-kanban session ${c.verb} [<id>]`,
+        flags: { '<id>': `${SESSION_ID_HELP} (default: $PI_KANBAN_SESSION_ID)` },
         notes: 'From pi in the board terminal, the board switches to the tab. Needs the terminal token, like dispatch start.',
-        companion: 'pi-cost',
+        companion: c.id,
         run: runSessionCompanionCli,
-      },
-      inspect: {
-        summary: 'Open pi-inspect for a session as a board tab: the system prompt, tools, extensions, skills and context pi loaded',
-        usage: 'pi-kanban session inspect [<id>]',
-        flags: { '<id>': 'Full session id, or a unique prefix (default: $PI_KANBAN_SESSION_ID)' },
-        notes: 'From pi in the board terminal, the board switches to the tab. Needs the terminal token, like dispatch start.',
-        companion: 'pi-inspect',
-        run: runSessionCompanionCli,
-      },
+      }])),
       pin: {
         summary: 'Pin (or unpin) a session in the sidebar; every board on this config dir shows it',
         usage: 'pi-kanban session pin <id> [--sticky] [--unpin]',
         flags: {
-          '<id>': 'Full session id, or a unique prefix',
+          '<id>': SESSION_ID_HELP,
           '--sticky': 'Set sticky state (always shown in the list)',
           '--unpin': 'Clear pin/sticky state',
         },
@@ -218,7 +213,7 @@ const COMMANDS = {
         summary: 'Move a session into a group in the sidebar',
         usage: 'pi-kanban session group <id> (<group> | --with <session> | --parent <session>) [--no-parent] [--create] [--json]',
         flags: {
-          '<id>': 'Full session id, or a unique prefix',
+          '<id>': SESSION_ID_HELP,
           '<group>': 'Group name (any case), path from the top (parent/child) or id, from `group list`',
           '--with <session>': 'Join the group this other session shows in (id or unique prefix)',
           '--parent <session>': 'Show the session under this one, indented, when both are in the same list; alone, it also joins its group',
@@ -239,7 +234,7 @@ const COMMANDS = {
         summary: 'Take a session out of its group',
         usage: 'pi-kanban session ungroup <id> [--json]',
         flags: {
-          '<id>': 'Full session id, or a unique prefix',
+          '<id>': SESSION_ID_HELP,
           '--json': 'Output JSON ({left, rev})',
         },
         notes: 'A session whose project is in a group still shows there; move the project on the board.',
@@ -316,7 +311,7 @@ const COMMANDS = {
         summary: 'List the tasks of a session, a project, or every session',
         usage: 'pi-kanban task list (<session> | --project <path> | --all) [--status <s>] [--json]',
         flags: {
-          '<session>': 'Full session id, or a unique prefix',
+          '<session>': SESSION_ID_HELP,
           '--project <path>': 'Every task of the sessions in this project (absolute path, as in `project list`)',
           '--all': 'Every task on the board',
           '--status <s>': 'Only tasks in this status: pending, in_progress or completed',
@@ -371,8 +366,8 @@ const COMMANDS = {
       wait: {
         summary: 'Wait for the reports of sessions this session started, and print them',
         usage: 'pi-kanban dispatch wait <session id>...',
-        flags: { '<session id>': 'The full id `dispatch start` printed; give several to wait for each in turn' },
-        notes: 'Prints a report at once when it is already in, and says so when the session\'s terminal ended without one. It waits with no time limit, so run it without a timeout.',
+        flags: { '<session id>': `The full id \`dispatch start\` printed; give several to wait for each in turn${OR_SESSION_FLAG}` },
+        notes: 'Prints a report at once when it is already in, and says so when the session\'s terminal ended without one.',
         examples: ['pi-kanban dispatch wait 01a30000-0000-7000-8000-000000000004'],
         run: runDispatchWaitCli,
       },
@@ -389,7 +384,7 @@ const COMMANDS = {
         summary: 'End the terminal of a session this session started',
         usage: 'pi-kanban dispatch end (<session id or prefix> | --name <n>) [--json]',
         flags: {
-          '<session id or prefix>': 'A session from `dispatch list`',
+          '<session id or prefix>': `A session from \`dispatch list\`${OR_SESSION_FLAG}`,
           '--name <n>': 'The session\'s --name from dispatch start',
           '--json': 'Output JSON',
         },
@@ -414,10 +409,10 @@ const COMMANDS = {
     },
   },
   skills: {
-    summary: 'Print a skill guide bundled with this version',
+    summary: 'Print a skill bundled with this version',
     verbs: {
       get: {
-        summary: 'Print the guide for a skill',
+        summary: 'Print the SKILL.md of a skill',
         usage: 'pi-kanban skills get <name>',
         flags: { '<name>': 'Skill name, e.g. dispatch' },
         examples: ['pi-kanban skills get dispatch'],
@@ -573,11 +568,17 @@ function getArgValue(args, name) {
 // The server's beacon in this agent dir names the right one; PORT still wins when set.
 // A beacon left by a dead server means this dir's board is down: 3460 would be someone else's.
 // Returns null in that case.
-function cliPort() {
-  if (process.env.PORT) return process.env.PORT;
+function beaconPort() {
   const beacon = readCckJson('server.json');
   if (!beacon) return 3460;
   return beacon.port && beacon.pid && isPidAlive(beacon.pid) ? beacon.port : null;
+}
+
+let cachedPort;
+function cliPort() {
+  if (process.env.PORT) return process.env.PORT;
+  if (cachedPort === undefined) cachedPort = beaconPort();
+  return cachedPort;
 }
 
 function cliBaseUrl() {
@@ -811,26 +812,24 @@ async function runShowCli(args, entry) {
   if (!resolved) return 1;
   const abs = cliPath(file);
   const title = getArgValue(args, 'title') || path.basename(abs);
+  const base = getArgValue(args, 'base');
+  const body = { title, file: abs, key: getArgValue(args, 'key'), base: base && cliPath(base), terminal: terminal || undefined };
   try {
-    if (!terminal) {
-      const out = await cliPostJson(panesPath(resolved.id), { target: abs, title, show: true }, 'Show');
-      if (!out) return 1;
+    const out = await cliPostJson(`/api/sessions/${encodeURIComponent(resolved.id)}/show`, body, 'Show', token ? { 'x-terminal-token': token } : {});
+    if (!out) return 1;
+    if (out.shown === 'overlay') {
+      console.log(`Shown "${out.title}" (${out.key ? `${out.key}, ` : ''}${out.index}/${out.count}). The user sees the rendered card and you do not: in your reply, say what the card shows, and take the render as given.`);
+    } else {
       console.log(out.added
         ? `Added "${title}" as a background tab of session ${resolved.id.slice(0, 8)} on the board. In your reply, say what the card shows and that it waits there.`
         : 'The board already has a tab for this file; it refreshes on each save.');
-      return 0;
     }
-    const base = getArgValue(args, 'base');
-    const body = { sessionId: resolved.id, title, file: abs, key: getArgValue(args, 'key'), base: base && cliPath(base) };
-    const out = await cliPostJson(`/api/terminals/${encodeURIComponent(terminal)}/show`, body, 'Show', { 'x-terminal-token': token });
-    if (!out) return 1;
-    console.log(`Shown "${out.title}" (${out.key ? `${out.key}, ` : ''}${out.index}/${out.count}). The user sees the rendered card and you do not: in your reply, say what the card shows, and take the render as given.`);
     return 0;
   } catch (e) { reportCliError(e); return 1; }
 }
 
 async function runSessionCompanionCli(args, entry) {
-  const idArg = positionals(args, [])[0] || process.env[SESSION_ID_ENV];
+  const idArg = sessionPositionals(args)[0] || process.env[SESSION_ID_ENV];
   if (!idArg) return usageError(entry, '<id> is required outside a pi session.');
   const token = readTerminalToken();
   if (!token) return 1;
@@ -1014,7 +1013,7 @@ function formatAge(ms) {
 }
 
 async function runSessionOpenCli(args) {
-  const idArg = args.find(a => !a.startsWith('--'));
+  const [idArg] = sessionPositionals(args);
   if (!idArg) {
     printLeafHelp(COMMANDS.session.verbs.open);
     return 1;
@@ -1029,7 +1028,7 @@ async function runSessionOpenCli(args) {
 }
 
 async function runSessionPinCli(args) {
-  const idArg = args.find(a => !a.startsWith('--'));
+  const [idArg] = sessionPositionals(args);
   if (!idArg) {
     printLeafHelp(COMMANDS.session.verbs.pin);
     return 1;
@@ -1048,7 +1047,7 @@ async function runSessionPinCli(args) {
 const postSessionGroup = (id, body, label) => cliPostJson(`/api/sessions/${encodeURIComponent(id)}/group`, body, label);
 
 async function runSessionGroupCli(args, entry) {
-  const [idArg, groupArg] = positionals(args, ['--with', '--parent']);
+  const [idArg, groupArg] = sessionPositionals(args, ['--with', '--parent']);
   const parentArg = getArgValue(args, 'parent');
   const withFlag = getArgValue(args, 'with');
   const noParent = args.includes('--no-parent');
@@ -1077,7 +1076,7 @@ async function runSessionGroupCli(args, entry) {
 }
 
 async function runSessionUngroupCli(args, entry) {
-  const [idArg] = positionals(args, []);
+  const [idArg] = sessionPositionals(args);
   if (!idArg) {
     printLeafHelp(entry);
     return 1;
@@ -1219,7 +1218,7 @@ async function runGroupListCli(args) {
 }
 
 async function runSessionViewCli(args) {
-  const idArg = args.find(a => !a.startsWith('--'));
+  const [idArg] = sessionPositionals(args);
   if (!idArg) {
     printLeafHelp(COMMANDS.session.verbs.view);
     return 1;
@@ -1313,7 +1312,7 @@ async function runSessionSearchCli(args) {
 }
 
 async function runSessionAgentsCli(args) {
-  const [idArg] = positionals(args, []);
+  const [idArg] = sessionPositionals(args);
   if (!idArg) {
     printLeafHelp(COMMANDS.session.verbs.agents);
     return 1;
@@ -1344,7 +1343,7 @@ async function runSessionAgentsCli(args) {
 
 async function runTaskListCli(args) {
   const entry = COMMANDS.task.verbs.list;
-  const [sessionArg] = positionals(args, ['--project', '--status']);
+  const [sessionArg] = sessionPositionals(args, ['--project', '--status']);
   const project = getArgValue(args, 'project');
   const all = args.includes('--all');
   const status = getArgValue(args, 'status');
@@ -1409,6 +1408,13 @@ async function runProjectListCli(args) {
 
 function positionals(args, valueFlags) {
   return args.filter((a, i) => !a.startsWith('--') && !valueFlags.includes(args[i - 1]));
+}
+
+// Every verb takes its session as --session <id>; a verb on sessions also takes it as the first positional.
+function sessionPositionals(args, valueFlags = []) {
+  const rest = positionals(args, ['--session', ...valueFlags]);
+  const flag = getArgValue(args, 'session');
+  return flag ? [flag, ...rest] : rest;
 }
 
 // The server matches the folder against known project paths by string, so an 8.3 short name
@@ -1477,7 +1483,7 @@ async function runDispatchStartCli(argv) {
 }
 
 async function runDispatchWaitCli(args, entry) {
-  const ids = positionals(args, []);
+  const ids = sessionPositionals(args);
   if (!ids.length) {
     printLeafHelp(entry);
     return 1;
@@ -1512,7 +1518,7 @@ async function runDispatchListCli(args) {
 async function runDispatchEndCli(args) {
   const entry = COMMANDS.dispatch.verbs.end;
   const name = getArgValue(args, 'name');
-  const id = positionals(args, ['--name'])[0];
+  const id = sessionPositionals(args, ['--name'])[0];
   if (!id && !name) {
     printLeafHelp(entry);
     return 1;
@@ -1566,11 +1572,12 @@ async function runTerminalListCli(args) {
 }
 
 async function runSkillsGetCli(args) {
-  const name = args.find(a => !a.startsWith('--'));
-  const file = name && /^[a-z][a-z-]*$/.test(name) ? path.join(__dirname, 'skill-guides', `${name}.md`) : null;
+  const [name] = positionals(args, []);
+  const skills = path.join(__dirname, 'skills');
+  const file = name && /^[a-z][a-z-]*$/.test(name) ? path.join(skills, name, 'SKILL.md') : null;
   if (!file || !fs.existsSync(file)) {
-    const known = fs.readdirSync(path.join(__dirname, 'skill-guides')).map(f => f.replace(/\.md$/, ''));
-    return usageError(COMMANDS.skills.verbs.get, `Unknown skill guide: ${name || '(none)'}. Known: ${known.join(', ')}`);
+    const known = fs.readdirSync(skills).filter(d => fs.existsSync(path.join(skills, d, 'SKILL.md')));
+    return usageError(COMMANDS.skills.verbs.get, `Unknown skill: ${name || '(none)'}. Known: ${known.join(', ')}`);
   }
   process.stdout.write(fs.readFileSync(file, 'utf8'));
   return 0;

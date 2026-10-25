@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const DEFAULT_PORT = 3460;
+const DEFAULT_PORT = 3460;
 
 const requireHere = createRequire(import.meta.url);
 // The board's CommonJS modules, shared with the extension.
@@ -25,7 +25,7 @@ export function resolveTarget(cwd: string, input: string): string {
 	return isAbsolute(native) ? resolvePath(native) : resolvePath(cwd, native);
 }
 
-export const BOARD_DOWN = 'The pi-kanban board is not running. Ask the user to start it with "pi-kanban".';
+const BOARD_DOWN ='The pi-kanban board is not running. Ask the user to start it with "pi-kanban".';
 
 export function kanbanDir(): string {
 	return joinPath(getAgentDir(), "kanban");
@@ -41,9 +41,17 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
-export function readJson(file: string): any {
+export function readText(file: string): string | null {
 	try {
-		return JSON.parse(readFileSync(file, "utf8"));
+		return readFileSync(file, "utf8");
+	} catch {
+		return null;
+	}
+}
+
+function readJson(file: string): any {
+	try {
+		return JSON.parse(readText(file) ?? "null");
 	} catch {
 		return null;
 	}

@@ -48,7 +48,7 @@ const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace } = require('.
 const { readTerminalConfig } = require('./lib/terminal');
 const { THINKING_LEVELS } = require('./lib/pi-agents');
 const { createTerminalClient } = require('./lib/terminal-client');
-const { createShowStore, mountShowRoutes, showBodyParser, SHOW_PATH } = require('./lib/show');
+const { createShowStore, mountShowRoutes, showBodyParser, SESSION_SHOW_PATH } = require('./lib/show');
 const { createAskStore, mountAskRoutes, terminalAskRoutes, askBodyParser, ASK_PATH, SESSION_ASK_PATH, SESSION_ASK_ROUTES } = require('./lib/ask');
 const { readLiveSessions, isPidAlive, isSessionLive, noteReplacedSessions } = require('./lib/live-sessions');
 const { createProcStats } = require('./lib/proc-stats');
@@ -521,7 +521,7 @@ app.param('taskId', (_req, res, next, val) => {
   next();
 });
 
-app.use(SHOW_PATH, showBodyParser());
+app.use(SESSION_SHOW_PATH, showBodyParser());
 app.use(ASK_PATH, askBodyParser());
 app.use(SESSION_ASK_PATH, askBodyParser());
 // Parse JSON bodies. A review of 50 comments at the field caps is about 450 kB.
@@ -2281,6 +2281,7 @@ mountShowRoutes(app, {
   readPreviewFile,
   broadcast,
   onRemoved: (sessionId, paths) => panes.removeShow(sessionId, paths),
+  addPane: async (sessionId, { file, title }) => panes.add(sessionId, { ...(await resolvePaneTarget(file)), title, show: true }),
 });
 const ask = createAskStore();
 mountAskRoutes(app, {

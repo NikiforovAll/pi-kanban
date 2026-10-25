@@ -15,8 +15,6 @@ When the request starts with `explain`, `diagram`, `chart` or `mockup`, that wor
 2. Run `pi-kanban show <file> --title "<title>" --key <name>`. The key names what the card shows, such as `latency-chart`; a post with the same key replaces the card in place. `--base <repo root>` makes the card's `path:line` links resolve against that folder.
 3. To change the card, edit the file. The card refreshes on each save.
 
-When `pi-kanban` is not on PATH, run `node <this skill's folder>/../../server.js` in its place.
-
 ## HTML contract
 
 For an `.html` card, read [references/html-contract.md](references/html-contract.md) first: the body-fragment rules and the theme variables. Then:

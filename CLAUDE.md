@@ -17,7 +17,8 @@ pi-kanban is an agent development environment (ADE) for the [pi coding agent](ht
 ### pi tools (`extensions/tools/`)
 
 - **`board-api.ts`** — finds the board (`PK_URL`, then the `server.json` beacon, then port 3460), wraps fetch, and loads the board's CommonJS `lib/` modules. A down board raises `BoardDownError`.
-- **`panes.ts`** — link, preview and companion helpers for the `/kanban` command. Panes, docs, cards and dispatch are CLI verbs (`pi-kanban pane|doc|show|session|dispatch`), taught by the skills in `skills/`.
+- **`kanban-command.ts`** — link, preview and companion helpers for the `/kanban` command. Panes, docs, cards and dispatch are CLI verbs (`pi-kanban pane|doc|show|session|dispatch`), taught by the skills in `skills/`.
+- **`cli-path.ts`** — writes `pi-kanban` shims to `<agentDir>/kanban/bin` and puts that folder first on PATH, so the skills run the `pi-kanban` of their own version, with or without a global install.
 - **`ask.ts`** — `ask` opens a modal and long-polls for the answer, with a pi TUI fallback when the board is down.
 - **`dispatch.ts`** — the worker's `dispatch_report` tool and prompt, active only in a dispatched session.
 - **`inbox.ts`** — long-polls `/api/sessions/:id/events` and delivers board messages (review comments, card answers, task moves) to pi as user messages. The ack rides on the next poll.

@@ -400,4 +400,39 @@ describe('CLI argument parsing', () => {
       srv.close();
     }
   });
+
+  it('session verbs take the session as <id> or --session <id>', async () => {
+    const seen = [];
+    const srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        seen.push(`${req.method} ${req.url} ${raw}`.trim());
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url.startsWith('/api/session/resolve')) return res.end(JSON.stringify({ id: `${new URL(req.url, 'http://x').searchParams.get('id')}-full` }));
+        res.end('{"group":"g1","name":"Auth","path":"Auth","rev":1}');
+      });
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const env = { PI_CODING_AGENT_DIR: tempConfigDir(), PORT: String(srv.address().port) };
+      for (const args of [['abc', 'Auth'], ['--session', 'abc', 'Auth'], ['Auth', '--session', 'abc']]) {
+        seen.length = 0;
+        const out = await runCli(['session', 'group', ...args], env);
+        assert.equal(out.code, 0, out.stderr);
+        assert.deepEqual(seen, ['GET /api/session/resolve?id=abc', 'POST /api/sessions/abc-full/group {"group":"Auth","create":false}']);
+      }
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('skills get prints a bundled SKILL.md and names the skills for an unknown one', async () => {
+    const got = await runCli(['skills', 'get', 'dispatch'], {});
+    assert.equal(got.code, 0);
+    assert.equal(got.stdout, fs.readFileSync(path.join(__dirname, '..', 'skills', 'dispatch', 'SKILL.md'), 'utf8'));
+    const unknown = await runCli(['skills', 'get', 'nope'], {});
+    assert.equal(unknown.code, 1);
+    assert.match(unknown.stderr, /Unknown skill: nope\. Known: .*dispatch/);
+  });
 });

@@ -26,7 +26,12 @@ describe('CLI show, session cost and dispatch wait', () => {
         hits.push({ method: req.method, path: u.pathname, token: req.headers['x-terminal-token'] || null, body: body ? JSON.parse(body) : null });
         res.setHeader('Content-Type', 'application/json');
         if (u.pathname === '/api/session/resolve') return res.end(JSON.stringify({ id: u.searchParams.get('id') }));
-        if (u.pathname.endsWith('/show')) return res.end(JSON.stringify({ title: 'Plan', key: 'plan', index: 1, count: 2 }));
+        if (u.pathname.endsWith('/show')) {
+          const j = JSON.parse(body);
+          return res.end(JSON.stringify(j.terminal
+            ? { shown: 'overlay', title: 'Plan', key: 'plan', index: 1, count: 2 }
+            : { shown: 'pane', pane: { id: 'p1', title: j.title }, added: true }));
+        }
         if (u.pathname.startsWith('/api/panes/')) {
           const j = JSON.parse(body);
           return res.end(JSON.stringify({ pane: { id: 'p1', title: j.title || j.companion }, added: true }));
@@ -70,18 +75,19 @@ describe('CLI show, session cost and dispatch wait', () => {
     assert.equal(code, 0);
     assert.match(stdout, /^Shown "Plan" \(plan, 1\/2\)\. The user sees the rendered card/);
     const h = last('/show');
-    assert.equal(h.path, '/api/terminals/t1/show');
+    assert.equal(h.path, `/api/sessions/${SID}/show`);
     assert.equal(h.token, 'tok');
-    assert.deepEqual(h.body, { sessionId: SID, title: 'plan.md', file: path.join(dir, 'plan.md'), key: 'plan', base: dir });
+    assert.deepEqual(h.body, { title: 'plan.md', file: path.join(dir, 'plan.md'), key: 'plan', base: dir, terminal: 't1' });
   });
 
-  it('show adds a background tab off the board terminal', async () => {
+  it('show adds a background tab off the board terminal, with no token', async () => {
     const { code, stdout } = await run(['show', 'plan.md', '--title', 'The plan']);
     assert.equal(code, 0);
     assert.match(stdout, /^Added "The plan" as a background tab of session 01a30000/);
-    const h = last('/api/panes/');
-    assert.equal(h.path, `/api/panes/${SID}`);
-    assert.deepEqual(h.body, { target: path.join(dir, 'plan.md'), title: 'The plan', show: true });
+    const h = last('/show');
+    assert.equal(h.path, `/api/sessions/${SID}/show`);
+    assert.equal(h.token, null);
+    assert.deepEqual(h.body, { title: 'The plan', file: path.join(dir, 'plan.md'), key: null, base: null });
   });
 
   it('session cost opens pi-cost for this session and names the board terminal', async () => {

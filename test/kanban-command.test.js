@@ -4,24 +4,9 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { registerHooks } = require('node:module');
+const { SKIP_TS } = require('./ts-hooks');
 
-// The extension imports its siblings as .js, as tsc emits them; Node runs the .ts source.
-const canRunTs = typeof registerHooks === 'function' && !!process.features.typescript;
-if (canRunTs) {
-  registerHooks({
-    resolve(specifier, context, next) {
-      try {
-        return next(specifier, context);
-      } catch (e) {
-        if (!specifier.endsWith('.js') || !context.parentURL?.includes('/extensions/')) throw e;
-        return next(specifier.replace(/\.js$/, '.ts'), context);
-      }
-    },
-  });
-}
-
-describe('/kanban companion panes', { skip: !canRunTs && 'needs Node with registerHooks and type stripping' }, () => {
+describe('/kanban companion panes', { skip: SKIP_TS }, () => {
   const requests = [];
   let server;
   let root;
@@ -48,7 +33,7 @@ describe('/kanban companion panes', { skip: !canRunTs && 'needs Node with regist
       env[k] = process.env[k];
       process.env[k] = v;
     }
-    ({ openCompanion } = await import('../extensions/tools/panes.ts'));
+    ({ openCompanion } = await import('../extensions/tools/kanban-command.ts'));
   });
 
   after(() => {

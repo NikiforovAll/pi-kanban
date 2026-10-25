@@ -5,7 +5,7 @@ description: pi-kanban board CLI. Use to keep a dev server, page or file open as
 
 # pi-kanban CLI
 
-The skill is a thin wrapper over the `pi-kanban` CLI. When `pi-kanban` is not on PATH, run `node <this skill's folder>/../../server.js` in its place.
+The skill is a thin wrapper over the `pi-kanban` CLI.
 
 The CLI takes this session from `$PI_KANBAN_SESSION_ID`, so pass `--session` or an id only for another session.
 
