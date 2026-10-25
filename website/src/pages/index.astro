@@ -10,7 +10,6 @@ import { url } from '../kit/family';
 const GITHUB = 'https://github.com/NikiforovAll/pi-kanban';
 const NPM = 'https://www.npmjs.com/package/pi-kanban';
 const INSTALL = 'pi install npm:pi-kanban';
-const VIDEO = 'https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-demo.mp4';
 
 const COST_REPO = 'https://github.com/NikiforovAll/pi-cost';
 const INSPECT_REPO = 'https://github.com/NikiforovAll/pi-inspect';
@@ -233,14 +232,6 @@ const companions = [
             <p>The board in light and dark. Switch the mode at the top of the page and the screenshots follow.</p>
           </figcaption>
         </figure>
-      </section>
-
-      <section class="half" aria-labelledby="tour">
-        <div class="half-head">
-          <h2 id="tour">Tour</h2>
-          <p>Browse sessions, open a subagent, and follow the session log as pi works.</p>
-        </div>
-        <video class="video" controls preload="none" playsinline src={VIDEO} poster={url('shots/themes/pi-board-light.webp')} aria-label="pi-kanban tour"></video>
       </section>
 
       {
@@ -554,15 +545,6 @@ const companions = [
     margin: 0;
     font-size: 0.9375rem;
     color: var(--c-ink3);
-  }
-
-  .video {
-    display: block;
-    width: 100%;
-    aspect-ratio: 16 / 9;
-    border: 1px solid var(--c-border);
-    border-radius: 0.75rem;
-    background: var(--c-elevated);
   }
 
   .half {
