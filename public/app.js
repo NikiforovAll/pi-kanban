@@ -4030,7 +4030,7 @@ function renderSessions() {
     const pinTitle =
       pinState === 'pinned' || pinState === 'sticky' ? 'Unpin session (.)' : 'Pin session (. · > sticky)';
     // Zen renders the full context detail below the card, so the compact bar would just repeat it.
-    const showCtx = !!session.contextStatus && !zenMode;
+    const showCtx = !!session.context && !zenMode;
     const linkedDocsCount = getSessionPreviewPaths(session.id).length;
     const bookmarksCount = loadPins(session.id).length;
     const padEmoji = store.getItem(_padEmojiKey(session.id));
@@ -10158,10 +10158,6 @@ function setupEventSource() {
         }, 500);
       }
 
-      if (data.type === 'context-update') {
-        debouncedRefresh(data.sessionId, true);
-      }
-
       if (data.type === 'preview:open') {
         handlePreviewOpenEvent(data);
       }
@@ -10234,26 +10230,12 @@ const CONTEXT_COLORS = {
   red: 'var(--danger)',
 };
 const COST_THRESHOLDS = { green: 0.5, yellow: 2, orange: 5 };
-const MODEL_THRESHOLDS = [
-  { match: /sonnet/i, yellow: 120000, orange: 200000, red: 300000 },
-  { match: /haiku/i, yellow: 100000, orange: 130000, red: 150000 },
-  { match: /opus/i, yellow: 150000, orange: 250000, red: 400000 },
-];
-const DEFAULT_THRESHOLDS = { yellow: 100000, orange: 130000, red: 150000 };
+const CONTEXT_THRESHOLD_SHARES = { yellow: 0.5, orange: 0.65, red: 0.75 };
 
 //#endregion
 
 //#region CONTEXT_WINDOW
-function getModelThresholds(modelName) {
-  if (!modelName) return DEFAULT_THRESHOLDS;
-  for (const t of MODEL_THRESHOLDS) {
-    if (t.match.test(modelName)) return t;
-  }
-  return DEFAULT_THRESHOLDS;
-}
-
-function getContextColor(usedTokens, modelName) {
-  const t = getModelThresholds(modelName);
+function getContextColor({ usedTokens, thresholds: t }) {
   if (usedTokens < t.yellow) return CONTEXT_COLORS.green;
   if (usedTokens < t.orange) return CONTEXT_COLORS.yellow;
   if (usedTokens < t.red) return CONTEXT_COLORS.orange;
@@ -10283,54 +10265,25 @@ function formatTokens(k) {
   return `${Math.round(k)}K`;
 }
 
-// session.autoCompact ({window, pct} from the session's settings) makes the compaction point the
-// bar's full scale, because the status line reports the model's full window regardless.
+// session.context is the last reply's context over its model's window, both from the server; it
+// is null while either is unknown.
 function getCtx(session) {
-  const raw = session?.contextStatus;
-  const autoCompact = session?.autoCompact;
-  if (!raw) return null;
-  const cw = raw.context_window || {};
-  const modelSize = cw.context_window_size || 0;
-  const model = raw.model || {};
-  const modelName = model.display_name || model.id || '';
-  const thresholds = getModelThresholds(modelName);
-  const usedTokens = modelSize > 0 ? ((cw.used_percentage || 0) / 100) * modelSize : 0;
-  const compactAt =
-    modelSize > 0 && autoCompact
-      ? (Math.min(modelSize, autoCompact.window || modelSize) * (autoCompact.pct || 100)) / 100
-      : 0;
-  const compacts = compactAt > 0 && compactAt < modelSize;
-  const size = compacts ? compactAt : modelSize;
-  const pct = compacts ? Math.min(100, (usedTokens / size) * 100) : cw.used_percentage || 0;
-  const markers =
-    size > 0
-      ? [
-          { tokens: thresholds.yellow, pct: (thresholds.yellow / size) * 100, color: CONTEXT_COLORS.yellow },
-          { tokens: thresholds.orange, pct: (thresholds.orange / size) * 100, color: CONTEXT_COLORS.orange },
-          { tokens: thresholds.red, pct: (thresholds.red / size) * 100, color: CONTEXT_COLORS.red },
-        ].filter((m) => m.pct > 0 && m.pct < 100)
-      : [];
-  return {
-    pct,
-    remaining: 100 - pct,
-    size,
-    modelSize,
-    compacts,
-    usedTokens,
-    modelName,
-    markers,
-  };
+  const c = session?.context;
+  if (!c) return null;
+  const size = c.window;
+  const shares = Object.entries(CONTEXT_THRESHOLD_SHARES);
+  const thresholds = Object.fromEntries(shares.map(([k, s]) => [k, s * size]));
+  const markers = shares.map(([k, s]) => ({ tokens: thresholds[k], pct: s * 100, color: CONTEXT_COLORS[k] }));
+  return { pct: Math.min(100, (c.tokens / size) * 100), size, usedTokens: c.tokens, thresholds, markers };
 }
 
 function renderContextBar(session) {
   const ctx = getCtx(session);
   if (!ctx) return '';
-  const color = getContextColor(ctx.usedTokens, ctx.modelName);
+  const color = getContextColor(ctx);
   const fmt = (n) => formatTokens(n / 1000);
   const used = fmt(ctx.usedTokens);
-  const title = ctx.compacts
-    ? `Context: ${used} of ${fmt(ctx.size)} tokens before auto-compact (model window ${fmt(ctx.modelSize)})`
-    : `Context: ${used}${ctx.size ? ` of ${fmt(ctx.size)}` : ''} tokens`;
+  const title = `Context: ${used} of ${fmt(ctx.size)} tokens`;
   return `
         <div class="context-bar" title="${escapeHtml(title)}">
           <div class="context-bar-track">
@@ -10339,7 +10292,7 @@ function renderContextBar(session) {
           </div>
           <div class="context-bar-labels">
             <span style="color:${color}">${Math.round(ctx.pct)}% (${used})</span>
-            <span>${Math.round(ctx.remaining)}% free</span>
+            <span>${Math.round(100 - ctx.pct)}% free</span>
           </div>
         </div>`;
 }
@@ -10425,8 +10378,8 @@ function renderContextDetail(session, { tokens = true } = {}) {
   const totals = session.totals;
   if (!ctx && !reply && !totals) return '';
   const usage = reply?.usage;
-  const color = ctx && getContextColor(ctx.usedTokens, ctx.modelName);
-  const title = ctx?.modelName || reply?.modelName || 'Context Window';
+  const color = ctx && getContextColor(ctx);
+  const title = reply?.modelName || 'Context Window';
 
   const usageRows =
     tokens && usage
@@ -10451,7 +10404,7 @@ function renderContextDetail(session, { tokens = true } = {}) {
           </div>
           <div class="detail-context-summary">
             <span style="color:${color}">${Math.round(ctx.pct)}% used</span>
-            <span${ctx.compacts ? ` title="Auto-compact window · model window ${escapeHtml(formatTokens(ctx.modelSize / 1000))}"` : ''}>${formatTokens(ctx.usedTokens / 1000)} / ${formatTokens(ctx.size / 1000)}</span>
+            <span>${formatTokens(ctx.usedTokens / 1000)} / ${formatTokens(ctx.size / 1000)}</span>
           </div>`
     : '';
 

@@ -81,12 +81,12 @@ describe('pi-transcript: toClaudeLines', () => {
 
   it('maps an assistant reply with usage and tool calls', () => {
     const [l] = map(entry('a', null, { type: 'message', message: {
-      role: 'assistant', model: 'm', stopReason: 'toolUse',
+      role: 'assistant', provider: 'p', model: 'm', stopReason: 'toolUse',
       usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
       content: [{ type: 'thinking', thinking: 'hm' }, { type: 'toolCall', id: 'c|1', name: 'find', arguments: { pattern: '*.js' } }],
     } }));
     assert.deepEqual(l.message, {
-      role: 'assistant', model: 'm', stop_reason: 'toolUse',
+      role: 'assistant', model: 'm', provider: 'p', stop_reason: 'toolUse',
       usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
       content: [
         { type: 'thinking', thinking: 'hm' },
@@ -99,7 +99,7 @@ describe('pi-transcript: toClaudeLines', () => {
     const [l] = map(entry('a', null, { type: 'message', message: {
       role: 'assistant', model: 'm', stopReason: 'error', errorMessage: 'boom', usage: { input: 0, output: 0 }, content: [],
     } }));
-    assert.deepEqual(l.message, { role: 'assistant', model: 'm', stop_reason: 'error', content: [{ type: 'text', text: 'Error: boom' }] });
+    assert.deepEqual(l.message, { role: 'assistant', model: 'm', provider: null, stop_reason: 'error', content: [{ type: 'text', text: 'Error: boom' }] });
   });
 
   it('maps a tool result with its error flag and details', () => {

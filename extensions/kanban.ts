@@ -1,5 +1,5 @@
 import { dirname, join as joinPath } from "node:path";
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
 import { linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
 import { registerDispatch } from "./tools/dispatch.js";
@@ -37,9 +37,15 @@ const piAgents = lib("pi-agents.js") as {
 	};
 };
 
+const modelWindows = lib("model-windows.js") as {
+	MODEL_WINDOWS_FILE: string;
+	recordModelWindows: (file: string, models: { provider: string; id: string; contextWindow: number }[]) => Promise<boolean>;
+};
+
 const { SESSION_ID_ENV } = lib("board-dir.js") as { SESSION_ID_ENV: string };
 
 const LIVE_DIR = joinPath(kanbanDir(), "live");
+const MODEL_WINDOWS_FILE = joinPath(kanbanDir(), modelWindows.MODEL_WINDOWS_FILE);
 const ACTIVITY_DIR = joinPath(kanbanDir(), "agent-activity");
 
 // pi's default dir is <agentDir>/sessions/<encoded cwd>, which the board scans already. Only a
@@ -231,8 +237,18 @@ function registerLiveState(pi: ExtensionAPI) {
 export default function kanbanExtension(pi: ExtensionAPI) {
 	registerLiveState(pi);
 	registerScratchpad(pi);
+function registerModelWindows(pi: ExtensionAPI) {
+	const record = (ctx: ExtensionContext) => {
+		modelWindows.recordModelWindows(MODEL_WINDOWS_FILE, ctx.modelRegistry.getAvailable())
+			.catch((e: any) => console.warn(`pi-kanban: model windows failed: ${e?.message ?? e}`));
+	};
+	pi.on("session_start", async (_event, ctx) => record(ctx));
+	pi.on("model_select", async (_event, ctx) => record(ctx));
+}
+
 	registerShowAsk(pi);
 	registerDispatch(pi);
+	registerModelWindows(pi);
 	registerInbox(pi);
 
 	pi.on("tool_result", async (event, ctx) => {

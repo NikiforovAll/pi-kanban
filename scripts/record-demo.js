@@ -111,7 +111,7 @@ async function main() {
       return responses[k];
     };
 
-    for (const p of ['/api/config', '/api/projects', '/api/tasks/all', '/api/groups', '/api/session/pins', '/api/document/links', '/api/sessions/known', '/api/dispatch', '/api/context-status']) await get(p);
+    for (const p of ['/api/config', '/api/projects', '/api/tasks/all', '/api/groups', '/api/session/pins', '/api/document/links', '/api/sessions/known', '/api/dispatch']) await get(p);
     const list = await get('/api/sessions', { limit: 200 });
     const files = new Set();
     for (const { id } of list) {

@@ -16,8 +16,9 @@ const { isContained, realpathDeepest } = require('./lib/contain');
 const { resolveScratchSubdir, listScratchDir } = require('./lib/scratch-files');
 const { fileUrlToPath } = require('./lib/file-url');
 const { httpError: previewError } = require('./lib/http-error');
-const { getAutoCompact } = require('./lib/auto-compact');
-const { COMPANIONS, companionStatus, installPlan, refreshLatest } = require('./lib/companions');
+const { MODEL_WINDOWS_FILE, contextOf } = require('./lib/model-windows');
+const { readSettings } = require('./lib/claude-settings');
+const { companionStatus, installPlan, refreshLatest } = require('./lib/companions');
 const { createCompanionHost } = require('./lib/companion-host');
 
 const {
@@ -52,7 +53,7 @@ const { createUserGroupStore } = require('./lib/user-groups');
 const { createSessionPinStore } = require('./lib/session-pins');
 const { stampedJsonFile } = require('./lib/stamped-json-file');
 const { parseReviewSource, parseActionBody, formatActionMarkdown } = require('./lib/preview-action');
-const { createDispatchedStore, pruneSessionDirs, pruneContextStatus, pruneTaskMaps, retentionMs } = require('./lib/retention');
+const { createDispatchedStore, pruneSessionDirs, pruneTaskMaps, retentionMs } = require('./lib/retention');
 const { createDispatchReports, parseReport } = require('./lib/dispatch-reports');
 const { createModelCache, listPiModels } = require('./lib/pi-models');
 const { createWorktreeStore } = require('./lib/worktrees');
@@ -100,7 +101,7 @@ const rootsFor = (cwds) => sessionRoots({ agentDir: PI_AGENT_DIR, sessionDir: SE
 const SESSION_OPTS = { roots: rootsFor() };
 const SESSIONS_DIR = path.join(PK_DIR, 'live');
 const AGENT_ACTIVITY_DIR = path.join(PK_DIR, 'agent-activity');
-const CONTEXT_STATUS_DIR = path.join(PK_DIR, 'context-status');
+const MODEL_WINDOWS_PATH = path.join(PK_DIR, MODEL_WINDOWS_FILE);
 const ATTACHMENTS_DIR = path.join(PK_DIR, 'attachments');
 const PINS_FILE = path.join(PK_DIR, 'pins.json');
 const USER_GROUPS_FILE = path.join(PK_DIR, 'groups.json');
@@ -333,10 +334,10 @@ function isGhostAgent(agent) {
   return (Date.now() - new Date(agent.startedAt).getTime()) >= AGENT_STALE_MS;
 }
 
-function getContextFields(sessionId, meta) {
+function getContextFields(meta) {
   const reply = meta?.lastReply;
   return {
-    contextStatus: contextStatusCache.get(sessionId) || null,
+    context: contextOf(reply, readSettings(MODEL_WINDOWS_PATH) || {}),
     cache: reply ? { ttl: meta.cacheTtl || null, ...reply, modelName: modelDisplayName(reply.model) } : null,
     totals: meta?.totals || null,
   };
@@ -535,7 +536,6 @@ const messageCache = new Map();
 const MESSAGE_CACHE_TTL = 5000;
 const MAX_CACHE_ENTRIES = 200;
 const taskCountsCache = new Map();
-const contextStatusCache = new Map();
 const TASK_MAPS_DIR = path.join(AGENT_ACTIVITY_DIR, '_task-maps');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function isUUID(s) { return UUID_RE.test(s); }
@@ -811,7 +811,7 @@ function buildSessionObject(id, meta, overrides = {}) {
     tasksDir: null,
     projectDir: meta.jsonlPath ? path.dirname(meta.jsonlPath) : null,
     scratchpadDir: getScratchpadDir(id, meta),
-    ...getContextFields(id, meta),
+    ...getContextFields(meta),
     ...getPlanInfo(id),
     ...overrides,
     // Remove internal-only field
@@ -1004,12 +1004,6 @@ app.get('/api/sessions', async (req, res) => {
       } catch { /* ignore */ }
     }
 
-    // Backfill contextStatus for already-built sessions that are pinned
-    for (const pid of pinnedIds) {
-      const s = sessionsMap.get(pid);
-      if (s && !s.contextStatus) Object.assign(s, getContextFields(pid, metadata[pid]));
-    }
-
     // Ensure pinned sessions are in the map even if they weren't discovered
     for (const pid of pinnedIds) {
       if (sessionsMap.has(pid)) continue;
@@ -1075,17 +1069,7 @@ app.get('/api/sessions', async (req, res) => {
       sessions = [...top, ...missingPinned];
     }
 
-    // autoCompact costs up to 3 settings stats per call, so only the rows sent pay for it, and
-    // `lite=1` (the CLI's group list, which only counts and names sessions) skips it.
-    const lite = req.query.lite === '1';
-    const autoCompactByProject = new Map();
-    for (const s of sessions) {
-      s.pin = pins[s.id] || null;
-      if (lite) continue;
-      if (!s.contextStatus) continue;
-      if (!autoCompactByProject.has(s.project)) autoCompactByProject.set(s.project, getAutoCompact(PI_AGENT_DIR, s.project));
-      s.autoCompact = autoCompactByProject.get(s.project);
-    }
+    for (const s of sessions) s.pin = pins[s.id] || null;
 
     res.json(withDispatchMarker(sessions));
     startPrewarm();
@@ -3376,10 +3360,6 @@ function broadcast(data) {
   }
 }
 
-app.get('/api/context-status', (_req, res) => {
-  res.json(Object.fromEntries(contextStatusCache));
-});
-
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -3536,36 +3516,6 @@ agentActivityWatcher.on('all', (event, filePath) => {
   }
 });
 
-// Watch context-status directory for the plugin's context and cost updates
-const contextStatusWatcher = chokidar.watch(CONTEXT_STATUS_DIR, {
-  persistent: true,
-  ignoreInitial: false,
-  alwaysStat: true,
-  depth: 0
-});
-
-// The initial scan adds one event per kept file (up to MAX_CONTEXT_STATUS), so it broadcasts once at the end.
-let contextStatusReady = false;
-contextStatusWatcher.on('ready', () => {
-  contextStatusReady = true;
-  broadcast({ type: 'context-update', sessionId: null });
-});
-
-contextStatusWatcher.on('all', (event, filePath, stats) => {
-  if (!filePath.endsWith('.json')) return;
-  const sessionId = path.basename(filePath, '.json');
-  if (event === 'add' || event === 'change') {
-    try {
-      const data = JSON.parse(readFileSync(filePath, 'utf8'));
-      data._updatedAt = stats?.mtimeMs ?? Date.now();
-      contextStatusCache.set(sessionId, data);
-    } catch { /* ignore malformed */ }
-  } else if (event === 'unlink') {
-    contextStatusCache.delete(sessionId);
-  } else return;
-  if (contextStatusReady) broadcast({ type: 'context-update', sessionId });
-});
-
 // #endregion
 
 // #region CLEANUP
@@ -3601,7 +3551,7 @@ async function cleanupAgentActivity() {
   } catch { /* agent-activity dir may not exist */ }
 }
 
-// Dispatch markers, pane layouts, reviews, attachments, context status and worktrees: see docs/retention.md.
+// Dispatch markers, pane layouts, reviews, attachments and worktrees: see docs/retention.md.
 async function runRetention() {
   try {
     const scan = scanSessionIds(SESSION_OPTS);
@@ -3611,12 +3561,11 @@ async function runRetention() {
     if (layouts) queuePaneFileWatch();
     const reviews = await pruneSessionDirs(REVIEW_DIR, opts);
     const attachments = await pruneSessionDirs(ATTACHMENTS_DIR, opts);
-    const contexts = await pruneContextStatus(CONTEXT_STATUS_DIR, opts);
     const wts = worktrees.prune(scan?.dirs);
     const taskMaps = await pruneTaskMaps(TASK_MAPS_DIR, opts);
     const grouped = expireGroupMembers(scan?.ids);
-    if (markers || layouts || reviews || attachments || contexts || wts || taskMaps || grouped.members) {
-      console.log(`[retention] removed ${markers} dispatch markers, ${layouts} pane layouts, ${reviews} reviews, ${attachments} attachments, ${contexts} context status files, ${wts} worktrees, ${taskMaps} task-list mappings, ${grouped.members} group members, ${grouped.groups} groups`);
+    if (markers || layouts || reviews || attachments || wts || taskMaps || grouped.members) {
+      console.log(`[retention] removed ${markers} dispatch markers, ${layouts} pane layouts, ${reviews} reviews, ${attachments} attachments, ${wts} worktrees, ${taskMaps} task-list mappings, ${grouped.members} group members, ${grouped.groups} groups`);
     }
   } catch (e) {
     console.warn('[retention] failed:', e.message);

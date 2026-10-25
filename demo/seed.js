@@ -23,9 +23,9 @@ const minutesAgo = (now) => (min) => new Date(now - min * 60_000).toISOString();
 const callId = (sessionId, at, i) => `call_${sessionId.slice(-2)}_${at}_${i}`;
 
 const MODELS = {
-  sonnet: { provider: 'anthropic', modelId: 'claude-sonnet-4-5', api: 'anthropic-messages' },
-  gpt: { provider: 'openai', modelId: 'gpt-5.1', api: 'openai-responses' },
-  gemini: { provider: 'google', modelId: 'gemini-2.5-pro', api: 'google-generative-ai' },
+  sonnet: { provider: 'anthropic', modelId: 'claude-sonnet-4-5', api: 'anthropic-messages', contextWindow: 200000 },
+  gpt: { provider: 'openai', modelId: 'gpt-5.1', api: 'openai-responses', contextWindow: 400000 },
+  gemini: { provider: 'google', modelId: 'gemini-2.5-pro', api: 'google-generative-ai', contextWindow: 1048576 },
 };
 
 const KNOBS_TABLE = '| Knob | Default | Notes |\n|---|---|---|\n| `RATE_WINDOW_MS` | 60000 | Window length |\n| `RATE_LIMIT` | 600 | Requests per key per window |\n| `RATE_BURST` | 50 | Extra requests in a burst |\n| `RATE_KEY_PREFIX` | `rl:` | Redis key prefix |\n';
@@ -342,6 +342,7 @@ async function seedFiles({ root, now = Date.now() }) {
   const { appendAgentLines } = require('../lib/agent-log');
   const { startLines, endLines } = require('../lib/pi-agents');
   const { createDispatchedStore } = require('../lib/retention');
+  const { MODEL_WINDOWS_FILE, recordModelWindows } = require('../lib/model-windows');
 
   const at = minutesAgo(now);
   const agentDir = getAgentDir();
@@ -364,6 +365,7 @@ async function seedFiles({ root, now = Date.now() }) {
     lastWrite[s.id] = new Date(at(Math.min(...s.steps.map((x) => x.at))));
     age(file, lastWrite[s.id]);
   }
+  await recordModelWindows(path.join(kanban, MODEL_WINDOWS_FILE), Object.values(MODELS).map((m) => ({ provider: m.provider, id: m.modelId, contextWindow: m.contextWindow })));
 
   for (const [id, tasks] of [[IDS.limiter, TODO_LIMITER], [IDS.tokens, TODO_TOKENS], [IDS.checkout, TODO_CHECKOUT], [IDS.loadTest, TODO_LOAD]]) {
     await taskStore.reconcileFromSnapshot(id, tasks);

@@ -554,25 +554,25 @@ describe('Parser: readSessionInfoFromJsonl', () => {
 
     it('takes the last reply, timed by the request before it, as the file grows', () => {
       writeFileSync(p, piSession([user(1), reply(5, { usage: { input: 1, output: 2, cacheRead: 100, cacheWrite: 300 } })]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: usage(100, 300) });
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 300) });
       appendFileSync(p, piLine(user(10, { id: 'e3', parentId: 'e2' })) + piLine(reply(14, { id: 'e4', parentId: 'e3', model: 'claude-fable-5-1' })));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(10)), model: 'claude-fable-5-1', usage: usage(100, 0) });
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(10)), model: 'claude-fable-5-1', provider: 'codemie', usage: usage(100, 0) });
     });
 
     it('ignores a reply on an abandoned branch', () => {
       writeFileSync(p, piSession([user(1), reply(5), user(10), reply(12, { model: 'claude-fable-5-1' }), user(20, { id: 'e5', parentId: 'e2' })]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: usage(100, 0) });
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 0) });
     });
 
     it('a compaction after the reply clears its usage', () => {
       writeFileSync(p, piSession([user(1), reply(5), { type: 'compaction', summary: 's', firstKeptEntryId: 'e1', tokensBefore: 10, timestamp: T(50) }]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: null });
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: null });
     });
 
     it('skips a reply that stopped on a provider error', () => {
       const failed = reply(12, { model: 'claude-fable-5-1', stopReason: 'error', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
       writeFileSync(p, piSession([user(1), reply(5), user(10), failed]));
-      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', usage: usage(100, 0) });
+      assert.deepEqual(readSessionInfoFromJsonl(p).lastReply, { at: Date.parse(T(1)), model: 'gpt-6-luna', provider: 'codemie', usage: usage(100, 0) });
     });
   });
 
