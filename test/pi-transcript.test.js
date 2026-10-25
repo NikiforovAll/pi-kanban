@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   normalizeToolInput,
+  claudeWaiting,
   activeBranch,
   sessionName,
   toClaudeLines,
@@ -68,6 +69,23 @@ describe('pi-transcript: normalizeToolInput', () => {
   it('returns an empty object for missing arguments and keeps other values', () => {
     assert.deepEqual(normalizeToolInput('bash', undefined), {});
     assert.equal(normalizeToolInput('bash', 'raw'), 'raw');
+  });
+});
+
+describe('pi-transcript: claudeWaiting', () => {
+  const marker = (toolName, toolInput) => ({ status: 'waiting', kind: 'question', toolName, toolInput, timestamp: 'T' });
+
+  it('maps the tool the way the transcript does', () => {
+    const questions = [{ question: 'Which one?', options: [{ label: 'A' }] }];
+    const ask = claudeWaiting(marker('ask_user_question', JSON.stringify({ questions })));
+    assert.deepEqual({ ...ask, toolInput: JSON.parse(ask.toolInput) }, { ...marker('AskUserQuestion'), toolInput: { questions } });
+    const edit = claudeWaiting(marker('edit', JSON.stringify({ path: 'a.js', edits: [{ oldText: 'x', newText: 'y' }] })));
+    assert.deepEqual([edit.toolName, JSON.parse(edit.toolInput)], ['Edit', { file_path: 'a.js', old_string: 'x', new_string: 'y' }]);
+  });
+
+  it('keeps a name it does not know and an input that is not JSON', () => {
+    assert.deepEqual(claudeWaiting(marker('ask', '{"title":"Pick"}')), marker('ask', '{"title":"Pick"}'));
+    assert.deepEqual(claudeWaiting(marker('bash', '{"command":"rm')), marker('Bash', '{"command":"rm'));
   });
 });
 

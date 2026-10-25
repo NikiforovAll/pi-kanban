@@ -1724,8 +1724,17 @@ function renderWaitingEntry() {
   const bodyHtml = renderWaitingBody(tool, params);
   const bodyWrap = bodyHtml ? `<div class="msg-waiting-body">${bodyHtml}</div>` : '';
   const discardBtn = `<button class="msg-waiting-discard" title="Discard permission prompt" onclick="event.stopPropagation();discardWaiting()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
-  const footer = '<div class="msg-time">answer in the terminal</div>';
-  return `<div class="msg-item msg-waiting" onclick="msgDetailFollowLatest=false;showWaitingDetail()">${getToolIcon(tool)}<div class="msg-body"><div class="msg-text"><span style="font-weight:600">${escapeHtml(tool)}</span>${detailHtml}</div>${bodyWrap}${footer}</div>${discardBtn}</div>`;
+  const footer = `<div class="msg-time">answer ${isBoardAskWaiting() ? 'on the board' : 'in the terminal'}</div>`;
+  return `<div class="msg-item msg-waiting" onclick="openWaitingEntry()">${getToolIcon(tool)}<div class="msg-body"><div class="msg-text"><span style="font-weight:600">${escapeHtml(tool)}</span>${detailHtml}</div>${bodyWrap}${footer}</div>${discardBtn}</div>`;
+}
+
+// The board's own ask tool waits on the ask modal, so its entry brings that modal back.
+const isBoardAskWaiting = () => currentWaiting?.toolName === 'ask';
+
+function openWaitingEntry() {
+  if (isBoardAskWaiting() && askState.ask) return reopenAsk();
+  msgDetailFollowLatest = false;
+  showWaitingDetail();
 }
 
 // Drop the discarded ask from every surface it renders on
@@ -3457,7 +3466,7 @@ function renderAgentFooter() {
   label.textContent = `Agents Log (${visible.length})`;
 
   const permHtml = permFresh
-    ? `<button type="button" class="permission-badge" onclick="showWaitingDetail()">${currentWaiting.kind === 'question' ? '❓ Question pending' : `⏳ Awaiting: ${escapeHtml(currentWaiting.toolName || 'unknown')}`}</button>`
+    ? `<button type="button" class="permission-badge" onclick="openWaitingEntry()">${currentWaiting.kind === 'question' ? '❓ Question pending' : `⏳ Awaiting: ${escapeHtml(currentWaiting.toolName || 'unknown')}`}</button>`
     : '';
 
   content.innerHTML =

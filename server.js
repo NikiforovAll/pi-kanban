@@ -69,6 +69,7 @@ const { loadSessionCache, saveSessionCache } = require('./lib/session-cache');
 const { countTaskDir } = require('./lib/task-counts');
 const { readTaskDir } = require('./lib/task-dir');
 const { foldAgentLines } = require('./lib/agent-log');
+const { claudeWaiting } = require('./lib/pi-transcript');
 const { projectMatcher, normalizeProjectPath, sessionProjectKey } = require('./public/project-match');
 const { sessionRoots, listSessionFiles, readSessionHeader, describeSessionFile, decodeProjectDir, scanSessionIds } = require('./lib/pi-sessions');
 
@@ -1608,7 +1609,8 @@ app.get('/api/sessions/:sessionId/agents', async (req, res) => {
 
     for (const agent of dirty) persistAgent(agentDir, agent);
 
-    const waitingForUser = checkWaitingForUser(agentDir, logMtime);
+    const waiting = checkWaitingForUser(agentDir, logMtime);
+    const waitingForUser = waiting && claudeWaiting(waiting);
     // Attached after persistAgent so it stays response-only.
     for (const agent of agents) {
       const usage = byAgentId[agent.agentId]?.usage;
