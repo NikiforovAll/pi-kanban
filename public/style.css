@@ -7056,6 +7056,12 @@ body.light .msg-assistant .msg-text {
   background: #fff;
 }
 
+/* The card base paints the body with --color-bg, which is --bg-surface; a white frame would
+   show at the rounded corners. */
+.preview-html-frame.show-base {
+  background: var(--bg-surface);
+}
+
 .preview-fm {
   margin: 0 0 14px;
   border: 1px solid var(--border);

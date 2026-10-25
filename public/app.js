@@ -9041,7 +9041,9 @@ function renderHtmlPreview(bodyEl, content) {
   bodyEl.innerHTML = '';
   // After the document's end the parser still adds the script to <body>, and it runs after
   // the page's own scripts.
-  bodyEl.appendChild(createPreviewFrame('preview-html-frame themed-frame', themedSrcdoc(content)));
+  const frame = createPreviewFrame('preview-html-frame themed-frame', themedSrcdoc(content));
+  frame.classList.toggle('show-base', USES_SHOW_TOKENS_RE.test(content));
+  bodyEl.appendChild(frame);
 }
 
 function isAbsolutePath(p) {
