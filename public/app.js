@@ -13856,7 +13856,7 @@ async function addPaneToSession(sid, target) {
   const s = sessions.find((x) => x.id === sid);
   showToast(`${pathBasename(target)} added to ${s ? sessionDisplayName(s) : 'its session'}`, 'success', {
     label: 'Open',
-    onClick: () => openSession(sid),
+    onClick: () => showAddedPane(sid),
   });
 }
 
@@ -16100,13 +16100,6 @@ async function openShowInPane() {
   toastPaneAdded(sid, onScreen, 'Card');
 }
 
-// `onScreen` is postPane's result: null failed, true is already in view unless the terminal covers it.
-function revealPane(sid, onScreen) {
-  if (onScreen && !wantsTerminal()) syncPanes();
-  else if (sid === currentSessionId && wantsTerminal()) toggleTerminal();
-  else openSession(sid);
-}
-
 function showAddedPane(sid) {
   setTerminalMode(sid, false);
   if (sid !== paneSessionId()) return openSession(sid);
@@ -16116,7 +16109,7 @@ function showAddedPane(sid) {
 
 function toastPaneAdded(sid, onScreen, label) {
   if (onScreen === null || (onScreen && !wantsTerminal())) return;
-  showToast(`${label} added as a pane`, 'success', { label: 'Open', onClick: () => revealPane(sid, false) });
+  showToast(`${label} added as a pane`, 'success', { label: 'Open', onClick: () => showAddedPane(sid) });
 }
 
 function showCommand(cmd) {
