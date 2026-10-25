@@ -591,6 +591,12 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
     const res = await api(port, 'POST', '/api/companions/install', { origin: `http://localhost:${port}`, 'x-terminal-token': 'nope' });
     assert.equal(res.status, 401);
   });
+  it('starts a companion only with the token', async () => {
+    const start = '/api/companions/pi-subagents/start';
+    assert.equal((await api(port, 'POST', start, { origin: `http://localhost:${port}`, 'x-terminal-token': 'nope' })).status, 401);
+    const res = await api(port, 'POST', start, { origin: `http://localhost:${port}`, 'x-terminal-token': TOKEN });
+    assert.deepEqual([res.status, res.json.error], [404, 'unknown companion']);
+  });
   it('refuses an install of a package it does not know', async () => {
     const res = await api(port, 'POST', '/api/companions/install', { origin: `http://localhost:${port}`, 'x-terminal-token': TOKEN });
     assert.equal(res.status, 400);
@@ -1074,5 +1080,11 @@ describe('terminal endpoint when disabled', { skip: !ptyAvailable }, () => {
 
   it('refuses the handshake', async () => {
     assert.equal(await handshakeStatus(port, { origin: `http://localhost:${port}` }), 403);
+  });
+
+  it('refuses to start a companion, and says why', async () => {
+    const res = await api(port, 'POST', '/api/companions/pi-cost/start', { origin: `http://localhost:${port}`, 'x-terminal-token': 'x' });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.error, 'Companions need the board terminal, which is disabled');
   });
 });

@@ -7560,7 +7560,7 @@ const COMPANION_COLORS = {
 async function openCompanion(id, sid) {
   const c = companions.find((x) => x.id === id);
   if (!c?.scope) return showCompanions(id);
-  const started = await paneRequest('POST', apiPath`/api/companions/${id}/start`, { session: sid });
+  const started = await startCompanion(id, sid);
   if (started.error) return showToast(started.error, 'error');
   const onScreen = await postPane(sid, { target: started.url, title: c.pkg, companion: id });
   if (onScreen) syncPanes();
@@ -7568,8 +7568,12 @@ async function openCompanion(id, sid) {
 }
 
 // The tool stops with the board and can come back on another port, so each load starts it.
+function startCompanion(id, session) {
+  return paneRequest('POST', apiPath`/api/companions/${id}/start`, { session }, { 'X-Terminal-Token': terminalToken || '' });
+}
+
 async function companionPaneSrc(pane) {
-  const started = await paneRequest('POST', apiPath`/api/companions/${pane.companion}/start`, {});
+  const started = await startCompanion(pane.companion);
   if (started.error) return pane.target;
   const u = new URL(pane.target);
   u.port = String(started.port);
@@ -12802,9 +12806,9 @@ function refetchPaneLayout() {
   if (sid) fetchPaneLayout(sid);
 }
 
-async function paneRequest(method, path, body) {
+async function paneRequest(method, path, body, headers) {
   try {
-    const r = await api(path, { method, body });
+    const r = await api(path, { method, body, headers });
     const data = await r.json().catch(() => ({}));
     return r.ok ? data : { error: data.error || `${method} failed (${r.status})`, code: data.code };
   } catch {

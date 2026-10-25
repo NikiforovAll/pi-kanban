@@ -2295,7 +2295,11 @@ app.get('/api/companions', (req, res) => {
 const companionHost = createCompanionHost({ agentDir: PI_AGENT_DIR, dir: path.join(PK_DIR, 'companions') });
 process.on('exit', companionHost.stop);
 
+// Starting a companion runs package code, so it takes the terminal token like `pi install`.
 app.post('/api/companions/:id/start', async (req, res) => {
+  const reason = terminal.unavailableReason();
+  if (reason) return res.status(403).json({ error: `Companions need the board terminal, which is ${reason}` });
+  if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
   const entry = await companionHost.start(req.params.id);
   if (entry.error) return res.status(entry.status).json({ error: entry.error });
   const session = typeof req.body?.session === 'string' ? req.body.session : null;
