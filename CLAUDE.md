@@ -2,7 +2,7 @@
 
 ## Architecture
 
-pi-kanban is an agent development environment (ADE) for the [pi coding agent](https://pi.dev). The board runs pi sessions in a browser terminal and shows each session's todos, subagents, plan, and linked docs. It reads pi's session JSONL files from `~/.pi/agent/sessions/**/*.jsonl`. The pi tools it adds let the agent post cards, ask the user, add panes, and dispatch tasks to other sessions through the board.
+pi-kanban is an agent development environment (ADE) for the [pi coding agent](https://pi.dev). The board runs pi sessions in a browser terminal and shows each session's todos, subagents, and linked docs. It reads pi's session JSONL files from `~/.pi/agent/sessions/**/*.jsonl`. The pi tools it adds let the agent post cards, ask the user, add panes, and dispatch tasks to other sessions through the board.
 
 ### Runtime pieces
 
@@ -17,7 +17,7 @@ pi-kanban is an agent development environment (ADE) for the [pi coding agent](ht
 ### pi tools (`extensions/tools/`)
 
 - **`board-api.ts`** — finds the board (`PK_URL`, then the `server.json` beacon, then port 3460), wraps fetch, and loads the board's CommonJS `lib/` modules. A down board raises `BoardDownError`.
-- **`panes.ts`** — `pane_add`, `pane_rm`, `pane_list`, `link_doc`, `unlink_doc`, `preview_doc`, `bind_plan`.
+- **`panes.ts`** — `pane_add`, `pane_rm`, `pane_list`, `link_doc`, `unlink_doc`, `preview_doc`, `companion_open`.
 - **`show-ask.ts`** — `show` posts a card file: an overlay in the board terminal, else a pane tab. `ask` opens a modal and long-polls for the answer, with a pi TUI fallback when the board is down.
 - **`dispatch.ts`** — `dispatch_start`, `dispatch_list`, `dispatch_wait`, `dispatch_end`, and the worker's `dispatch_report`.
 - **`inbox.ts`** — long-polls `/api/sessions/:id/events` and delivers board messages (review comments, card answers, task moves) to pi as user messages. The ack rides on the next poll.
@@ -36,7 +36,7 @@ pi stores sessions as JSONL files under `~/.pi/agent/sessions/<encoded-cwd>/<tim
 - All state lives in module-scope `let`s in `app.js`; localStorage persists user prefs (`theme`, `sidebar-collapsed`, `sidebar-width`, etc.).
 - `app.js` is organized by `//#region NAME` / `//#endregion` blocks (folded by VS Code). When editing, place new code in the matching region; when adding new functionality that doesn't fit any existing region, add a new region rather than appending to the bottom. Grep `^//#region` to list them.
 
-  Current regions, in order: `STATE`, `DOM`, `DATA_FETCHING`, `SEARCH`, `SESSION_ACTIVITY`, `TIMINGS`, `AGENT_FETCHING`, `MESSAGE_PANEL`, `PINNING`, `MODALS`, `TOAST`, `TOOL_RENDERING`, `FINDINGS`, `AGENTS`, `RENDERING`, `KANBAN`, `DRAG_DROP`, `SESSION_GROUPS`, `SESSION_GROUPS_RENAME`, `SESSION_GROUPS_DND`, `SESSION_GROUPS_MENU`, `KEYBOARD_NAV`, `TASK_DETAIL`, `HELP`, `SCRATCHPAD`, `STORAGE_MANAGER`, `KEYBOARD_SHORTCUTS`, `REVIEW`, `MARKDOWN_PREVIEW`, `SSE`, `CONTEXT_WINDOW`, `UTILS`, `FILTERS`, `EVENT_DELEGATION`, `THEME`, `SIDEBAR_LAYOUT`, `SESSION_INFO`, `SESSION_PICKER`, `PROJECT_PICKER`, `PLAN`, `TOOL_STATS_MODAL`, `PANES`, `TERMINAL`, `ASK`, `SHOW`, `NEW_SESSION`, `PWA`, `INIT`, `LINKS`.
+  Current regions, in order: `STATE`, `DOM`, `DATA_FETCHING`, `SEARCH`, `SESSION_ACTIVITY`, `TIMINGS`, `AGENT_FETCHING`, `MESSAGE_PANEL`, `PINNING`, `MODALS`, `TOAST`, `TOOL_RENDERING`, `FINDINGS`, `AGENTS`, `RENDERING`, `KANBAN`, `DRAG_DROP`, `SESSION_GROUPS`, `SESSION_GROUPS_RENAME`, `SESSION_GROUPS_DND`, `SESSION_GROUPS_MENU`, `KEYBOARD_NAV`, `TASK_DETAIL`, `HELP`, `SCRATCHPAD`, `STORAGE_MANAGER`, `KEYBOARD_SHORTCUTS`, `REVIEW`, `MARKDOWN_PREVIEW`, `SSE`, `CONTEXT_WINDOW`, `UTILS`, `FILTERS`, `EVENT_DELEGATION`, `THEME`, `SIDEBAR_LAYOUT`, `SESSION_INFO`, `SESSION_PICKER`, `PROJECT_PICKER`, `TOOL_STATS_MODAL`, `PANES`, `TERMINAL`, `ASK`, `SHOW`, `NEW_SESSION`, `PWA`, `INIT`, `LINKS`.
 
 ### Adding endpoints
 
