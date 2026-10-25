@@ -394,7 +394,6 @@ describe('board session list request', () => {
       console: { error() {} },
       JSON,
       currentSessionId: 'focus',
-      revealedPlanSessionId: null,
       revealedStorageSessionId: null,
       openedStickyIds: new Set(['opened']),
       filterProject: '/p',

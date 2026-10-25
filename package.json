@@ -1,7 +1,7 @@
 {
   "name": "pi-kanban",
   "version": "0.0.0-dev",
-  "description": "Agent development environment for the pi coding agent: run pi in a browser terminal next to its todos, subagents, plans, and docs.",
+  "description": "Agent development environment for the pi coding agent: run pi in a browser terminal next to its todos, subagents, and docs.",
   "main": "server.js",
   "bin": {
     "pi-kanban": "./server.js"

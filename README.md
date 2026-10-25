@@ -8,7 +8,7 @@ Agent PI - Agent Development Environment (ADE) for the [pi coding agent](https:/
 
 ## What it is
 
-pi-kanban runs pi sessions in a browser terminal and shows each session next to its work: todos as kanban columns, subagents, the plan, linked docs, and the full session log. The pi tools it adds let the agent show you cards, ask you questions, open files and pages as tabs, and hand tasks to new pi sessions.
+pi-kanban runs pi sessions in a browser terminal and shows each session next to its work: todos as kanban columns, subagents, linked docs, and the full session log. The pi tools it adds let the agent show you cards, ask you questions, open files and pages as tabs, and hand tasks to new pi sessions.
 
 - **Documentation:** https://nikiforovall.blog/pi-kanban/
 - **Live demo:** https://nikiforovall.blog/pi-kanban/demo/ (sample sessions, runs in your browser, no install)
@@ -36,7 +36,7 @@ When pi runs in another terminal, run `/kanban open` in pi to open the board wit
 
 ## The board
 
-- **Sidebar.** Sessions in groups and projects, with progress, pins, linked docs, and icons for a plan, a terminal, a dispatched session, or a question that waits for you.
+- **Sidebar.** Sessions in groups and projects, with progress, pins, linked docs, and icons for a terminal, a dispatched session, or a question that waits for you.
 - **Terminal.** pi runs next to its board. The terminal keeps running when you close the browser tab.
 - **Board.** Pending, In Progress, and Completed columns for the selected session. Tabs next to it hold panes and show cards.
 - **New session.** Pick a folder or project, and set a name, a first prompt, the model, and the thinking level.
@@ -56,7 +56,6 @@ Press `?` on the board for the keyboard shortcuts.
 | `pane_add`, `pane_rm`, `pane_list` | Add a URL or a local file as a tab next to the board |
 | `companion_open` | Open pi-cost or pi-inspect for the session as a tab next to the board |
 | `link_doc`, `unlink_doc`, `preview_doc` | Link a file or URL to the session, or open it in the preview |
-| `bind_plan` | Bind a markdown plan to the session |
 
 Each session also gets a scratchpad folder, given to pi in the system prompt and in `$PI_SCRATCHPAD_DIR`. The `pi-kanban` command talks to a running board too: run `pi-kanban help`.
 

@@ -172,22 +172,4 @@ export function registerPaneTools(pi: ExtensionAPI) {
 			return text(await previewDoc(target, isUrl(target) ? sessionIdOf(ctx) : null));
 		},
 	});
-
-	pi.registerTool({
-		name: "bind_plan",
-		label: "Bind Plan",
-		description:
-			"Bind a markdown plan file to this session, so the pi-kanban board shows a plan icon on the session card and renders the plan. A session has one plan; a new bind replaces it.",
-		promptSnippet: "Bind a markdown plan file to the current session; call after writing the plan file",
-		promptGuidelines: ["Use bind_plan once a planning markdown file exists so it surfaces in pi-kanban."],
-		parameters: Type.Object({
-			path: Type.String({ description: "Path to the plan markdown file. Absolute, or relative to the session cwd." }),
-		}),
-		annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const sessionId = sessionIdOf(ctx);
-			const out = await postBoardJson(`/api/sessions/${encodeURIComponent(sessionId)}/plan`, { path: resolveTarget(ctx.cwd, params.path) });
-			return text(out.title ? `Bound plan "${out.title}": ${out.path}` : `Bound plan: ${out.path}`);
-		},
-	});
 }

@@ -59,7 +59,7 @@ function makePage() {
   vm.runInNewContext(
     [
       'var viewMode = "none", currentSessionId = null, currentTasks = [], agentLogMode = false;',
-      'var revealedPlanSessionId = null, revealedStorageSessionId = null;',
+      'var revealedStorageSessionId = null;',
       'var currentPins, ownerFilter = "", sessionJustSelected = false;',
       'var messagePanelOpen = true, currentMessages = [], logLoading = null;',
       ...['lastCurrentTasksHash', 'taskFetchSeq', 'switchSeq', 'taskRetry'].map(decl),

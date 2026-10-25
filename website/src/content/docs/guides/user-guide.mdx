@@ -6,7 +6,7 @@ description: Start the board, run pi in it, and use the /kanban command, the pi 
 import Shot from '../../../kit/Shot.astro';
 import Lightbox from '../../../kit/Lightbox.astro';
 
-This guide covers the board, the terminal, and the tools pi gets from pi-kanban. For installation, see [Getting started](../../getting-started/). For plans and other packages, see [Extensibility](../extensibility/).
+This guide covers the board, the terminal, and the tools pi gets from pi-kanban. For installation, see [Getting started](../../getting-started/). For skills, scripts, and other packages, see [Extensibility](../extensibility/).
 
 ## Start the board
 
@@ -49,7 +49,7 @@ Run these inside pi. The session commands use the current session when you leave
 
 <Shot themed="board" alt="The board with the session sidebar, todo columns, document tabs, and the agents log" eager />
 
-- **Sidebar.** Sessions in groups and projects. Each card shows progress, age, pins, linked docs, and icons for a plan, a terminal, a dispatched session, or a question that waits for you. The pills at the top count the sessions that wait, the active sessions, and the open terminals.
+- **Sidebar.** Sessions in groups and projects. Each card shows progress, age, pins, linked docs, and icons for a terminal, a dispatched session, or a question that waits for you. The pills at the top count the sessions that wait, the active sessions, and the open terminals.
 - **Board.** Pending, In Progress, and Completed columns for the selected session, from `@juicesharp/rpiv-todo`. Tabs next to **Board** hold panes and show cards.
 - **Agents log.** The subagents of the session, with model, status, and run time.
 - **Session log.** Every prompt, reply, and tool call. `Ctrl+Shift+L` opens it.
@@ -96,7 +96,7 @@ Dispatch hands a task to a new pi session in the board terminal:
 
 The board holds the report, so the parent gets it even when the worker's terminal has ended. Dispatch needs the board terminal.
 
-## Panes, docs, and plans
+## Panes and docs
 
 | Tool | What it does |
 | --- | --- |
@@ -104,7 +104,6 @@ The board holds the report, so the parent gets it even when the worker's termina
 | `companion_open` | Open pi-cost or pi-inspect for the session as a tab next to the board |
 | `link_doc`, `unlink_doc` | Link a file or URL to the session. Linked docs show on the session card and in session info. |
 | `preview_doc` | Open a file in the preview modal now |
-| `bind_plan` | Bind a markdown plan to the session. `P` opens it. |
 
 ## Scratchpad
 
@@ -122,9 +121,9 @@ When `pi-subagents` starts a child session, the board lists it in the agents log
 
 ## Session info
 
-Press `I` or click the info icon on a session card. It shows the session id, plan, project, paths, scratchpad, token use, and linked documents, each with a copy button.
+Press `I` or click the info icon on a session card. It shows the session id, project, paths, scratchpad, token use, and linked documents, each with a copy button.
 
-<Shot themed="session-info" alt="Session info modal with session id, plan, paths, token use, and linked documents" />
+<Shot themed="session-info" alt="Session info modal with session id, paths, token use, and linked documents" />
 
 ## Command line
 
@@ -155,7 +154,6 @@ Press `?` on the board for the full list. Common ones:
 - ``Ctrl+` `` — show or hide the terminal
 - `Ctrl+Shift+L` — toggle the session log
 - `I` — session info
-- `P` — open the plan
 - `T` — switch between light and dark
 - `Shift+S` — storage manager
 - `Esc` — close a panel

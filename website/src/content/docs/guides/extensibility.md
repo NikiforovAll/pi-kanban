@@ -1,41 +1,27 @@
 ---
 title: Extensibility
-description: Attach plans with bind_plan, drive the board from skills and scripts, and let other pi packages feed it.
+description: Open plans in panes, drive the board from skills and scripts, and let other pi packages feed it.
 ---
 
 pi-kanban gives you mechanism, not policy. Bring your own planning flow, skills, and scripts. The board has these entry points:
 
-- The pi tools: `bind_plan`, `show`, `ask`, `pane_add`, `link_doc`, `preview_doc`, and the `dispatch_*` tools.
+- The pi tools: `show`, `ask`, `pane_add`, `link_doc`, `preview_doc`, and the `dispatch_*` tools.
 - The `pi-kanban` command line, which talks to a running board.
 - The session files. Anything pi writes to `~/.pi/agent/sessions` shows on the board.
 
-## `bind_plan` tool
+## Plans
 
-| Field | Value |
-| --- | --- |
-| Name | `bind_plan` |
-| Parameters | `path: string`, absolute or relative to the session cwd |
-| Effect | Posts `{ path }` to `/api/sessions/<id>/plan`. The session card shows a plan icon, and `P` opens the plan. |
+A plan is a markdown file like any other. Have the agent open it with `pane_add`: it shows as a tab next to the board, refreshes on each save, and takes review comments that reach pi as a user message. pi-kanban does not care where the file comes from: a planning skill, a prompt template, a hand-edited `plan.md`, or an exported ticket.
 
-A session has one plan. A new bind replaces it. pi-kanban does not care where the file comes from: a planning skill, a prompt template, a hand-edited `plan.md`, or an exported ticket.
-
-### Wire it into your workflow
-
-Tell the agent when to call `bind_plan` in `AGENTS.md`, a prompt template, or a skill. For example:
+Tell the agent when to do this in `AGENTS.md`, a prompt template, or a skill. For example:
 
 ```md
 ## Planning
 
-When you write a plan markdown file, call `bind_plan` with its path so it shows in pi-kanban.
+When you write a plan markdown file, call `pane_add` with its path so it shows in pi-kanban.
 ```
 
-Flows that work with `bind_plan`:
-
-- **A planning skill writes `./plan.md`.** The skill tells the agent to call `bind_plan` when it is done.
-- **Plan folders per task**, for example `_plans/<slug>.md`. The tool that writes them tells the agent to bind the latest one.
-- **By hand.** You write a plan and ask the agent to bind it.
-
-pi-kanban does not ship a planning extension. Pick or build one that fits your style and have it call `bind_plan` at the end.
+pi-kanban does not ship a planning extension. Pick or build one that fits your style and have it call `pane_add` at the end.
 
 ## Cards and panes
 

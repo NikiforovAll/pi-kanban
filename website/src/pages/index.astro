@@ -51,9 +51,9 @@ const watch = [
   },
   {
     title: 'Find the session behind the work',
-    body: 'Session info shows the id, plan, project, path, tasks folder, and scratchpad, each with a copy button, plus token use and linked documents. [I] opens it for the selected session.',
+    body: 'Session info shows the id, project, path, tasks folder, and scratchpad, each with a copy button, plus token use and linked documents. [I] opens it for the selected session.',
     shot: 'session-info',
-    alt: 'Session info modal with session id, plan, paths, token use, and linked documents',
+    alt: 'Session info modal with session id, paths, token use, and linked documents',
   },
   {
     title: 'Keep your hands on the keyboard',
@@ -69,7 +69,6 @@ const tools = [
   { name: 'dispatch_start, dispatch_wait, dispatch_report', body: 'Start a worker session, wait for its report, send a report back. dispatch_list and dispatch_end list and end workers.' },
   { name: 'pane_add, pane_rm, pane_list', body: 'Add a URL or a local file as a tab next to the board, without switching to it.' },
   { name: 'link_doc, unlink_doc, preview_doc', body: 'Link files and URLs to the session, or open a file in the preview modal now.' },
-  { name: 'bind_plan', body: 'Binds a markdown plan to the session. The card shows a plan icon and [P] opens it.' },
 ];
 
 const setup = [
@@ -87,7 +86,7 @@ const companions = [
 
 <SiteLayout
   title="pi-kanban: an agent development environment for pi"
-  description="Run pi coding agent sessions in the browser next to their todos, subagents, plans, and docs. The agent can show you cards, ask you questions, and hand work to other sessions."
+  description="Run pi coding agent sessions in the browser next to their todos, subagents, and docs. The agent can show you cards, ask you questions, and hand work to other sessions."
   image="og.png"
 >
   <div class="page">
@@ -105,7 +104,7 @@ const companions = [
       <section class="hero">
         <h1>An agent development environment for pi.</h1>
         <p class="lede">
-          pi-kanban runs your pi sessions in a browser terminal, next to their todos, subagents, plans, and docs. The
+          pi-kanban runs your pi sessions in a browser terminal, next to their todos, subagents, and docs. The
           agent can show you a card, ask you a question, open a file beside the board, or hand a task to another session.
           It all runs on your machine.
         </p>

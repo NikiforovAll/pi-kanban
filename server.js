@@ -59,7 +59,7 @@ const { createModelCache, listPiModels } = require('./lib/pi-models');
 const { createWorktreeStore } = require('./lib/worktrees');
 const { createScratchpadDirResolver, defaultScratchpadRoot } = require('./lib/scratchpad-dir');
 const { readGitBranch, sessionGitBranch } = require('./lib/git-branch');
-const { createLinkedDocStore, canonicalPath, linkUrl } = require('./lib/linked-docs');
+const { createLinkedDocStore, linkUrl } = require('./lib/linked-docs');
 const { createPaneStore, isOwnOrigin } = require('./lib/panes');
 const { probeFraming, parseOrigin } = require('./lib/frame-policy');
 const { pickFolder } = require('./lib/folder-dialog');
@@ -108,7 +108,6 @@ const USER_GROUPS_FILE = path.join(PK_DIR, 'groups.json');
 const DISPATCHED_FILE = path.join(PK_DIR, 'dispatched.json');
 const WORKTREES_FILE = path.join(PK_DIR, 'worktrees.json');
 const LINKED_DOCS_FILE = path.join(PK_DIR, 'linked-docs.json');
-const PLANS_FILE = path.join(PK_DIR, 'plans.json');
 const PANES_FILE = path.join(PK_DIR, 'panes.json');
 const SERVER_INFO_FILE = path.join(PK_DIR, 'server.json');
 const TERMINAL_TOKENS_DIR = path.join(PK_DIR, 'terminal-tokens');
@@ -748,27 +747,6 @@ function loadSessionMetadata() {
   return metadata;
 }
 
-const plans = createLinkedDocStore({ ...jsonFile(PLANS_FILE), max: 1 });
-const planPaths = () => Object.values(plans.all()).flat();
-const planTitles = new Map();
-
-function readPlanTitle(planPath) {
-  try {
-    const match = readFileSync(planPath, 'utf8').slice(0, 512).match(/^#\s+(.+)$/m);
-    return { title: match ? match[1].trim() : null };
-  } catch {
-    return { title: null };
-  }
-}
-
-// Every session list build asks for each session, so the title is read once per file change.
-function getPlanInfo(sessionId) {
-  const [planPath] = plans.get(sessionId);
-  const head = planPath && cachedByFileStat(planTitles, planPath, () => readPlanTitle(planPath));
-  if (!head) return { hasPlan: false, planTitle: null, planPath: null };
-  return { hasPlan: true, planTitle: head.title, planPath };
-}
-
 function getSessionDisplayName(meta) {
   return meta?.customTitle || meta?.title || null;
 }
@@ -812,7 +790,6 @@ function buildSessionObject(id, meta, overrides = {}) {
     projectDir: meta.jsonlPath ? path.dirname(meta.jsonlPath) : null,
     scratchpadDir: getScratchpadDir(id, meta),
     ...getContextFields(meta),
-    ...getPlanInfo(id),
     ...overrides,
     // Remove internal-only field
     _logStat: undefined,
@@ -1216,43 +1193,6 @@ app.get('/api/projects/:encodedPath/tasks', async (req, res) => {
   }
 });
 
-// API: Get session plan
-app.get('/api/sessions/:sessionId/plan', async (req, res) => {
-  try {
-    // Most sessions have no saved plan, and the info modal asks for one every time it
-    // opens, so "no plan" is a normal answer rather than a 404 in the console.
-    const { planPath } = getPlanInfo(req.params.sessionId);
-    if (!planPath) return res.json({ content: null });
-
-    const content = await fs.readFile(planPath, 'utf8');
-    res.json({ content, path: planPath });
-  } catch (error) {
-    console.error('Error reading plan:', error);
-    res.status(500).json({ error: 'Failed to read plan' });
-  }
-});
-
-// The pi `bind_plan` tool. A session has one plan; binding another replaces it.
-app.post('/api/sessions/:sessionId/plan', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const raw = req.body?.path;
-    if (linkUrl(raw)) throw previewError(400, 'A plan is a local markdown file, not a URL', 'bad_target');
-    const abs = realpathDeepest(resolveFileTarget(raw));
-    await statFileTarget(abs);
-    const [old] = plans.get(sessionId);
-    plans.link(sessionId, abs);
-    plansWatcher.add(abs);
-    const oldLong = old && realpathDeepest(old);
-    if (oldLong && !planPaths().some((p) => canonicalPath(realpathDeepest(p)) === canonicalPath(oldLong))) plansWatcher.unwatch(oldLong);
-    broadcast({ type: 'metadata-update' });
-    res.json({ path: abs, title: getPlanInfo(sessionId).planTitle });
-  } catch (error) {
-    if (!error.status) console.error('Error binding plan:', error);
-    res.status(error.status || 500).json({ error: error.message || 'Failed to bind plan', code: error.code });
-  }
-});
-
 // Memo for a cold read keyed on the file's identity, so a repeat ask costs the one stat
 // it already pays to notice the file grew. `load` may return a promise: the promise is
 // what gets cached, so concurrent callers share a single read, and a file that grows while
@@ -1415,20 +1355,6 @@ app.get('/api/sessions/:sessionId/scratchpad-files', async (req, res) => {
   } catch (error) {
     console.error('Error listing scratchpad files:', error);
     res.status(500).json({ error: 'Failed to list scratchpad files' });
-  }
-});
-
-// API: Open session plan in VS Code
-app.post('/api/sessions/:sessionId/plan/open', (req, res) => {
-  try {
-    const { planPath } = getPlanInfo(req.params.sessionId);
-    if (!planPath) return res.status(404).json({ error: 'No plan found' });
-
-    openInEditor([planPath]);
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error opening plan in editor:', error);
-    res.status(500).json({ error: 'Failed to open plan' });
   }
 });
 
@@ -2751,7 +2677,7 @@ function resolvePreviewPath(rawPath, base) {
   return dropUrlFragment(path.resolve(filePath));
 }
 
-// A file a pane or a plan names: the board's cwd means nothing to the caller, so a relative path needs a base.
+// A file a pane names: the board's cwd means nothing to the caller, so a relative path needs a base.
 function resolveFileTarget(raw, base) {
   const hasBase = typeof base === 'string' && path.isAbsolute(base);
   if (typeof raw !== 'string' || (!hasBase && !path.isAbsolute(fileUrlToPath(raw)))) {
@@ -3478,23 +3404,6 @@ function watchSessionRoots() {
   }
 }
 watchSessionRoots();
-
-// libuv aborts the process when a directory it watches on Windows is named in 8.3 short form
-// (src/win/fs-event.c asserts that the changed file's name starts with the watched dir), and
-// chokidar watches the parent dir of a plan file that is gone. Plans saved by older boards can
-// name short paths, so the watcher gets only long ones.
-const plansWatcher = chokidar.watch(planPaths().map(realpathDeepest), {
-  persistent: true,
-  ignoreInitial: true,
-});
-
-plansWatcher.on('all', (event) => {
-  // Plan files don't affect cached session metadata — getPlanInfo is called
-  // fresh from buildSessionObject on every list build. The broadcast alone
-  // is enough to trigger a client refetch.
-  broadcast({ type: 'metadata-update' });
-  if (event === 'change') broadcast({ type: 'plan-update' });
-});
 
 // Watch agent-activity directory for subagent lifecycle events
 const agentActivityWatcher = chokidar.watch(AGENT_ACTIVITY_DIR, {

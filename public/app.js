@@ -1664,21 +1664,8 @@ function toggleToolGroup(id) {
   if (el) el.classList.toggle('show');
 }
 
-// Legacy markers (written before the gate minted kind:"plan") carry no kind
-// for plans — the tool name is the durable signal there.
-function isPlanAsk(kind, tool) {
-  return kind === 'plan' || tool === 'ExitPlanMode';
-}
-
-function getWaitingPill(kind, tool) {
-  if (isPlanAsk(kind, tool)) return 'Plan awaiting approval';
-  if (kind === 'question') return 'Question pending';
-  return 'Awaiting permission';
-}
-
 function getWaitingLabel(kind, tool) {
-  const pill = getWaitingPill(kind, tool);
-  return pill === 'Awaiting permission' ? `${pill}: ${tool}` : pill;
+  return kind === 'question' ? 'Question pending' : `Awaiting permission: ${tool}`;
 }
 
 function deriveWaitingDetail(tool, params) {
@@ -1694,10 +1681,6 @@ function deriveWaitingDetail(tool, params) {
     return trunc(s);
   }
   if (tool === 'AskUserQuestion' && params.questions?.[0]?.question) return trunc(params.questions[0].question);
-  if (tool === 'ExitPlanMode' && typeof params.plan === 'string') {
-    const t = params.plan.match(/^#\s+(.+)/m);
-    return trunc(t ? t[1] : params.plan);
-  }
   if (params.description) return trunc(String(params.description));
   return '';
 }
@@ -1724,8 +1707,6 @@ function renderWaitingBody(tool, params) {
   return renderToolParamsHtml(params);
 }
 
-const PLAN_REJECT_MSG = 'Plan rejected from the kanban board.';
-
 // Answerable only when the marker carries a request id (written by
 // the plugin's mod, which is polling for a decision) and the gate hasn't
 // lapsed past its wait window — older or lapsed markers are only answerable
@@ -1742,55 +1723,31 @@ function parseWaitingInput() {
   }
 }
 
-// One source for the decision-button pair on every surface — Approve/Reject
-// for plans, Allow/Deny for permissions; only the css class prefix differs.
+// One source for the Allow/Deny pair on every surface; only the css class prefix differs.
 // Questions return '' (answered via the form in the detail modal).
 function waitingDecisionButtons(cls) {
   if (!isWaitingAnswerable() || currentWaiting.kind === 'question') return '';
-  const plan = currentWaiting.kind === 'plan';
-  // Code-authored call argument, not data — hence the constant-style name the
-  // escaping check reads as safe.
-  const DENY_ARG = plan ? "rejectWaitingPlan('inline-plan-feedback')" : "respondWaiting({behavior:'deny'})";
-  const feedback = plan
-    ? `<input id="inline-plan-feedback" class="msg-waiting-feedback" type="text" placeholder="feedback for reject (optional)…" value="${escapeHtml(inlinePlanFeedback)}" oninput="inlinePlanFeedback=this.value" onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">`
-    : '';
-  return `${feedback}<button class="${escapeHtml(cls)}-allow" onclick="event.stopPropagation();respondWaiting({behavior:'allow'})">${plan ? 'Approve' : 'Allow'}</button><button class="${escapeHtml(cls)}-deny" onclick="event.stopPropagation();${DENY_ARG}">${plan ? 'Reject' : 'Deny'}</button>`;
+  return `<button class="${escapeHtml(cls)}-allow" onclick="event.stopPropagation();respondWaiting({behavior:'allow'})">Allow</button><button class="${escapeHtml(cls)}-deny" onclick="event.stopPropagation();respondWaiting({behavior:'deny'})">Deny</button>`;
 }
-
-let inlinePlanFeedback = '';
 
 function renderWaitingEntry() {
   if (!isWaitingFresh()) return '';
   const tool = currentWaiting.toolName || 'unknown';
   const params = parseWaitingInput();
-  const plan = isPlanAsk(currentWaiting.kind, tool);
   const detail = deriveWaitingDetail(tool, params);
   const detailHtml = detail ? ` <span style="color:var(--text-secondary)">${escapeHtml(detail)}</span>` : '';
   const bodyHtml = renderWaitingBody(tool, params);
   const bodyWrap = bodyHtml ? `<div class="msg-waiting-body">${bodyHtml}</div>` : '';
   const discardBtn = `<button class="msg-waiting-discard" title="Discard permission prompt" onclick="event.stopPropagation();discardWaiting()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
-  // Questions are answered in the detail modal; plans render there too.
+  // Questions are answered in the detail modal.
   const buttons = waitingDecisionButtons('msg-waiting');
   const actions = buttons ? `<span class="msg-waiting-actions">${buttons}</span>` : '';
   // Lapsed = gate stopped polling — the ask is only answerable in the terminal
   const lapsed = !!currentWaiting.lapsed;
-  const keyHint = lapsed ? 'answer in the terminal' : buttons ? `${sendKbd()} ${plan ? 'approve' : 'allow'}` : '';
+  const keyHint = lapsed ? 'answer in the terminal' : buttons ? `${sendKbd()} allow` : '';
   const hintHtml = keyHint ? `<div class="msg-time waiting-key-hint-line">${keyHint}</div>` : '';
   const footer = hintHtml || actions ? `<div class="msg-waiting-footer">${hintHtml}${actions}</div>` : '';
-  return `<div class="msg-item msg-waiting${plan ? ' msg-waiting-plan' : ''}" onclick="msgDetailFollowLatest=false;showWaitingDetail()">${getToolIcon(tool)}<div class="msg-body"><div class="msg-text"><span style="font-weight:600">${escapeHtml(tool)}</span>${detailHtml}</div>${bodyWrap}${footer}</div>${discardBtn}</div>`;
-}
-
-// Shared approval controls for a fresh plan ask — the waiting-detail footer and
-// the saved-plan modal offer the same decision, so they render the same row.
-// Distinct input ids keep the two surfaces from shadowing each other's feedback.
-function planApprovalControlsHtml(inputId) {
-  return `<input id="${escapeHtml(inputId)}" class="waiting-option-input" type="text" placeholder="feedback for reject (optional)…"><button class="waiting-btn-allow" onclick="respondWaiting({behavior:'allow'})">Approve</button><button class="waiting-btn-deny" onclick="rejectWaitingPlan('${escAttrJs(inputId)}')">Reject</button>`;
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML onclick
-function rejectWaitingPlan(inputId) {
-  const feedback = document.getElementById(inputId)?.value?.trim();
-  respondWaiting({ behavior: 'deny', message: feedback || PLAN_REJECT_MSG });
+  return `<div class="msg-item msg-waiting" onclick="msgDetailFollowLatest=false;showWaitingDetail()">${getToolIcon(tool)}<div class="msg-body"><div class="msg-text"><span style="font-weight:600">${escapeHtml(tool)}</span>${detailHtml}</div>${bodyWrap}${footer}</div>${discardBtn}</div>`;
 }
 
 // UI-driven approvals: POST the decision the plugin's mod is polling for.
@@ -1826,7 +1783,6 @@ async function respondWaiting(payload) {
 // Drop the answered/discarded ask from every surface it renders on
 function clearWaitingUi() {
   currentWaiting = null;
-  inlinePlanFeedback = '';
   waitingAnswerDraft = {};
   waitingCustomDraft = {};
   if (currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX) {
@@ -1839,8 +1795,6 @@ function clearWaitingUi() {
       closeMsgDetailModal();
     }
   }
-  // The saved-plan modal stays open after a decision — only its approval row goes
-  document.getElementById('plan-approval-footer')?.remove();
   renderMessages(currentMessages);
   renderAgentFooter();
 }
@@ -1920,8 +1874,6 @@ const ICON_COPY =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const ICON_CHECKMARK =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M20 6L9 17l-5-5"/></svg>';
-const ICON_PLAN =
-  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
 const ICON_AGENT_WAITING =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
 const ICON_AGENT_ACTIVE =
@@ -1953,7 +1905,6 @@ const TOOL_ICONS = {
   ToolSearch:
     '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
   AskUserQuestion: ICON_CHAT,
-  ExitPlanMode: ICON_CHAT,
   Skill:
     '<svg class="msg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
   WebFetch: ICON_WEB,
@@ -3118,7 +3069,7 @@ function renderFindingsReport(params, toolResult) {
 
 function renderToolParamsHtml(params) {
   if (!params) return '';
-  const BLOCK_KEYS = new Set(['old_string', 'new_string', 'content', 'contentFull', 'plan']);
+  const BLOCK_KEYS = new Set(['old_string', 'new_string', 'content', 'contentFull']);
   const badges = [],
     blocks = [],
     jsonBlocks = [];
@@ -3215,12 +3166,6 @@ function renderToolParamsHtml(params) {
           <div class="tool-detail-label">content${writeMoreBtn}</div>
           <pre class="${TINTED_PRE_CLASS} tool-detail-pre-scroll">${truncHtml}</pre>
           ${fullBlock}
-        </div>`;
-  }
-  if (params.plan) {
-    html += `<div class="tool-detail-section">
-          <div class="tool-detail-label" style="margin-bottom:4px">Plan</div>
-          <div class="markdown-body">${renderMarkdown(params.plan)}</div>
         </div>`;
   }
   return html;
@@ -3572,7 +3517,7 @@ function renderAgentFooter() {
   label.textContent = `Agents Log (${visible.length})`;
 
   const permHtml = permFresh
-    ? `<button type="button" class="permission-badge" onclick="showWaitingDetail()">${currentWaiting.kind === 'question' ? '❓ Question pending' : currentWaiting.kind === 'plan' ? '📋 Plan pending' : `⏳ Awaiting: ${escapeHtml(currentWaiting.toolName || 'unknown')}`}</button>`
+    ? `<button type="button" class="permission-badge" onclick="showWaitingDetail()">${currentWaiting.kind === 'question' ? '❓ Question pending' : `⏳ Awaiting: ${escapeHtml(currentWaiting.toolName || 'unknown')}`}</button>`
     : '';
 
   content.innerHTML =
@@ -4068,7 +4013,6 @@ function renderSessions() {
                 ${hasScratchpad ? `<span class="scratchpad-badge${padEmoji ? ' has-emoji' : ''}" onclick="event.stopPropagation(); openSessionScratchpad('${sid}')" title="Open scratchpad">${padEmoji ? escapeHtml(padEmoji) : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`}</span>` : ''}
                 ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${sid}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}">${BOOKMARK_SVG}${bookmarksCount}</span>` : ''}
                 ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
-                ${session.hasPlan ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${sid}')" title="View plan">${ICON_PLAN}</span>` : ''}
                 ${canOpenCost ? `<span class="cost-badge" onclick="event.stopPropagation(); openCompanion('pi-cost', '${escAttrJs(session.id)}')" title="Cost in pi-cost ($)">${ICON_COST}</span>` : ''}
                 ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
                 ${session.dispatched ? `<span class="dispatched-badge"${session.dispatched.parent ? ` onclick="event.stopPropagation(); revealSession('${escAttrJs(session.dispatched.parent)}')"` : ''} title="${escapeHtml(dispatchedTitle(session.dispatched))}">${ICON_DISPATCHED}</span>` : ''}
@@ -4780,7 +4724,7 @@ async function onColumnDrop(e) {
 // on a full Active list (sgSweepTransient).
 const SESSION_GROUPS_KEY = 'sessionGroups';
 const SG_ACTION_SELECTOR =
-  '.session-pin-btn, .team-info-btn, .plan-indicator, .scratchpad-badge, .bookmarks-badge, .linked-docs-badge, .project-view-btn, .project-new-btn, .header-pad-btn, .group-path-toggle, .pinned-ungroup-btn, .sg-action';
+  '.session-pin-btn, .team-info-btn, .scratchpad-badge, .bookmarks-badge, .linked-docs-badge, .project-view-btn, .project-new-btn, .header-pad-btn, .group-path-toggle, .pinned-ungroup-btn, .sg-action';
 
 // Collapse state shares the existing `collapsedGroups` key; this namespace keeps it from
 // colliding with a project path or the __ungrouped__ / __pinned_* sentinels.
@@ -6349,7 +6293,6 @@ const SHORTCUT_TABS = [
       {
         title: 'Session',
         rows: [
-          { keys: ['P'], label: 'Open plan' },
           { keys: ['Ctrl', 'Shift', 'P'], combo: true, label: 'Session picker' },
           { keys: ['Shift', 'P'], combo: true, label: 'Project picker (this board)' },
           { keys: ['I'], label: 'Session info' },
@@ -7720,7 +7663,6 @@ const MODAL_ESC_PRIORITY = [
   'preview-modal',
   'msg-detail-modal',
   'tool-stats-modal',
-  'plan-modal',
 ];
 const MODAL_CLOSERS = {
   'preview-modal': () => closePreviewModal(),
@@ -7729,7 +7671,6 @@ const MODAL_CLOSERS = {
     msgDetailFollowLatest = false;
   },
   'tool-stats-modal': () => closeToolStatsModal(),
-  'plan-modal': () => closePlanModal(),
   'team-modal': () => closeTeamModal(),
   'agent-modal': () => closeAgentModal(),
   'help-modal': () => closeHelpModal(),
@@ -8077,11 +8018,6 @@ document.addEventListener('keydown', (e) => {
 
   // Shared actions — work in both sidebar and board
   const contextSid = contextSessionId();
-  if (matchKey(e, 'KeyP')) {
-    e.preventDefault();
-    if (contextSid) openPlanForSession(contextSid);
-    return;
-  }
   if (matchKey(e, 'KeyI')) {
     e.preventDefault();
     if (contextSid) showSessionInfoModal(contextSid);
@@ -9378,13 +9314,8 @@ function refreshInfoModalLinkedDocs() {
   const wrap = document.createElement('div');
   wrap.innerHTML = renderLinkedDocsHtml(_infoModalSessionId);
   const node = wrap.firstElementChild;
-  if (existing) {
-    existing.replaceWith(node);
-  } else {
-    const planCard = bodyEl.querySelector('[data-plan-card]');
-    if (planCard?.nextSibling) planCard.parentNode.insertBefore(node, planCard.nextSibling);
-    else bodyEl.appendChild(node);
-  }
+  if (existing) existing.replaceWith(node);
+  else bodyEl.appendChild(node);
   bindLinkedDocsHandlers(node, _infoModalSessionId);
 }
 
@@ -10131,10 +10062,6 @@ function setupEventSource() {
         debouncedRefresh(data.sessionId, data.type === 'metadata-update');
       }
 
-      if (data.type === 'plan-update') {
-        if (!skipOffScreen()) refreshOpenPlan();
-      }
-
       if (data.type === 'terminals-update' && Array.isArray(data.ids))
         setRunningTerminals(data.ids, data.awaitingTrust);
 
@@ -10218,7 +10145,6 @@ function setupEventSource() {
       fetchTasks(currentSessionId).catch(() => {});
       await refreshSessionDetail(currentSessionId);
     }
-    refreshOpenPlan();
     renderAgentFooter();
   }
   document.addEventListener('visibilitychange', catchUp);
@@ -10495,9 +10421,6 @@ function waitingAnswerFor(q) {
 // The action buttons live in the modal's fixed footer (#msg-detail-waiting-footer),
 // not the scrollable body — long content must not push them out of reach.
 function renderWaitingFooter(tool, params) {
-  if (currentWaiting?.kind === 'plan') {
-    return isWaitingAnswerable() ? planApprovalControlsHtml('plan-reject-feedback') : '';
-  }
   if (currentWaiting?.kind !== 'question') {
     const buttons = waitingDecisionButtons('waiting-btn');
     const hint = `<span class="waiting-footer-hint">${sendKbd()} allow · ${termKbd()} terminal</span>`;
@@ -10679,11 +10602,7 @@ function showWaitingDetail() {
   unmountMsgReview();
   msgHighlightDimmed = false;
   highlightSelectedMsg();
-  // Follow-mode poll ticks re-run this whole render — carry any typed reject
-  // feedback across the rebuild, but never onto a different ask.
-  const sameAsk = currentWaiting.id === waitingDraftId;
-  const feedbackDraft = sameAsk ? document.getElementById('plan-reject-feedback')?.value || '' : '';
-  if (!sameAsk) {
+  if (currentWaiting.id !== waitingDraftId) {
     waitingDraftId = currentWaiting.id || null;
     waitingAnswerDraft = {};
     waitingCustomDraft = {};
@@ -10704,23 +10623,11 @@ function showWaitingDetail() {
   // JSON behind a toggle, but keep what the user is approving visible: for a
   // permission ask surface the command (or description) as a one-line summary
   if ((actionsHtml || footerHtml) && inputHtml) {
-    let summaryHtml = '';
-    if (currentWaiting.kind === 'plan' && typeof params?.plan === 'string' && params.plan) {
-      // A plan ask IS the plan — render it in full so it can be reviewed and
-      // approved right here (follow mode included) instead of a JSON dump. The
-      // raw tool input is dropped entirely to match the saved-plan modal.
-      inputHtml = `<div class="detail-desc rendered-md waiting-plan">${renderMarkdown(params.plan)}</div>`;
-    } else {
-      if (currentWaiting.kind !== 'question' && params) summaryHtml = renderPermissionSummary(tool, params);
-      inputHtml = `${summaryHtml}<details class="waiting-raw-input"><summary>Raw tool input</summary>${inputHtml}</details>`;
-    }
+    const summaryHtml = currentWaiting.kind !== 'question' && params ? renderPermissionSummary(tool, params) : '';
+    inputHtml = `${summaryHtml}<details class="waiting-raw-input"><summary>Raw tool input</summary>${inputHtml}</details>`;
   }
   body.innerHTML = inputHtml + actionsHtml;
   document.getElementById('msg-detail-waiting-footer').innerHTML = footerHtml;
-  if (feedbackDraft) {
-    const feedbackEl = document.getElementById('plan-reject-feedback');
-    if (feedbackEl) feedbackEl.value = feedbackDraft;
-  }
   document.getElementById('msg-detail-title').textContent = label;
   document.getElementById('msg-detail-agent-btn').style.display = 'none';
   const modal = document.getElementById('msg-detail-modal').querySelector('.modal');
@@ -11259,6 +11166,26 @@ function getOwnerColor(name) {
   const c = ownerColors[Math.abs(hash) % ownerColors.length];
   ownerColorCache[name] = c;
   return c;
+}
+
+function fmtTokens(t) {
+  return t >= 1000 ? `${(t / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${t}`;
+}
+
+function shortModelName(model) {
+  return model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : '';
+}
+
+function agentModel(agent) {
+  return agent.model || agent.modelAlias || '';
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openFolderInEditor(folder, file) {
+  const body = {};
+  if (folder) body.folder = folder;
+  if (file) body.file = file;
+  postAndToast('/api/open-folder', body, 'folder');
 }
 
 //#endregion
@@ -11898,32 +11825,24 @@ async function showSessionInfoModal(sessionId) {
   if (!session) return;
 
   // Open modal immediately with session metadata (cwd / path / branch are
-  // already in-memory). Plan and parent are fetched in the background
-  // and re-rendered when they arrive, so the modal doesn't block on network.
-  _planSessionId = sessionId;
-  showInfoModal(session, null, null);
+  // already in-memory). The parent is fetched in the background
+  // and re-rendered when it arrives, so the modal doesn't block on network.
+  showInfoModal(session, null);
   artifactsSection.load(sessionId);
   // The modal reaches any card's session, not just the open one, so this is the second
   // place a pad can first be seen. Linking belongs on the two open events rather than
   // in renderLinkedDocsHtml, which only builds a string and runs on every repaint.
   loadSessionPads(sessionId);
 
-  const planPromise = getJson(apiPath`/api/sessions/${sessionId}/plan`).then((data) => {
-    if (data?.content) _pendingPlanPath = data.path || null;
-    return data?.content || null;
-  });
+  const parentInfo = await getJson(apiPath`/api/sessions/${sessionId}/parent`);
+  if (!parentInfo?.parentSessionId) return;
 
-  const parentPromise = getJson(apiPath`/api/sessions/${sessionId}/parent`);
-
-  const [planContent, parentInfo] = await Promise.all([planPromise, parentPromise]);
-  if (_planSessionId !== sessionId) return; // user opened a different modal
+  if (_infoModalSessionId !== sessionId) return; // user opened a different modal
   if (!document.getElementById('team-modal')?.classList.contains('visible')) return; // user closed modal — don't reopen
-  showInfoModal(session, planContent, parentInfo);
+  showInfoModal(session, parentInfo);
 }
 
 let _infoModalSessionId = null;
-let _pendingPlanContent = null;
-let _pendingPlanPath = null;
 
 function updateStickyBtnState() {
   const stickyBtn = document.getElementById('session-info-sticky-btn');
@@ -11958,7 +11877,7 @@ function renderScratchpadRow(session) {
   ${renderScratchFilesHtml(session.id)}`;
 }
 
-function showInfoModal(session, planContent, parentInfo) {
+function showInfoModal(session, parentInfo) {
   const modal = document.getElementById('team-modal');
   const titleEl = document.getElementById('team-modal-title');
   const bodyEl = document.getElementById('team-modal-body');
@@ -11984,9 +11903,6 @@ function showInfoModal(session, planContent, parentInfo) {
       parentInfo.parentSessionId,
       { openAgentDir: true, openFile: parentInfo.parentJsonlPath, openSession: parentInfo.parentSessionId },
     ]);
-  }
-  if (session.hasPlan) {
-    infoRows.push(['Plan', session.planPath, { openPath: session.cwd || session.project, openFile: session.planPath }]);
   }
   if (session.project) {
     const projectName = session.project.split(/[/\\]/).pop();
@@ -12044,20 +11960,6 @@ function showInfoModal(session, planContent, parentInfo) {
     html += contextHtml;
   }
 
-  if (planContent) {
-    _pendingPlanContent = planContent;
-    const titleMatch = planContent.match(/^#\s+(.+)$/m);
-    const planTitle = titleMatch ? titleMatch[1].trim() : null;
-    html += `<div class="plan-card" data-plan-card="1" onclick="openPlanModal()">
-          <span class="plan-card-icon">📋</span>
-          <div class="plan-card-text">
-            <div class="plan-card-label">Plan</div>
-            ${planTitle ? `<div class="plan-card-title">${escapeHtml(planTitle)}</div>` : ''}
-          </div>
-          <svg viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" class="plan-card-chevron"><path d="M9 18l6-6-6-6"/></svg>
-        </div>`;
-  }
-
   html += renderLinkedDocsHtml(session.id);
   html += renderArtifactsHtml(session.id);
 
@@ -12073,7 +11975,6 @@ function showInfoModal(session, planContent, parentInfo) {
 
 function closeTeamModal() {
   document.getElementById('team-modal').classList.remove('visible');
-  _planSessionId = null;
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
@@ -12097,8 +11998,6 @@ function updateDismissBtnState() {
   btn.textContent = isDismissed ? 'Restore' : 'Dismiss';
   btn.title = isDismissed ? 'Restore — show in active list again' : 'Dismiss — hide from active list';
 }
-
-let _planSessionId = null;
 
 //#endregion
 
@@ -12508,104 +12407,6 @@ function initProjectPicker() {
     if (!pointerDown && modal.classList.contains('visible') && document.hasFocus()) closeProjectPicker();
   });
 }
-//#endregion
-
-//#region PLAN
-function refreshOpenPlan() {
-  if (!_planSessionId || !document.getElementById('plan-modal').classList.contains('visible')) return;
-  getJson(apiPath`/api/sessions/${_planSessionId}/plan`).then((data) => {
-    if (data?.content && (data.content !== _pendingPlanContent || data.path !== _pendingPlanPath)) {
-      _pendingPlanContent = data.content;
-      _pendingPlanPath = data.path || null;
-      document.getElementById('plan-modal-body').innerHTML = renderMarkdown(_pendingPlanContent);
-      mountPlanReview();
-      syncPlanPaneBtn();
-    }
-  });
-}
-
-function fmtTokens(t) {
-  return t >= 1000 ? `${(t / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${t}`;
-}
-
-function shortModelName(model) {
-  return model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : '';
-}
-
-function agentModel(agent) {
-  return agent.model || agent.modelAlias || '';
-}
-
-function openPlanForSession(sid) {
-  getJson(apiPath`/api/sessions/${sid}/plan`).then((data) => {
-    if (data?.content) {
-      _pendingPlanContent = data.content;
-      _pendingPlanPath = data.path || null;
-      _planSessionId = sid;
-      openPlanModal();
-    }
-  });
-}
-
-function openPlanModal() {
-  if (!_pendingPlanContent) return;
-  const body = document.getElementById('plan-modal-body');
-  body.innerHTML = renderMarkdown(_pendingPlanContent);
-  // A saved plan opened while its approval ask is still pending (sidebar
-  // click, 'p') is the same review moment — offer Approve/Reject here too.
-  document.getElementById('plan-approval-footer')?.remove();
-  if (currentWaiting?.kind === 'plan' && isWaitingAnswerable() && _planSessionId === currentSessionId) {
-    const controls = document.createElement('div');
-    controls.id = 'plan-approval-footer';
-    controls.innerHTML = planApprovalControlsHtml('plan-modal-reject-feedback');
-    document.querySelector('#plan-modal .modal-footer').prepend(controls);
-  }
-  syncPlanPaneBtn();
-  document.getElementById('plan-modal').classList.add('visible');
-  mountPlanReview();
-  const keyHandler = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      if (reviewPopMode) return closeReviewPop();
-      closePlanModal();
-      document.removeEventListener('keydown', keyHandler, true);
-    }
-  };
-  document.addEventListener('keydown', keyHandler, true);
-}
-
-function mountPlanReview() {
-  if (!_pendingPlanPath || !_planSessionId) return;
-  mountReview({
-    contentEl: document.getElementById('plan-modal-body'),
-    panelEl: document.getElementById('plan-review-panel'),
-    hostEl: document.querySelector('#plan-modal .modal'),
-    source: { kind: 'file', label: pathBasename(_pendingPlanPath), path: _pendingPlanPath },
-    sessionId: _planSessionId,
-    onSent: closePlanModal,
-  });
-}
-
-function closePlanModal() {
-  unmountReview(document.getElementById('plan-review-panel'));
-  hideModalOverlay('plan-modal');
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openPlanInEditor() {
-  if (!_planSessionId) return;
-  postAndToast(apiPath`/api/sessions/${_planSessionId}/plan/open`, {}, 'in editor');
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openFolderInEditor(folder, file) {
-  const body = {};
-  if (folder) body.folder = folder;
-  if (file) body.file = file;
-  postAndToast('/api/open-folder', body, 'folder');
-}
-
 //#endregion
 
 //#region TOOL_STATS_MODAL
@@ -14034,30 +13835,14 @@ function openPreviewInPane() {
   const sid = previewSessionId;
   const target = currentPreviewPath;
   closePreviewModal();
-  addPaneToSession(sid, target, pathBasename(target));
+  addPaneToSession(sid, target);
 }
 
-// The plan modal also opens other sessions' plans; the pane goes to the plan's session, wherever it is.
-const planPaneAllowed = () => !!_pendingPlanPath && !!_planSessionId;
-
-function syncPlanPaneBtn() {
-  document.getElementById('plan-pane-btn').style.display = planPaneAllowed() ? '' : 'none';
-}
-
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML
-function openPlanInPane() {
-  if (!planPaneAllowed()) return;
-  const sid = _planSessionId;
-  const target = _pendingPlanPath;
-  closePlanModal();
-  addPaneToSession(sid, target, 'Plan');
-}
-
-async function addPaneToSession(sid, target, label) {
+async function addPaneToSession(sid, target) {
   if (sid === paneSessionId()) return addPane(target);
   if ((await postPane(sid, { target, base: getSessionBaseDir(sid) || undefined })) !== false) return;
   const s = sessions.find((x) => x.id === sid);
-  showToast(`${label} added to ${s ? sessionDisplayName(s) : 'its session'}`, 'success', {
+  showToast(`${pathBasename(target)} added to ${s ? sessionDisplayName(s) : 'its session'}`, 'success', {
     label: 'Open',
     onClick: () => openSession(sid),
   });

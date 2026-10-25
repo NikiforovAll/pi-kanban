@@ -26,8 +26,6 @@
   --danger: #ef5350;
   --danger-dim: rgba(239, 83, 80, 0.18);
   --info: #60a5fa;
-  --plan: #86a886;
-  --plan-dim: rgba(134, 168, 134, 0.18);
   --owner-blue: #9cc2fb;
   --owner-purple: #cdb8fa;
   --owner-teal: #7fe2c9;
@@ -1232,11 +1230,6 @@ body.booting .boot-splash {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.session-item.plan-reveal {
-  outline: 1.5px solid var(--plan);
-  background: var(--plan-dim);
 }
 
 .session-metrics {
@@ -2779,7 +2772,6 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
    resizing the row means editing this rule, not four. Per-icon rules below override
    only what actually differs (color, glyph size). */
 .team-info-btn,
-.plan-indicator,
 .cost-badge,
 .dispatched-badge,
 .terminal-badge {
@@ -2808,21 +2800,12 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
    from the card text above it. Cancel that inset — but only when a boxed icon leads;
    the pill badges have a different inset and must not be shifted. */
 .session-indicators > .team-info-btn:first-child,
-.session-indicators > .plan-indicator:first-child {
+.session-indicators > .cost-badge:first-child {
   margin-left: -3px;
 }
 
 .team-info-btn {
   font-size: 11px;
-}
-
-.plan-indicator {
-  background: var(--plan-dim);
-  color: var(--plan);
-}
-
-.plan-indicator:hover {
-  border-color: var(--plan);
 }
 
 /* #endregion */
@@ -2991,48 +2974,6 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
   }
 }
 
-.plan-card {
-  margin-bottom: 16px;
-  padding: 10px 14px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  transition: all 0.15s ease;
-}
-.plan-card:hover {
-  border-color: var(--accent);
-  background: var(--bg-hover);
-}
-.plan-card-icon {
-  font-size: 14px;
-}
-.plan-card-text {
-  flex: 1;
-  min-width: 0;
-}
-.plan-card-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.plan-card-title {
-  font-size: 13px;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.plan-card-chevron {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-}
 
 /* #endregion */
 
@@ -5716,17 +5657,6 @@ body.show-resizing iframe {
 #msg-detail-waiting-footer:empty {
   display: none;
 }
-#msg-detail-waiting-footer .waiting-option-input,
-#plan-approval-footer .waiting-option-input {
-  flex: 1;
-  margin: 0;
-}
-#plan-approval-footer {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex: 1;
-}
 .waiting-actions {
   display: flex;
   flex-direction: column;
@@ -6115,27 +6045,6 @@ body.show-resizing iframe {
   width: 10px;
   color: var(--text-muted);
 }
-.msg-waiting-feedback {
-  min-width: 0;
-  flex: 1;
-  border: 1px dashed var(--border);
-  border-radius: 4px;
-  padding: 4px 8px;
-  font-family: var(--mono);
-  font-size: 11px;
-  background: none;
-  color: var(--text-primary);
-}
-.msg-waiting-feedback:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.msg-waiting-footer:has(.msg-waiting-feedback) {
-  flex-wrap: wrap;
-}
-.msg-waiting-footer:has(.msg-waiting-feedback) .msg-waiting-actions {
-  flex-basis: 100%;
-}
 .waiting-key-hint-line kbd {
   font-family: var(--mono);
   font-size: 9px;
@@ -6163,24 +6072,15 @@ body.show-resizing iframe {
   background: var(--bg-elevated);
   color: var(--text-primary);
 }
-.msg-item.msg-waiting.msg-waiting-plan {
-  background: none;
-  animation: none;
-}
 .msg-waiting-body h1,
 .msg-waiting-body h2,
 .msg-waiting-body h3,
-.msg-waiting-body h4,
-.waiting-plan h1,
-.waiting-plan h2,
-.waiting-plan h3,
-.waiting-plan h4 {
+.msg-waiting-body h4 {
   font-size: 1em;
   font-weight: 600;
   line-height: 1.35;
 }
-.msg-waiting-body h1,
-.waiting-plan h1 {
+.msg-waiting-body h1 {
   font-size: 1.15em;
 }
 /* #endregion */
@@ -7155,7 +7055,6 @@ body.light {
   --warning-dim: rgba(176, 125, 10, 0.15);
   --danger: #c0392b;
   --danger-dim: rgba(192, 57, 43, 0.15);
-  --plan: #5a7a5a;
   --ansi-red: #c0392b;
   --ansi-green: #1a8a5a;
   --ansi-yellow: #a8791a;
@@ -7168,7 +7067,6 @@ body.light {
   --ansi-bright-blue: #3b82d6;
   --ansi-bright-magenta: #a855c9;
   --ansi-bright-cyan: #2a9a9a;
-  --plan-dim: rgba(90, 122, 90, 0.15);
   --owner-blue: #163f8a;
   --owner-purple: #5524b0;
   --owner-teal: #064c3f;
@@ -7299,7 +7197,7 @@ body.light .msg-assistant .msg-text {
   padding-top: 12vh;
 }
 
-.plan-modal-overlay {
+.stacked-modal-overlay {
   z-index: 10001;
   background: rgba(0, 0, 0, 0.6);
 }
@@ -7375,7 +7273,7 @@ body.light .msg-assistant .msg-text {
   display: none;
 }
 
-.modal.plan-modal {
+.modal.wide-modal {
   width: 60vw;
   max-width: 60vw;
   max-height: 85vh;
@@ -7383,7 +7281,7 @@ body.light .msg-assistant .msg-text {
   flex-direction: column;
 }
 
-.modal.plan-modal.fullscreen {
+.modal.wide-modal.fullscreen {
   width: 80vw;
   max-width: 80vw;
   height: 92vh;
@@ -7400,11 +7298,6 @@ body.light .msg-assistant .msg-text {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-#plan-modal .modal:not(.fullscreen):not(.user-sized) {
-  width: min(calc(60vw + var(--review-extra)), 96vw);
-  max-width: min(calc(60vw + var(--review-extra)), 96vw);
 }
 
 .modal.preview-modal-dialog {
@@ -7428,8 +7321,7 @@ body.light .msg-assistant .msg-text {
 }
 
 #msg-detail-body,
-#preview-modal-body,
-#plan-modal-body {
+#preview-modal-body {
   word-break: break-word;
   font-size: 13px;
   line-height: 1.6;
@@ -7541,8 +7433,7 @@ body.light .msg-assistant .msg-text {
 }
 
 .preview-split > #msg-detail-body,
-.preview-split > #preview-modal-body,
-.preview-split > #plan-modal-body {
+.preview-split > #preview-modal-body {
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -9660,7 +9551,6 @@ select.form-input option:checked {
     --warning-dim: rgba(176, 125, 10, 0.15);
     --danger: #c0392b;
     --danger-dim: rgba(192, 57, 43, 0.15);
-    --plan: #5a7a5a;
     --ansi-red: #c0392b;
     --ansi-green: #1a8a5a;
     --ansi-yellow: #a8791a;
@@ -9673,7 +9563,6 @@ select.form-input option:checked {
     --ansi-bright-blue: #3b82d6;
     --ansi-bright-magenta: #a855c9;
     --ansi-bright-cyan: #2a9a9a;
-    --plan-dim: rgba(90, 122, 90, 0.15);
     --owner-blue: #163f8a;
     --owner-purple: #5524b0;
     --owner-teal: #064c3f;

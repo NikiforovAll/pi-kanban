@@ -156,16 +156,6 @@ const COMMANDS = {
         examples: ['pi-kanban session view $PI_KANBAN_SESSION_ID'],
         run: runSessionViewCli,
       },
-      plan: {
-        summary: 'Print the plan saved for a session (plan mode)',
-        usage: 'pi-kanban session plan <id> [--json]',
-        flags: {
-          '<id>': 'Full session id, or a unique prefix',
-          '--json': 'Output JSON ({content, path}); content is null when there is no plan',
-        },
-        examples: ['pi-kanban session plan 3fa9c1'],
-        run: runSessionPlanCli,
-      },
       agents: {
         summary: 'List the subagents a session has run, and whether it waits for the user',
         usage: 'pi-kanban session agents <id> [--json]',
@@ -1230,23 +1220,6 @@ async function runSessionSearchCli(args) {
       path.basename(s.project || ''),
       sessionTitle(s),
     ]));
-    return 0;
-  } catch (e) { reportCliError(e); return 1; }
-}
-
-async function runSessionPlanCli(args) {
-  const [idArg] = positionals(args, []);
-  if (!idArg) {
-    printLeafHelp(COMMANDS.session.verbs.plan);
-    return 1;
-  }
-  const resolved = await resolveSessionByIdOrPrefix(idArg);
-  if (!resolved) return 1;
-  try {
-    const plan = await cliGetJson(`/api/sessions/${resolved.id}/plan`, 'Plan');
-    if (args.includes('--json')) console.log(JSON.stringify(plan, null, 2));
-    else if (!plan.content) console.log(`No plan saved for session ${resolved.id.slice(0, 8)}.`);
-    else process.stdout.write(plan.content.endsWith('\n') ? plan.content : `${plan.content}\n`);
     return 0;
   } catch (e) { reportCliError(e); return 1; }
 }

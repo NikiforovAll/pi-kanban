@@ -274,7 +274,6 @@ describe('CLI argument parsing', () => {
 
   for (const [args, cmd] of [
     [['session', 'search'], 'session search'],
-    [['session', 'plan'], 'session plan'],
     [['session', 'agents'], 'session agents'],
     [['task', 'list'], 'task list'],
   ]) {

@@ -84,28 +84,6 @@ describe('buildDecision — permission decisions', () => {
   });
 });
 
-describe('buildDecision — plan decisions (#40)', () => {
-  // ExitPlanMode markers (kind "plan") take the permission shape; the gate
-  // echoes tool_input as updatedInput on allow, so the board only sends
-  // behavior (+ feedback message on reject).
-  const PLAN_MARKER = { status: 'waiting', kind: 'plan', id: 'plan-1' };
-
-  it('shapes a plan approve', () => {
-    assert.deepEqual(buildDecision(PLAN_MARKER, { id: 'plan-1', behavior: 'allow' }), { decision: { behavior: 'allow' } });
-  });
-
-  it('shapes a plan reject with feedback', () => {
-    assert.deepEqual(
-      buildDecision(PLAN_MARKER, { id: 'plan-1', behavior: 'deny', message: 'tighten phase 2' }),
-      { decision: { behavior: 'deny', message: 'tighten phase 2' } }
-    );
-  });
-
-  it('rejects a plan response without behavior', () => {
-    assert.equal(buildDecision(PLAN_MARKER, { id: 'plan-1', answers: { q: 'a' } }).status, 422);
-  });
-});
-
 describe('buildDecision — question decisions', () => {
   it('shapes answers', () => {
     assert.deepEqual(
@@ -212,17 +190,16 @@ describe('isKindGated', () => {
   const off = approvalsFrom({ approvals: { enabled: false } });
 
   it('gates every kind by default', () => {
-    for (const kind of ['permission', 'plan', 'question']) assert.equal(isKindGated(kind, on), true);
+    for (const kind of ['permission', 'question']) assert.equal(isKindGated(kind, on), true);
   });
 
   it('leaves questions to the terminal in mode=permission', () => {
     assert.equal(isKindGated('question', permOnly), false);
     assert.equal(isKindGated('permission', permOnly), true);
-    assert.equal(isKindGated('plan', permOnly), true);
   });
 
   it('gates nothing when opted out', () => {
-    for (const kind of ['permission', 'plan', 'question']) assert.equal(isKindGated(kind, off), false);
+    for (const kind of ['permission', 'question']) assert.equal(isKindGated(kind, off), false);
   });
 });
 

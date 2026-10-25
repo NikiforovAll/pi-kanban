@@ -194,7 +194,7 @@ function sessions({ api, web, docs }, pads) {
       pad: pads.limiter,
       startMin: LIVE_START_MIN,
       steps: [
-        { at: LIVE_START_MIN, user: 'Add a Redis-backed rate limiter to the API. Plan it first and bind the plan, then build it with tests.' },
+        { at: LIVE_START_MIN, user: 'Add a Redis-backed rate limiter to the API. Plan it first and open the plan in a pane, then build it with tests.' },
         {
           at: 94,
           thinking: 'Look at how middleware is wired before planning.',
@@ -205,10 +205,10 @@ function sessions({ api, web, docs }, pads) {
         },
         {
           at: 92,
-          text: 'The plan is in `_plans/rate-limiter.md`. I bound it to this session, so it shows on the board.',
+          text: 'The plan is in `_plans/rate-limiter.md`. It is open in a pane on the board.',
           tools: [
             { name: 'write', args: { path: path.join(api, '_plans', 'rate-limiter.md'), content: '# Plan: Redis rate limiter' }, result: 'Wrote 812 bytes.' },
-            { name: 'bind_plan', args: { path: '_plans/rate-limiter.md' }, result: 'Bound the plan.' },
+            { name: 'pane_add', args: { target: '_plans/rate-limiter.md' }, result: 'Added a pane: rate-limiter.md' },
           ],
         },
         { at: 90, tools: [{ name: 'todo', args: { action: 'create', tasks: TODO_LIMITER.map((t) => t.subject) }, result: '4 tasks', details: { tasks: TODO_LIMITER.map((t) => ({ ...t, status: 'pending' })) } }] },
@@ -418,13 +418,13 @@ async function seedLive({ agentDir, projects, pids, now = Date.now() }) {
   await writeWaiting(path.join(kanban, 'agent-activity', IDS.checkout), marker);
 }
 
-// Board state that has a route: groups, pins, panes, linked docs, the plan and the dispatch report.
+// Board state that has a route: groups, pins, panes, linked docs and the dispatch report.
 async function seedBoard({ post, projects, report }) {
   const { api, docs } = projects;
   for (const id of [IDS.limiter, IDS.loadTest, IDS.checkout]) await post(`/api/sessions/${id}/group`, { group: 'Release 2.4', create: true });
   await post(`/api/sessions/${IDS.gettingStarted}/group`, { group: 'Docs', create: true });
   await post('/api/session/pin', { ids: [IDS.tokens], state: 'pinned' });
-  await post(`/api/sessions/${IDS.limiter}/plan`, { path: path.join(api, '_plans', 'rate-limiter.md') });
+  await post(`/api/panes/${IDS.limiter}`, { target: path.join(api, '_plans', 'rate-limiter.md') });
   await post(`/api/panes/${IDS.limiter}`, { target: path.join(api, 'docs', 'tuning.md') });
   await post(`/api/panes/${IDS.limiter}`, { target: path.join(api, 'src', 'middleware', 'rate-limit.ts') });
   await post('/api/document/link', { sessionId: IDS.gettingStarted, path: path.join(docs, 'docs', 'getting-started.md') });
