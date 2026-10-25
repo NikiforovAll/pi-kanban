@@ -40,7 +40,21 @@ Click the palette button in the header and pick a theme:
 
 A color theme changes the background, text, border, and accent colors. Status colors (success, warning, error) stay the same in every theme.
 
-The terminal takes its colors from the theme too, so pi's output follows the mode. Cards from the `show` and `ask` tools read the same colors from CSS variables such as `--color-bg`, `--color-text`, and `--color-accent`.
+The terminal takes its colors from the theme too. Cards from the `show` and `ask` tools read the same colors from CSS variables such as `--color-bg`, `--color-text`, and `--color-accent`.
+
+## pi's theme in the board terminal
+
+pi's `system` theme follows the board. pi reads the terminal's colors at start, and the board tells pi each time you change the mode or the color theme. pi redraws at once, with no restart.
+
+`system` is pi's default. If your settings name another theme, set it back:
+
+```json title="~/.pi/agent/settings.json"
+{
+  "theme": "system"
+}
+```
+
+A light and dark pair, such as `"theme": "light/dark"`, also works: pi switches between the two when you change the mode. A single named theme, such as `"theme": "dark"`, stays the same in both modes.
 
 ## Where the choice is kept
 

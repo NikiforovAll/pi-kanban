@@ -84,6 +84,20 @@
     return `rgb:${[0, 2, 4].map((i) => m[1].slice(i, i + 2).repeat(2)).join('/')}`;
   }
 
+  // The key changes with any color, so a new palette of the same lightness is reported too.
+  function schemeOf(theme) {
+    const m = /^#([0-9a-f]{6})$/i.exec(theme?.background || '');
+    if (!m) return null;
+    const [r, g, b] = [0, 2, 4].map((i) => Number.parseInt(m[1].slice(i, i + 2), 16));
+    return { dark: 0.299 * r + 0.587 * g + 0.114 * b < 128, key: hashOf(JSON.stringify(theme)) };
+  }
+
+  function hashOf(text) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+    return (h >>> 0).toString(16);
+  }
+
   function createTerminalFrame(win) {
     const doc = win.document;
     const parentOrigin = parentOriginOf(win.location.hash);
@@ -131,10 +145,16 @@
       doc.documentElement.style.setProperty('--bg', options?.theme?.background || '');
     }
 
+    function sendScheme() {
+      const scheme = schemeOf(state.term.options.theme);
+      if (scheme && state.attached) send({ t: 'scheme', ...scheme });
+    }
+
     function applyTheme(options) {
       Object.assign(state.term.options, options);
       setBg(options);
       repaint();
+      sendScheme();
     }
 
     function applyFont(size) {
@@ -364,6 +384,7 @@
           // A retry keeps the last screen until the replay arrives.
           if (!reset) clearScreen();
           send({ t: 'resize', cols: term.cols, rows: term.rows });
+          sendScheme();
         } else if (msg.t === 'exit') state.attached = false;
         up('ws', { socketId, msg, ...(msg.t === 'exit' && { tail: tailOf(term.buffer.active, 6) }) });
       };
@@ -406,7 +427,7 @@
   }
 
   if (typeof module === 'object' && module.exports) {
-    module.exports = { createTerminalFrame, claimSig, isClaimed, parentOriginOf, tailOf, pathsIn };
+    module.exports = { createTerminalFrame, claimSig, isClaimed, parentOriginOf, tailOf, pathsIn, schemeOf };
   } else {
     createTerminalFrame(root);
   }

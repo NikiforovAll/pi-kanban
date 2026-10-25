@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { createTerminalFrame, claimSig, isClaimed, parentOriginOf, tailOf, pathsIn } = require('../public/terminal-frame.js');
+const { createTerminalFrame, claimSig, isClaimed, parentOriginOf, tailOf, pathsIn, schemeOf } = require('../public/terminal-frame.js');
 
 const BOARD = 'http://localhost:3541';
 const app = readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
@@ -99,6 +99,21 @@ describe('terminalClaims', () => {
       return null;
     });
     assert.ok(seen.length > 0 && seen.every((p) => p === true));
+  });
+});
+
+describe('schemeOf', () => {
+  it('reads dark or light from the background, and keys on every color', () => {
+    const nordDark = { background: '#272c36', foreground: '#d8dee9', red: '#bf616a' };
+    assert.equal(schemeOf(nordDark).dark, true);
+    assert.equal(schemeOf({ ...nordDark, background: '#e5e9f0' }).dark, false);
+    assert.equal(schemeOf(nordDark).key, schemeOf({ ...nordDark }).key);
+    assert.notEqual(schemeOf(nordDark).key, schemeOf({ ...nordDark, red: '#cc241d' }).key);
+  });
+
+  it('gives null when the background is not a hex color', () => {
+    assert.equal(schemeOf({}), null);
+    assert.equal(schemeOf({ background: 'rgb(0, 0, 0)' }), null);
   });
 });
 

@@ -1074,6 +1074,63 @@ describe('terminal sockets', { skip: !WebSocket }, () => {
     }
   });
 
+  it('reports a new color scheme only to an app that asked for it (mode 2031)', async () => {
+    const pty = fakePty();
+    const { t, server, port } = await serve(pty);
+    const ready = (g) => g.control.some((m) => m.t === 'ready');
+    const viewer = await session(port, { id: A, mode: 'shell' }, ready);
+    try {
+      const [p] = pty.spawned;
+      const step = async (msg) => {
+        viewer.ws.send(JSON.stringify(msg));
+        await wait(50);
+      };
+      const reports = () => p.written.filter((d) => d.startsWith('\x1b[?997'));
+      await step({ t: 'scheme', dark: true, key: 'nord-dark' });
+      assert.deepEqual(reports(), [], 'mode 2031 is off');
+
+      p.emit('\x1b[?2031h');
+      await wait(50);
+      assert.deepEqual(reports(), ['\x1b[?997;1n'], 'the mode turned on with a viewer attached');
+      await step({ t: 'scheme', dark: true, key: 'nord-dark' });
+      await step({ t: 'scheme', dark: false, key: 'nord-light' });
+      await step({ t: 'scheme', dark: false, key: 'nord-light' });
+      await step({ t: 'scheme', dark: false, key: 'ember-light' });
+      assert.deepEqual(reports(), ['\x1b[?997;1n', '\x1b[?997;2n', '\x1b[?997;2n']);
+
+      p.emit('\x1b[?2031l');
+      await wait(50);
+      await step({ t: 'scheme', dark: true, key: 'nord-dark' });
+      assert.equal(reports().length, 3);
+    } finally {
+      viewer.ws.terminate();
+      t.shutdown();
+      server.close();
+    }
+  });
+
+  it('reports the color scheme to an app that started with no viewer', async () => {
+    const pty = fakePty();
+    const { t, server, port } = await serve(pty);
+    const ready = (g) => g.control.some((m) => m.t === 'ready');
+    const first = await session(port, { id: A, mode: 'shell' }, ready);
+    first.ws.terminate();
+    await wait(50);
+    const [p] = pty.spawned;
+    p.emit('\x1b[?2031h');
+    await wait(50);
+    const later = await session(port, { id: A, mode: 'shell' }, ready);
+    try {
+      later.ws.send(JSON.stringify({ t: 'scheme', dark: true, key: 'nord-dark' }));
+      await until(() => p.written.includes('\x1b[?997;1n'));
+      assert.ok(p.written.includes('\x1b[?997;1n'));
+    } finally {
+      later.ws.terminate();
+      t.shutdown();
+      server.close();
+    }
+  });
+
   it('sizes a shared PTY to the viewer that last attached, focused or typed', async () => {
     const pty = fakePty();
     const { t, server, port } = await serve(pty);
