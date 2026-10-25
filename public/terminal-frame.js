@@ -78,6 +78,15 @@
     return { text, xs };
   }
 
+  const QUERIES = [
+    { final: 'c' },
+    { prefix: '>', final: 'c' },
+    { final: 'n' },
+    { prefix: '?', final: 'n' },
+    { intermediates: '$', final: 'p' },
+    { prefix: '?', intermediates: '$', final: 'p' },
+  ];
+
   function oscColor(hex) {
     const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
     if (!m) return null;
@@ -146,8 +155,10 @@
     }
 
     function sendScheme() {
-      const scheme = schemeOf(state.term.options.theme);
-      if (scheme && state.attached) send({ t: 'scheme', ...scheme });
+      const theme = state.term.options.theme;
+      const scheme = schemeOf(theme);
+      if (!scheme || !state.attached) return;
+      send({ t: 'scheme', ...scheme, fg: oscColor(theme.foreground), bg: oscColor(theme.background) });
     }
 
     function applyTheme(options) {
@@ -269,19 +280,11 @@
         });
         return false;
       });
-      // xterm leaves OSC 10/11 color queries unanswered, so apps that pick a palette from the
-      // background assume dark even on a light theme.
-      for (const [code, key] of [
-        [10, 'foreground'],
-        [11, 'background'],
-      ]) {
-        term.parser.registerOscHandler(code, (data) => {
-          if (data !== '?') return false;
-          const rgb = oscColor(term.options.theme[key]);
-          if (rgb) send({ t: 'in', d: `\x1b]${code};${rgb}\x1b\\` });
-          return true;
-        });
-      }
+      // The server's mirror answers the app's queries, with this viewer's colors when it owns the PTY.
+      // An answer from here would repeat it, at this viewer's size, and claim the PTY.
+      for (const id of QUERIES) term.parser.registerCsiHandler(id, () => true);
+      term.parser.registerDcsHandler({ intermediates: '$', final: 'q' }, () => true);
+      for (const code of [10, 11]) term.parser.registerOscHandler(code, (data) => data === '?');
       term.onData((d) => send({ t: 'in', d }));
       term.onResize(({ cols, rows }) => send({ t: 'resize', cols, rows }));
       // One fit per frame while a drag resizes the pane. The atlas is rebuilt only when the frame comes

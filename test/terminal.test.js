@@ -709,7 +709,7 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
     };
     const [host] = children(srv.child.pid, 'node.exe');
     assert.ok(host, 'terminal host');
-    const hosts = () => children(host, 'conhost.exe');
+    const hosts = () => [...children(host, 'conhost.exe'), ...children(host, 'OpenConsole.exe')];
     assert.equal(os.getPriority(host), PRIORITY_ABOVE_NORMAL);
     assert.equal(os.getPriority(srv.child.pid), PRIORITY_NORMAL);
 
@@ -738,7 +738,7 @@ function fakePty({ holdExit = false } = {}) {
     spawn(_file, args, opts) {
       let onExit = () => {};
       const p = {
-        pid: 100000 + spawned.length, args, env: opts?.env, written: [], resizes: [], emit: () => {},
+        pid: 100000 + spawned.length, args, opts, env: opts?.env, written: [], resizes: [], emit: () => {},
         onData(cb) { p.emit = cb; }, onExit(cb) { onExit = cb; }, write(d) { p.written.push(d); },
         resize(cols, rows) { p.resizes.push([cols, rows]); }, pause() {}, resume() {},
         exit() { onExit({ exitCode: 0 }); },
@@ -1119,6 +1119,46 @@ describe('terminal sockets', { skip: !WebSocket }, () => {
       assert.ok(p.written.includes('\x1b[?997;1n'));
     } finally {
       later.ws.terminate();
+      t.shutdown();
+      server.close();
+    }
+  });
+
+  it('answers the app\'s queries once from the mirror, with no viewer attached', async () => {
+    const pty = fakePty();
+    const { t, server, port } = await serve(pty);
+    const first = await session(port, { id: A, mode: 'shell' }, (g) => g.control.some((m) => m.t === 'ready'));
+    first.ws.terminate();
+    try {
+      const [p] = pty.spawned;
+      assert.equal(p.opts.useConptyDll, true);
+      p.emit('\x1b[c\x1b[6n\x1b]11;?\x07');
+      await until(() => p.written.includes('\x1b[1;1R'));
+      assert.deepEqual(p.written, ['\x1b[?1;2c', '\x1b[1;1R'], 'no viewer colors, so OSC 11 goes unanswered');
+    } finally {
+      t.shutdown();
+      server.close();
+    }
+  });
+
+  it('answers OSC 10/11 with the owner\'s colors', async () => {
+    const pty = fakePty();
+    const { t, server, port } = await serve(pty);
+    const viewer = await session(port, { id: A, mode: 'shell' }, (g) => g.control.some((m) => m.t === 'ready'));
+    try {
+      const [p] = pty.spawned;
+      viewer.ws.send(JSON.stringify({ t: 'scheme', dark: false, key: 'k1', fg: 'rgb:1111/2222/3333', bg: 'rgb:eeee/eeee/eeee' }));
+      await wait(50);
+      p.emit('\x1b]10;?\x1b\\\x1b]11;?\x07');
+      await until(() => p.written.length >= 2);
+      assert.deepEqual(p.written, ['\x1b]10;rgb:1111/2222/3333\x1b\\', '\x1b]11;rgb:eeee/eeee/eeee\x1b\\']);
+      viewer.ws.send(JSON.stringify({ t: 'scheme', dark: false, key: 'k2', fg: 'red\x1b[2J', bg: 'rgb:eeee/eeee/eeee' }));
+      await wait(50);
+      p.emit('\x1b]10;?\x07');
+      await wait(50);
+      assert.equal(p.written.length, 2, 'a color that is not rgb:rrrr/gggg/bbbb is dropped');
+    } finally {
+      viewer.ws.terminate();
       t.shutdown();
       server.close();
     }

@@ -148,9 +148,12 @@ describe('createTerminalFrame', () => {
         this.unicode = {};
         this.modes = { sendFocusMode: false };
         this.csiHandlers = [];
+        this.oscHandlers = [];
+        this.dcsHandlers = [];
         this.parser = {
-          registerOscHandler() {},
+          registerOscHandler: (code, fn) => this.oscHandlers.push({ code, fn }),
           registerCsiHandler: (id, fn) => this.csiHandlers.push({ id, fn }),
+          registerDcsHandler: (id, fn) => this.dcsHandlers.push({ id, fn }),
         };
         this.textarea = { addEventListener() {} };
         this.buffer = { active: { getLine() {}, getNullCell: () => ({}) } };
@@ -433,6 +436,28 @@ describe('createTerminalFrame', () => {
       enable();
       assert.equal(sent.length, 1);
     });
+  });
+
+  it('leaves the app\'s queries to the server, and lets OSC 10/11 still set colors', () => {
+    const term = openFrame(class {}).terms[0];
+    const csi = (prefix, intermediates, final) =>
+      term.csiHandlers.find((h) => h.id.prefix === prefix && h.id.intermediates === intermediates && h.id.final === final)?.fn;
+    for (const [prefix, intermediates, final] of [
+      [undefined, undefined, 'c'],
+      ['>', undefined, 'c'],
+      [undefined, undefined, 'n'],
+      ['?', undefined, 'n'],
+      [undefined, '$', 'p'],
+      ['?', '$', 'p'],
+    ]) {
+      assert.equal(csi(prefix, intermediates, final)?.([]), true, `CSI ${prefix || ''}${intermediates || ''}${final}`);
+    }
+    assert.equal(term.dcsHandlers.find((h) => h.id.intermediates === '$' && h.id.final === 'q').fn(), true);
+    for (const code of [10, 11]) {
+      const osc = term.oscHandlers.find((h) => h.code === code).fn;
+      assert.equal(osc('?'), true);
+      assert.equal(osc('#ffffff'), false);
+    }
   });
 });
 
