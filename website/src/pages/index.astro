@@ -19,7 +19,7 @@ const sections = [
   {
     id: 'run',
     title: 'Run',
-    intro: 'Start pi from the board, keep it running when you close the tab, and hand tasks to other sessions.',
+    intro: 'pi runs in the board server, not in the browser tab. Close the tab and pi keeps working.',
     items: [
       {
         title: 'Run pi in the board',
@@ -41,7 +41,7 @@ const sections = [
       },
       {
         title: 'Hand work to another session',
-        body: 'dispatch_start starts a worker session in the board terminal with a self-contained task. The worker sends one report with dispatch_report, and the parent session gets it from dispatch_wait.',
+        body: 'pi runs pi-kanban dispatch start to give a task to a new worker session in the board terminal. The worker sends back one report, and pi-kanban dispatch wait gets it for the parent.',
         shot: 'dispatch',
         alt: 'A dispatched load-test session and its log, which ends with the report it sent back',
       },
@@ -53,14 +53,14 @@ const sections = [
     intro: 'The agent shows you cards and asks you questions on the board. Your answers and comments go back to pi as messages.',
     items: [
       {
-        title: 'See what the agent shows you',
-        body: 'The show tool posts a markdown or HTML card over the terminal: a table, a chart, a diagram. The card refreshes on each save. Page through the posts, fill the terminal with one, or open it as a tab.',
+        title: 'Cards from the agent',
+        body: 'pi writes a markdown or HTML file, such as a table, a chart, or a diagram, and posts it with pi-kanban show. The card opens over the terminal and updates each time pi saves the file. Page through the cards, fill the terminal with one, or open it as a tab.',
         shot: 'show',
         size: [1778, 1350],
         alt: 'A show card with a latency bar chart over the top right of the terminal',
       },
       {
-        title: 'Answer the agent in place',
+        title: 'Answer on a card',
         body: 'The ask tool puts an HTML card in a modal: a form, a choice between two layouts, sliders over a preview. pi waits for your answer, and the sidebar counts the sessions that wait on you.',
         shot: 'ask',
         size: [1778, 1350],
@@ -92,7 +92,7 @@ const sections = [
         alt: 'A scout subagent with its response about public routes',
       },
       {
-        title: 'Find the session behind the work',
+        title: 'Session info',
         body: 'Session info shows the id, project, path, tasks folder, and scratchpad, each with a copy button, plus token use and linked documents. [I] opens it for the selected session.',
         shot: 'session-info',
         alt: 'Session info modal with session id, paths, token use, and linked documents',
@@ -106,7 +106,7 @@ const sections = [
     items: [
       {
         title: 'Files and pages next to the board',
-        body: 'pane_add opens a URL or a local markdown, HTML, text, or image file as a tab. Press [|] to split a tab with the one before it, and [Ctrl+Alt+1…9] to go to a tab. Linked docs open in the preview modal.',
+        body: 'pi-kanban pane add opens a URL or a local markdown, HTML, text, or image file as a tab. Press [|] to split a tab with the one before it, and [Ctrl+Alt+1…9] to go to a tab. Linked docs open in the preview modal.',
         shot: 'split',
         alt: 'The board split with a markdown plan in a pane on the right',
       },
@@ -116,14 +116,14 @@ const sections = [
 
 const companionItems = [
   {
-    title: 'pi-cost: what a session costs',
-    body: 'Cost, tokens, and models per message, session, and project, with actual and estimated spend. Press [$] on a session, or run /kanban cost in pi.',
+    title: 'What a session costs',
+    body: 'pi-cost shows cost, tokens, and models per message, session, and project, with actual and estimated spend. Press [$] on a session, or run /kanban cost in pi.',
     shot: 'cost',
     alt: 'pi-cost in a board tab: the cost of a session as a chart and a table of messages',
   },
   {
-    title: 'pi-inspect: what pi loaded',
-    body: 'The system prompt, tools, slash commands, skills, and context files of a session. Press [Shift+I] on a session, or run /kanban inspect in pi.',
+    title: 'What pi loaded',
+    body: 'pi-inspect shows the system prompt, tools, slash commands, skills, and context files of a session. Press [Shift+I] on a session, or run /kanban inspect in pi.',
     shot: 'inspect',
     alt: 'pi-inspect in a board tab: the tools and context a session loaded, grouped by package',
   },
@@ -137,19 +137,19 @@ const style = [
     alt: 'The color theme menu open over the board',
   },
   {
-    title: 'Zen mode: one session',
+    title: 'Zen mode for one session',
     body: '[Ctrl+Shift+Z] hides every other session. The sidebar shows the context use, cost, scratchpad, linked docs, and agents of the open session. Press it again to see all sessions.',
     shot: 'zen',
     alt: 'Zen mode: the sidebar shows only redis-rate-limiter with its context, cost, scratchpad, and agents',
   },
   {
-    title: 'Zen mode: one group',
+    title: 'Zen mode for a group',
     body: 'Select a group header in the sidebar and press [Ctrl+Shift+Z]. The sidebar then shows only the sessions in that group.',
     shot: 'zen-group',
     alt: 'Zen mode for the Release 2.4 group: the sidebar shows only its three sessions',
   },
   {
-    title: 'Keep your hands on the keyboard',
+    title: 'Keyboard shortcuts',
     body: 'Arrow keys move through todos, [Tab] switches between the sidebar and the board or the open pane tab, and [\\] hides the sidebar. Press [?] for the full list.',
     shot: 'shortcuts',
     alt: 'Keyboard shortcuts help with board, session, and terminal tabs',
@@ -170,17 +170,17 @@ const more = [
 ];
 
 const tools = [
-  { name: 'show, ask', body: 'Post a card over the terminal. Ask through a card in a modal and wait for the answer.' },
-  { name: 'dispatch_start, dispatch_wait, dispatch_report', body: 'Start a worker session, wait for its report, send a report back. dispatch_list and dispatch_end list and end workers.' },
-  { name: 'pane_add, pane_rm, pane_list', body: 'Add a URL or a local file as a tab next to the board, without switching to it.' },
-  { name: 'link_doc, unlink_doc, preview_doc', body: 'Link files and URLs to the session, or open a file in the preview modal now.' },
-  { name: 'companion_open', body: 'Open pi-cost or pi-inspect for the session as a tab.' },
+  { name: 'kanban skill', body: 'Add a URL or a file as a tab next to the board, link a file to the session, preview a file now, or open pi-cost and pi-inspect for the session.' },
+  { name: 'show skill', body: 'pi writes a markdown or HTML card and posts it with pi-kanban show.' },
+  { name: 'ask tool', body: 'Shows an HTML question in a modal and waits for the answer. When the board is down, pi asks in its own prompt.' },
+  { name: 'visualize skill', body: 'pi writes a full HTML page that explains a topic and adds it as a tab.' },
+  { name: 'dispatch skill', body: 'Give a task to a new pi session in the board terminal and get its report back.' },
   { name: '/kanban', body: 'In pi: open the board, open pi-cost or pi-inspect, or pin and link the session.' },
-  { name: 'pi-kanban doc | pane | session | group | task | project | dispatch | terminal', body: 'The same board from a shell. pi-kanban help lists the subcommands.' },
+  { name: 'pi-kanban doc | show | pane | session | group | task | project | dispatch | terminal', body: 'The command the skills run. You can run it from a shell too. pi-kanban help lists the subcommands.' },
 ];
 
 const setup = [
-  { title: 'Install the package', cmd: INSTALL, body: 'It adds the /kanban command and the board tools to pi. Then run npm install -g pi-kanban to get the board command.' },
+  { title: 'Install the package', cmd: INSTALL, body: 'It gives pi the /kanban command, the ask tool, and the skills that drive the board. Then run npm install -g pi-kanban to get the board command.' },
   { title: 'Start the board', cmd: 'pi-kanban', body: 'Run it in a shell. The board listens on 127.0.0.1:3460 and prints its URL with the access token.' },
   { title: 'Start pi', cmd: '+ New', body: 'Open the URL the board prints and click + New to run pi in the board terminal. For pi started in another terminal, run /kanban open in pi.' },
 ];
@@ -293,8 +293,8 @@ const companions = [
 
       <section class="half" aria-labelledby="yours">
         <div class="half-head">
-          <h2 id="yours">Yours</h2>
-          <p>Pick the colors, learn the keys, and hide what you do not need.</p>
+          <h2 id="yours">Your board</h2>
+          <p>17 color themes, a zen mode that hides the other sessions, and a key for most actions.</p>
         </div>
         <div class="items">
           {
@@ -314,7 +314,6 @@ const companions = [
       <section class="half" aria-labelledby="more">
         <div class="half-head">
           <h2 id="more">More</h2>
-          <p>Smaller things that save time every day.</p>
         </div>
         <div class="items">
           <ul class="more shots">
@@ -344,7 +343,7 @@ const companions = [
       <section class="half" aria-labelledby="tools">
         <div class="half-head">
           <h2 id="tools">Tools</h2>
-          <p>The package gives pi these tools and commands. Each one talks to the board on your machine.</p>
+          <p>The package gives pi these skills, one tool, and one command. pi loads a skill only when it needs it.</p>
         </div>
         <ul class="companions">
           {
