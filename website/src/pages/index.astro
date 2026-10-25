@@ -56,12 +56,14 @@ const sections = [
         title: 'See what the agent shows you',
         body: 'The show tool posts a markdown or HTML card over the terminal: a table, a chart, a diagram. The card refreshes on each save. Page through the posts, fill the terminal with one, or open it as a tab.',
         shot: 'show',
+        size: [1778, 1350],
         alt: 'A show card with a latency bar chart over the top right of the terminal',
       },
       {
         title: 'Answer the agent in place',
         body: 'The ask tool puts an HTML card in a modal: a form, a choice between two layouts, sliders over a preview. pi waits for your answer, and the sidebar counts the sessions that wait on you.',
         shot: 'ask',
+        size: [1778, 1350],
         alt: 'An ask modal over the terminal with two layout choices and a Send button',
       },
       {
@@ -256,7 +258,7 @@ const companions = [
                     <h3>{it.title}</h3>
                     <p><Keys text={it.body} /></p>
                   </div>
-                  <Shot themed={it.shot} alt={it.alt} />
+                  <Shot themed={it.shot} alt={it.alt} width={it.size?.[0]} height={it.size?.[1]} />
                 </article>
               ))}
             </div>

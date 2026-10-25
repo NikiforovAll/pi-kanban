@@ -85,6 +85,7 @@ const openCompanion = async (page, id, url) => {
 };
 
 // `terminal` lists the sessions that open in the terminal; the others open on the board.
+// `clip` crops the shot to one element, so its text stays readable at the landing page's width.
 const views = [
   {
     name: 'board',
@@ -104,6 +105,7 @@ const views = [
   {
     name: 'ask',
     terminal: [CHECKOUT],
+    clip: 'main.main',
     async run(page) {
       await openSession(page, CHECKOUT);
       await page.waitForTimeout(1500);
@@ -147,6 +149,7 @@ const views = [
   {
     name: 'show',
     terminal: [LIMITER],
+    clip: 'main.main',
     async run(page) {
       await openSession(page, LIMITER);
       await page.waitForSelector('.terminal-frame');
@@ -295,7 +298,7 @@ try {
       });
       await view.run(page, companions?.urls);
       await page.waitForTimeout(700);
-      const png = await page.screenshot();
+      const png = await (view.clip ? page.locator(view.clip) : page).screenshot();
       const file = path.join(outDir, `${PALETTE}-${view.name}-${mode}.webp`);
       await sharp(png).webp({ quality: 82 }).toFile(file);
       console.log(path.relative(process.cwd(), file));

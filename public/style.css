@@ -3887,7 +3887,7 @@ body.show-resizing iframe {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--bg-deep) 55%, transparent);
+  background: color-mix(in srgb, var(--bg-deep) 30%, transparent);
 }
 
 .ask-modal[hidden] {
@@ -3917,9 +3917,9 @@ body.show-resizing iframe {
   width: min(560px, calc(100% - 32px));
   max-height: calc(100% - 32px);
   background: var(--bg-surface);
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--text-muted) 45%, var(--border));
   border-radius: 10px;
-  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.08);
   overflow: hidden;
 }
 
