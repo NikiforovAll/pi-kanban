@@ -1,6 +1,6 @@
 {
   "$id": "waiting.schema.json",
-  "title": "Claude Code Waiting for User",
+  "title": "pi Waiting for User",
   "type": "object",
   "required": ["status"],
   "if": { "properties": { "status": { "const": "waiting" } } },
@@ -8,12 +8,11 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["waiting", "cleared"]
+      "enum": ["waiting"]
     },
     "kind": { "type": "string" },
     "toolName": { "type": ["string", "null"] },
     "toolInput": { "type": ["string", "null"] },
-    "rule": { "type": "string" },
     "timestamp": { "type": "string", "format": "date-time" }
   },
   "additionalProperties": true

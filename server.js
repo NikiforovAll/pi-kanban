@@ -311,9 +311,6 @@ function checkWaitingForUser(agentDir, logMtime) {
       if (age >= PERMISSION_TTL_MS) return null;
       // After grace period, check if session resumed activity (user already responded)
       if (movedOnSince(waitTime, logMtime)) return null;
-      // The mod sees the ask before auto mode's classifier decides it, and no dialog may follow.
-      // An ask from a settings rule always opens the dialog.
-      if (data.kind === 'permission' && !data.rule && loadSessionMetadata()[path.basename(agentDir)]?.permissionMode === 'auto') return null;
       return data;
     }
   } catch { /* skip — missing or invalid */ }

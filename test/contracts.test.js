@@ -161,10 +161,6 @@ describe('Schema: Waiting JSON', () => {
   it('rejects without timestamp', () => {
     assert.ok(!validate({ status: 'waiting' }));
   });
-
-  it('accepts the cleared marker', () => {
-    assert.ok(validate({ status: 'cleared' }));
-  });
 });
 
 describe('Schema: Team Config', () => {
@@ -465,7 +461,7 @@ describe('Parser: buildAgentProgressMap', () => {
 });
 
 describe('Parser: readSessionInfoFromJsonl', () => {
-  const CLAUDE_ONLY = ['gitBranch', 'agentName', 'logicalParentUuid', 'compactBoundaryUuid', 'permissionMode', 'cacheTtl'];
+  const CLAUDE_ONLY = ['gitBranch', 'agentName', 'logicalParentUuid', 'compactBoundaryUuid', 'cacheTtl'];
 
   it('reads the header, the name and the first prompt', () => {
     const info = readSessionInfoFromJsonl(PI.chat);
