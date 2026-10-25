@@ -5942,9 +5942,10 @@ function setFocusZone(zone, target) {
   clearTaskSelection();
 
   focusZone = zone;
+  const active = document.activeElement;
+  const left = zone === 'sidebar' ? document.getElementById('pane-split') : sessionsList;
+  if (active && left.contains(active)) active.blur();
   if (zone === 'sidebar') {
-    const active = document.activeElement;
-    if (active && document.getElementById('main-content').contains(active)) active.blur();
     expandSidebar();
     const items = getNavigableItems();
     if (items.length > 0) {
@@ -5961,6 +5962,8 @@ function setFocusZone(zone, target) {
         selectSessionByIndex(0);
       }
     }
+  } else if (activePaneView()) {
+    focusActivePane();
   } else {
     // Focusing the board is an explicit nav gesture — restore the highlight.
     taskHighlightDimmed = false;
@@ -6234,7 +6237,7 @@ const SHORTCUT_TABS = [
           { keys: ['↑'], label: 'Previous item' },
           { keys: ['←'], label: 'Left column / collapse group' },
           { keys: ['→'], label: 'Right column / expand group' },
-          { keys: ['Tab'], label: 'Switch sidebar ↔ board' },
+          { keys: ['Tab'], label: 'Switch sidebar ↔ board or open tab' },
           { keys: ['Enter', 'Space'], label: 'Open selected item' },
         ],
       },
@@ -7920,14 +7923,12 @@ document.addEventListener('keydown', (e) => {
   if (inPane && e.key !== 'Tab' && e.key !== 'Escape') return;
   if (e.key === 'Tab') {
     e.preventDefault();
-    if (inPane) e.target.blur();
     // The terminal replaces the board, so it takes the board's place in the Tab cycle.
     if (wantsTerminal()) {
       if (focusZone === 'sidebar') focusTerminalPane();
       else leaveTerminalPane();
       return;
     }
-    if (focusZone === 'sidebar' && !document.querySelector('.task-card')) return;
     setFocusZone(focusZone === 'board' ? 'sidebar' : 'board');
     return;
   }
@@ -14925,11 +14926,14 @@ function restoreTerminalFocus(zone, sessionId) {
 
 // The terminal stands in for the board, so it takes the board zone however focus arrives
 // (Tab, Alt+`, a click); leaveTerminalPane hands it back to the sidebar.
-document.getElementById('terminal-pane').addEventListener('focusin', () => {
+document.getElementById('terminal-pane').addEventListener('focusin', takeBoardZone);
+paneViews.addEventListener('focusin', takeBoardZone);
+
+function takeBoardZone() {
   if (focusZone !== 'sidebar') return;
   clearKbSelection();
   focusZone = 'board';
-});
+}
 
 function detachTerminal() {
   const had = termState.socket;
