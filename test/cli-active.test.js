@@ -188,7 +188,7 @@ describe('group list members', () => {
     }, { sessions: [...SESSIONS, ...workers], groups: { rev: 1, groups: [GROUPS.groups[0], swarm] } });
   });
 
-  it('counts a project member as the sidebar does, from one lite request', async () => {
+  it('counts a project member as the sidebar does, from one request', async () => {
     const sid = (n) => `99999999-0000-0000-0000-00000000000${n}`;
     const repoSessions = [
       { id: sid(1), name: 'held elsewhere', project: '/repo/wt', worktree: { repo: '/repo' }, modifiedAt: now, active: true },
@@ -203,11 +203,10 @@ describe('group list members', () => {
     await withBoard(async (run, hits) => {
       const { stdout } = await run(['group', 'list', '--all', '--json']);
       assert.equal(JSON.parse(stdout).groups[0].members[0].sessions, 2, 'plain and worktree; not one held by id or keyed by another repo');
-      assert.deepEqual(sessionHits(hits).map((u) => [u.searchParams.get('limit'), u.searchParams.get('lite'), u.searchParams.get('include')]), [['all', '1', null]]);
+      assert.deepEqual(sessionHits(hits).map((u) => [u.searchParams.get('limit'), u.searchParams.get('include')]), [['all', null]]);
       hits.length = 0;
       const active = await run(['group', 'list', '--json']);
       assert.equal(JSON.parse(active.stdout).groups[0].members[0].sessions, 2);
-      assert.ok(sessionHits(hits).every((u) => u.searchParams.get('lite') === '1'));
       assert.equal(sessionHits(hits).find((u) => u.searchParams.get('limit') === 'all').searchParams.get('filter'), 'active');
     }, { sessions: [...SESSIONS, ...repoSessions], groups: { rev: 1, groups } });
   });

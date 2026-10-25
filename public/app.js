@@ -7276,7 +7276,7 @@ function _storageClearLinkedDocs(sessionId) {
 }
 
 async function _storageGroupsClean(group, dryRun) {
-  const shown = await getJson('/api/sessions', null, { query: { filter: 'active', limit: 'all', lite: '1' } });
+  const shown = await getJson('/api/sessions', null, { query: { filter: 'active', limit: 'all' } });
   if (!Array.isArray(shown)) throw new Error('could not list sessions');
   const res = await api('/api/groups/clean', {
     method: 'POST',

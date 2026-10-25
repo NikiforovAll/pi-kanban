@@ -798,15 +798,13 @@ function parseLimit(args, { fallback, allowAll = false }) {
   return { ok: true, limit: n };
 }
 
-// `lite` leaves out the fields that can read a whole transcript (loopInfo).
-function sessionsListPath({ limit, noPins = false, include = [], project = null, activeOnly = false, lite = false }) {
+function sessionsListPath({ limit, noPins = false, include = [], project = null, activeOnly = false }) {
   const q = limit === null ? 'all' : String(limit);
   const pinsQ = noPins ? '&pins=off' : '';
   const includeQ = include.length ? `&include=${include.map(encodeURIComponent).join(',')}` : '';
   const projectQ = project ? `&project=${encodeURIComponent(project)}` : '';
   const filterQ = activeOnly ? '&filter=active' : '';
-  const liteQ = lite ? '&lite=1' : '';
-  return `/api/sessions?limit=${q}${pinsQ}${includeQ}${projectQ}${filterQ}${liteQ}`;
+  return `/api/sessions?limit=${q}${pinsQ}${includeQ}${projectQ}${filterQ}`;
 }
 
 const fetchSessionsList = (opts, label = 'Session list') => cliGetJson(sessionsListPath(opts), label);
@@ -816,10 +814,10 @@ const uniqueById = (list) => [...new Map(list.map((s) => [s.id, s])).values()];
 // The server refuses a request line above about 16 KB (431), about 430 ids, so the ids go in batches.
 const IDS_PER_REQUEST = 100;
 
-async function fetchSessionsByIds(ids, label, { lite = false } = {}) {
+async function fetchSessionsByIds(ids, label) {
   const batches = [];
   for (let i = 0; i < ids.length; i += IDS_PER_REQUEST) batches.push(ids.slice(i, i + IDS_PER_REQUEST));
-  const lists = await Promise.all(batches.map((include) => fetchSessionsList({ limit: 1, include, lite }, label)));
+  const lists = await Promise.all(batches.map((include) => fetchSessionsList({ limit: 1, include }, label)));
   return uniqueById(lists.flat());
 }
 
@@ -866,7 +864,7 @@ async function runSessionListCli(args) {
   let list;
   let total;
   try {
-    const res = await cliGet(sessionsListPath({ limit: days !== null ? null : limit, noPins, project: projectFilter, activeOnly, lite: !asJson }), 'Session list');
+    const res = await cliGet(sessionsListPath({ limit: days !== null ? null : limit, noPins, project: projectFilter, activeOnly }), 'Session list');
     list = await res.json();
     total = Number(res.headers.get('x-total-count')) || list.length;
   } catch (e) {
@@ -1110,8 +1108,8 @@ async function runGroupListCli(args) {
     const sessionRefs = [...new Set(groups.flatMap((g) => g.members.filter((m) => m.type === 'session').map((m) => m.ref)))];
     // An inactive session held by id is still listed, so only the active list needs the id lookups.
     const lists = await Promise.all([
-      fetchSessionsList({ limit: null, activeOnly, lite: true }, 'Group list'),
-      activeOnly ? fetchSessionsByIds(sessionRefs, 'Group list', { lite: true }) : [],
+      fetchSessionsList({ limit: null, activeOnly }, 'Group list'),
+      activeOnly ? fetchSessionsByIds(sessionRefs, 'Group list') : [],
     ]);
     const sessions = uniqueById(lists.flat());
     groups = describeGroupMembers(groups, sessions, activeOnly);
