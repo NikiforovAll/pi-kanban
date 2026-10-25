@@ -2746,7 +2746,6 @@ app.get('/api/session/resolve', (req, res) => {
     const idArg = (req.query.id || '').toString();
     if (!idArg) return res.status(400).json({ error: 'id is required' });
     const metadata = loadSessionMetadata();
-    const ids = Object.keys(metadata);
     if (Object.hasOwn(metadata, idArg)) {
       const m = metadata[idArg];
       return res.json({ id: idArg, customTitle: m?.customTitle || null });
@@ -2754,15 +2753,18 @@ app.get('/api/session/resolve', (req, res) => {
     // A session pi-kanban just dispatched has no transcript yet, and its starter groups it at once.
     const started = dispatched.get(idArg);
     if (started) return res.json({ id: idArg, customTitle: started.name || null });
-    const matches = ids.filter(id => id.startsWith(idArg));
+    // A pi session that has not written its transcript yet is known only to the live registry.
+    const live = new Map(loadLiveSessions().filter((s) => s.pid && isPidAlive(s.pid)).map((s) => [s.sessionId, s.name]));
+    const title = (id) => metadata[id]?.customTitle || live.get(id) || null;
+    const matches = [...new Set([...Object.keys(metadata), ...live.keys()])].filter(id => id.startsWith(idArg));
     if (matches.length === 0) return res.status(404).json({ matches: [] });
     if (matches.length > 1) {
       return res.status(409).json({
-        matches: matches.slice(0, 50).map(id => ({ id, customTitle: metadata[id]?.customTitle || null }))
+        matches: matches.slice(0, 50).map(id => ({ id, customTitle: title(id) }))
       });
     }
     const id = matches[0];
-    res.json({ id, customTitle: metadata[id]?.customTitle || null });
+    res.json({ id, customTitle: title(id) });
   } catch (error) {
     console.error('Error in /api/session/resolve:', error);
     res.status(500).json({ error: error.message || 'Failed' });
