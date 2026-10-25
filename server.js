@@ -17,6 +17,7 @@ const { resolveScratchSubdir, listScratchDir } = require('./lib/scratch-files');
 const { fileUrlToPath } = require('./lib/file-url');
 const { httpError: previewError } = require('./lib/http-error');
 const { getAutoCompact } = require('./lib/auto-compact');
+const { companionStatus, installPlan, refreshLatest } = require('./lib/companions');
 
 const {
   readRecentMessages: _readRecentMessagesUncached,
@@ -2264,11 +2265,39 @@ app.get('/api/terminals/stats', terminalRoute(async (_req, res) => {
 }));
 
 app.delete('/api/terminals/:id', terminalRoute(async (req, res) => {
-  const err = await terminal.end(req.params.id, req.get('x-terminal-token'));
+  const by = req.query.by === 'dispatch' ? 'dispatch_end' : undefined;
+  const err = await terminal.end(req.params.id, req.get('x-terminal-token'), by);
   if (err === 'auth') return res.status(401).json({ error: 'invalid terminal token' });
   if (err === 'not-found') return res.status(404).json({ error: 'no such terminal' });
   res.status(204).end();
   broadcast({ type: 'terminal:ended', id: req.params.id });
+}));
+
+app.get('/api/companions', (req, res) => {
+  const companions = companionStatus({ agentDir: PI_AGENT_DIR, cwd: req.query.cwd });
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ companions });
+  refreshLatest(companions, { agentDir: PI_AGENT_DIR }).then((changed) => {
+    if (changed) broadcast({ type: 'companions:changed' });
+  });
+});
+
+// `pi install` and `pi update` write the user's settings and run package code, so they take the terminal token.
+app.post('/api/companions/install', terminalRoute(async (req, res) => {
+  if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
+  const plan = installPlan(req.body?.id, { agentDir: PI_AGENT_DIR, cwd: req.body?.cwd });
+  if (!plan) return res.status(400).json({ error: 'unknown package' });
+  const started = await terminal.startInstall(plan.piArgs, plan.cwd);
+  if (started.error) return res.status(started.status).json({ error: started.error });
+  res.status(202).json({ install: started.id });
+}));
+
+app.get('/api/companions/install/:id', terminalRoute(async (req, res) => {
+  if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
+  res.setHeader('Cache-Control', 'no-store');
+  const status = await terminal.installStatus(req.params.id);
+  if (!status) return res.status(404).json({ error: 'no such install' });
+  res.json(status);
 }));
 
 const show = createShowStore({

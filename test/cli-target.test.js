@@ -169,10 +169,10 @@ describe('CLI server resolution', () => {
       const byName = await runCli(['dispatch', 'end', '--name', 'api-worker'], env);
       assert.equal(byName.code, 0);
       assert.match(byName.stdout, /Ended session aaaa1111-/);
-      assert.deepEqual(seen.splice(0), [list, `DELETE /api/terminals/${running[0].session} t`]);
+      assert.deepEqual(seen.splice(0), [list, `DELETE /api/terminals/${running[0].session}?by=dispatch t`]);
 
       assert.equal((await runCli(['dispatch', 'end', 'aaaa2222'], env)).code, 0);
-      assert.deepEqual(seen.splice(0), [list, `DELETE /api/terminals/${running[1].session} t`]);
+      assert.deepEqual(seen.splice(0), [list, `DELETE /api/terminals/${running[1].session}?by=dispatch t`]);
 
       const ambiguous = await runCli(['dispatch', 'end', 'aaaa'], env);
       assert.equal(ambiguous.code, 1);

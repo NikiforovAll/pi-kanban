@@ -129,7 +129,7 @@ export function registerDispatch(pi: ExtensionAPI) {
 				throw new Error(matches.length ? `"${p.session}" matches ${matches.length} dispatches:\n${matches.map(dispatchLine).join("\n")}` : `No running dispatch of this session matches "${p.session}".`);
 			}
 			const { session } = matches[0];
-			await okJson(boardFetch(`/api/terminals/${encodeURIComponent(session)}`, { method: "DELETE", headers: { "x-terminal-token": terminalToken() } }));
+			await okJson(boardFetch(`/api/terminals/${encodeURIComponent(session)}?by=dispatch`, { method: "DELETE", headers: { "x-terminal-token": terminalToken() } }));
 			return text(`Ended session ${session}.`);
 		},
 	});

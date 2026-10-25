@@ -1446,7 +1446,7 @@ async function runDispatchEndCli(args) {
       return 1;
     }
     const { session } = matches[0];
-    if (!await cliSendJson('DELETE', `/api/terminals/${session}`, undefined, 'Dispatch end', { 'x-terminal-token': token })) return 1;
+    if (!await cliSendJson('DELETE', `/api/terminals/${session}?by=dispatch`, undefined, 'Dispatch end', { 'x-terminal-token': token })) return 1;
     if (args.includes('--json')) console.log(JSON.stringify({ session }, null, 2));
     else console.log(`Ended session ${session}`);
     return 0;

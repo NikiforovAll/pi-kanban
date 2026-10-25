@@ -2795,6 +2795,10 @@ function isAnyModalOpen() {
   return document.querySelector('.modal-overlay.visible') !== null;
 }
 
+function topModalId() {
+  return [...document.querySelectorAll('.modal-overlay.visible')].at(-1)?.id;
+}
+
 // An open modal owns the zoom keys even when it has nothing to scale.
 function isZoomableOnScreen() {
   return isAnyModalOpen() ? isZoomableModalOpen() : isAskOnScreen() || isPaneDocOnScreen() || isShowCardFocused();
@@ -3549,11 +3553,16 @@ function renderAgentFooter() {
   const permFresh = isWaitingFresh();
 
   if (visible.length === 0 && !permFresh) {
-    footer.classList.remove('visible');
     clearInterval(agentDurationInterval);
     agentDurationInterval = null;
     clearInterval(agentPollInterval);
     agentPollInterval = null;
+    const hint = currentSessionId ? companionHint('pi-subagents') : '';
+    footer.classList.toggle('visible', !!hint);
+    if (hint) {
+      label.textContent = 'Agents Log';
+      content.innerHTML = hint;
+    }
     return;
   }
 
@@ -4626,6 +4635,7 @@ function setColumnHtml(el, html) {
 }
 
 function renderKanban() {
+  syncCompanions();
   const filtered = currentTasks.filter((t) => !isInternalTask(t));
   const pending = filtered.filter((t) => t.status === 'pending');
   const inProgress = filtered.filter((t) => t.status === 'in_progress');
@@ -4642,7 +4652,7 @@ function renderKanban() {
     pendingTasks,
     pending.length > 0
       ? pending.map(renderTaskCard).join('')
-      : `<div class="column-empty">${emptyIcon}<div>No pending tasks</div></div>`,
+      : `<div class="column-empty">${emptyIcon}<div>No pending tasks</div>${companionHint('rpiv-todo')}</div>`,
   ]);
 
   writes.push([
@@ -6307,6 +6317,8 @@ const SHORTCUT_TABS = [
           { keys: ['T'], label: 'Toggle theme' },
           { keys: ['Shift', 'S'], combo: true, label: 'Storage manager' },
           { keys: ['←', '→'], label: 'Storage manager: switch tab' },
+          { keys: ['Shift', 'X'], combo: true, label: 'Packages: the pi packages the board reads from' },
+          { keys: ['↑', '↓'], label: 'Packages: select, Enter installs or updates' },
           {
             keys: ['Ctrl', 'Shift', 'Z'],
             combo: true,
@@ -7387,6 +7399,148 @@ async function cleanupOrphanedStorage() {
 }
 //#endregion
 
+//#region COMPANIONS
+const COMPANIONS_POLL_MS = 1000;
+let companions = [];
+let companionsCwd;
+let companionsSelected = 0;
+let companionInstall = null;
+
+function companionHint(id) {
+  const c = companions.find((x) => x.id === id && !x.scope);
+  if (!c) return '';
+  return `<button type="button" class="companion-hint" onclick="showCompanions('${c.id}')">Install ${escapeHtml(c.pkg)} to see ${escapeHtml(c.feature.toLowerCase())} here</button>`;
+}
+
+// Project packages depend on the session's folder, so the list follows the current session.
+function syncCompanions() {
+  const cwd = (currentSessionId && getSessionBaseDir(currentSessionId)) || '';
+  if (cwd !== companionsCwd) fetchCompanions(cwd);
+}
+
+async function fetchCompanions(cwd = companionsCwd) {
+  companionsCwd = cwd;
+  const got = await getJson('/api/companions', null, { query: { cwd: cwd || null }, cache: 'no-store' });
+  if (!got || cwd !== companionsCwd) return;
+  const missingBefore = companions.filter((c) => !c.scope).map((c) => c.id).join();
+  companions = got.companions;
+  const missing = companions.filter((c) => !c.optional && !c.scope).map((c) => `${c.pkg} not installed`);
+  const updates = companions.filter((c) => c.update).map((c) => `${c.pkg} has an update`);
+  const notes = [...missing, ...updates];
+  const btn = document.getElementById('companions-btn');
+  btn.querySelector('.companions-dot').hidden = !notes.length;
+  btn.title = notes.length ? `Packages (Shift+X): ${notes.join(', ')}` : 'Packages (Shift+X)';
+  if (companions.filter((c) => !c.scope).map((c) => c.id).join() !== missingBefore) {
+    renderKanban();
+    renderAgentFooter();
+  }
+  if (document.getElementById('companions-modal').classList.contains('visible')) renderCompanions();
+}
+
+function showCompanions(focusId) {
+  if (terminalPaneFocused()) leaveTerminalPane();
+  const at = companions.findIndex((c) => (focusId ? c.id === focusId : companionAction(c)));
+  companionsSelected = Math.max(at, 0);
+  document.getElementById('companions-modal').classList.add('visible');
+  renderCompanions();
+  fetchCompanions();
+}
+
+function closeCompanions() {
+  hideModalOverlay('companions-modal');
+}
+
+function companionAction(c) {
+  return !c.scope ? 'install' : c.update ? 'update' : null;
+}
+
+function companionStatusText(c) {
+  if (!c.scope) return 'not installed';
+  const version = c.version ? ` ${c.version}` : '';
+  return c.update ? `update: ${c.version} → ${c.latest} (${c.scope})` : `installed${version} (${c.scope})`;
+}
+
+const COMPANION_VERBS = { install: ['Install', 'Installing…'], update: ['Update', 'Updating…'] };
+
+function renderCompanions() {
+  const canRun = terminalAvailable();
+  document.getElementById('companions-body').innerHTML = companions
+    .map((c, i) => {
+      const verb = companionAction(c);
+      const busy = companionInstall?.companion === c.id;
+      const action = verb
+        ? `<button type="button" class="btn btn-secondary" data-run="${c.id}"${canRun && !companionInstall ? '' : ' disabled'}>${COMPANION_VERBS[verb][busy ? 1 : 0]}</button>`
+        : '';
+      const state = verb === 'update' ? ' update' : c.scope ? ' installed' : '';
+      return `<div class="companion-row${i === companionsSelected ? ' selected' : ''}${state}" data-index="${i}">
+        <span class="terminal-manager-dot"></span>
+        <div class="terminal-manager-info">
+          <div class="companion-name">${escapeHtml(c.pkg)}${c.optional ? ' <span class="companion-optional">optional</span>' : ''}</div>
+          <div class="terminal-manager-meta"><span>${escapeHtml(c.feature)}</span><span>${escapeHtml(companionStatusText(c))}</span></div>
+        </div>
+        ${action}
+      </div>`;
+    })
+    .join('');
+  document.getElementById('companions-note').textContent = canRun
+    ? 'Install and Update run pi install and pi update in a board terminal. Install adds the package to your global pi settings.'
+    : 'Install and Update need the board terminal. In a shell, run: pi install npm:<package> or pi update npm:<package>';
+  document.querySelectorAll('#companions-body [data-run]').forEach((b) => {
+    b.onclick = () => runCompanion(b.dataset.run);
+  });
+  document.querySelector('#companions-body .companion-row.selected')?.scrollIntoView({ block: 'nearest' });
+}
+
+function companionsKey(e) {
+  if (matchKey(e, 'ArrowUp', 'ArrowDown')) {
+    companionsSelected = (companionsSelected + (e.key === 'ArrowUp' ? -1 : 1) + companions.length) % companions.length;
+    renderCompanions();
+    return true;
+  }
+  if (matchKey(e, 'Enter')) {
+    const c = companions[companionsSelected];
+    if (c) runCompanion(c.id);
+    return true;
+  }
+  return false;
+}
+
+async function runCompanion(id) {
+  const action = companionAction(companions.find((c) => c.id === id) || {});
+  if (!action || companionInstall || !terminalAvailable()) return;
+  const body = await newSessionPost('/api/companions/install', { id, cwd: companionsCwd || null }, `pi ${action} did not start`);
+  if (body.error) {
+    showToast(body.error, 'error');
+    return;
+  }
+  companionInstall = { id: body.install, companion: id };
+  renderCompanions();
+  pollCompanionInstall();
+}
+
+async function pollCompanionInstall() {
+  const status = await getJson(apiPath`/api/companions/install/${companionInstall.id}`, null, {
+    headers: { 'X-Terminal-Token': terminalToken || '' },
+    cache: 'no-store',
+  });
+  const out = document.getElementById('companions-output');
+  out.hidden = false;
+  const running = status && !status.exited;
+  out.textContent = running
+    ? status.output
+    : status
+      ? `${status.output}\n\n${status.code === 0 ? 'Done.' : `${status.command} exited with code ${status.code}.`}`
+      : 'The board lost the run. Open the dialog again to see the package status.';
+  out.scrollTop = out.scrollHeight;
+  if (running) {
+    setTimeout(pollCompanionInstall, COMPANIONS_POLL_MS);
+    return;
+  }
+  companionInstall = null;
+  await fetchCompanions();
+}
+//#endregion
+
 //#region KEYBOARD_SHORTCUTS
 function matchKey(e, ...keys) {
   if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return false;
@@ -7512,6 +7666,7 @@ const MODAL_CLOSERS = {
   'session-picker-modal': () => closeSessionPicker(),
   'project-picker-modal': () => closeProjectPicker(),
   'terminal-manager-modal': () => closeTerminalManager(),
+  'companions-modal': () => closeCompanions(),
   'new-session-modal': () => closeNewSession(),
   'confirm-modal': () => closeConfirmModal?.(false),
   'pane-pop': () => closePanePop(),
@@ -7580,10 +7735,12 @@ document.addEventListener('keydown', (e) => {
       closeHelpModal();
     } else if (
       matchKey(e, 'ArrowLeft', 'ArrowRight') &&
-      [...document.querySelectorAll('.modal-overlay.visible')].at(-1)?.id === 'storage-modal'
+      topModalId() === 'storage-modal'
     ) {
       e.preventDefault();
       stepStorageTab(matchKey(e, 'ArrowLeft') ? -1 : 1);
+    } else if (topModalId() === 'companions-modal' && companionsKey(e)) {
+      e.preventDefault();
     } else if (shiftOnly(e, 'KeyM') && document.getElementById('msg-detail-modal').classList.contains('visible')) {
       e.preventDefault();
       closeMsgDetailModal();
@@ -7713,6 +7870,11 @@ document.addEventListener('keydown', (e) => {
   if (shiftOnly(e, 'KeyS')) {
     e.preventDefault();
     showStorageManager();
+    return;
+  }
+  if (shiftOnly(e, 'KeyX')) {
+    e.preventDefault();
+    showCompanions();
     return;
   }
   if (shiftOnly(e, 'KeyZ')) {
@@ -9901,6 +10063,8 @@ function setupEventSource() {
       if (data.type === 'terminal:ended' && typeof data.id === 'string') onTerminalEnded(data.id);
 
       if (data.type === 'dispatch-update') onDispatchUpdate();
+
+      if (data.type === 'companions:changed') fetchCompanions();
 
       if (data.type === 'show:posted') onShowPosted(data);
 
@@ -16898,6 +17062,7 @@ if ('serviceWorker' in navigator) {
 
 //#region INIT
 loadTheme();
+syncCompanions();
 if (store.getItem(sectionCollapsedKey('sessions-filters')) === 'true') {
   document.getElementById('sessions-filters').classList.add('collapsed');
   document.getElementById('sessions-chevron').classList.add('rotated');

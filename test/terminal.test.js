@@ -5,7 +5,7 @@ const { mkdtempSync, readFileSync, realpathSync, rmSync } = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { createTerminalService, shellArgs, piCommand, readTerminalConfig, clientConfigFor, resolveShell, piArgsFor, withTuiMode, windowsPtyFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
+const { createTerminalService, shellArgs, oneShotArgs, piCommand, readTerminalConfig, clientConfigFor, resolveShell, piArgsFor, withTuiMode, windowsPtyFor, parseNewSpec, findPickProcess, ptyEnv } = require('../lib/terminal');
 
 let WebSocket = null;
 let ptyAvailable = false;
@@ -154,6 +154,16 @@ describe('shellArgs', () => {
     const args = ['--name', 'Fix login'];
     assert.equal(shellArgs('pwsh.exe', args)[3], "pi --name 'Fix login'");
     assert.equal(shellArgs('cmd.exe', args)[1], 'pi --name "Fix login"');
+  });
+});
+
+describe('oneShotArgs', () => {
+  const install = ['install', 'npm:pi-subagents'];
+  it('runs pi once and lets the shell exit with it', () => {
+    assert.deepEqual(oneShotArgs('pwsh.exe', install), ['-NoLogo', '-Command', "pi install 'npm:pi-subagents'"]);
+    assert.deepEqual(oneShotArgs('cmd.exe', install), ['/c', 'pi install "npm:pi-subagents"']);
+    assert.deepEqual(oneShotArgs('C:/Program Files/Git/bin/bash.exe', install), ['--login', '-c', "pi install 'npm:pi-subagents'"]);
+    assert.deepEqual(oneShotArgs('/bin/zsh', install), ['-c', "pi install 'npm:pi-subagents'"]);
   });
 });
 
@@ -572,6 +582,19 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
     const got = await session(port, { id: SESSION, mode: 'resume' }, (g) => g.closeCode !== null);
     assert.equal(got.closeCode, 4004);
   });
+  it('lists the companion packages', async () => {
+    const res = await api(port, 'GET', '/api/companions');
+    assert.equal(res.status, 200);
+    assert.ok(res.json.companions.some((c) => c.id === 'pi-subagents'));
+  });
+  it('refuses a package install without the token', async () => {
+    const res = await api(port, 'POST', '/api/companions/install', { origin: `http://localhost:${port}`, 'x-terminal-token': 'nope' });
+    assert.equal(res.status, 401);
+  });
+  it('refuses an install of a package it does not know', async () => {
+    const res = await api(port, 'POST', '/api/companions/install', { origin: `http://localhost:${port}`, 'x-terminal-token': TOKEN });
+    assert.equal(res.status, 400);
+  });
   const missingDir = path.join(os.tmpdir(), 'pk-no-such-folder');
   it('refuses a new session in a folder that does not exist', async () => {
     const got = await session(port, { id: SESSION, mode: 'new', cwd: missingDir }, (g) => g.closeCode !== null);
@@ -696,6 +719,53 @@ async function until(check, timeoutMs = 2000) {
   const end = Date.now() + timeoutMs;
   while (!check() && Date.now() < end) await wait(10);
 }
+
+describe('package install', () => {
+  function service(config = {}) {
+    const pty = fakePty();
+    const agentDir = path.join(os.tmpdir(), 'pk-install-agent');
+    const t = createTerminalService({
+      config: { enabled: true, shell: SHELL, maxSessions: 30, scrollback: 100, ...config },
+      net: { EXPOSED: false },
+      pty,
+      token: TOKEN,
+      piAgentDir: agentDir,
+      which: (n) => n,
+      resolveCwd: () => null,
+      isAllowedFolder: () => true,
+    });
+    return { t, pty, agentDir };
+  }
+
+  it('runs pi install in a one-shot shell and reports its output and exit', async () => {
+    const { t, pty, agentDir } = service();
+    const { id } = t.startInstall(['install', 'npm:pi-subagents']);
+    assert.ok(id);
+    const p = pty.spawned[0];
+    assert.match(p.args.join(' '), /pi install .npm:pi-subagents./);
+    assert.equal(p.env.PI_CODING_AGENT_DIR, agentDir);
+    assert.equal(t.startInstall(['update', 'npm:pi-cost']).status, 409);
+
+    p.emit('Installed npm:pi-subagents\r\n');
+    p.exit();
+    await until(() => t.installStatus(id)?.exited);
+    const status = t.installStatus(id);
+    assert.equal(status.command, 'pi install npm:pi-subagents');
+    assert.equal(status.code, 0);
+    assert.match(status.output, /Installed npm:pi-subagents/);
+    assert.equal(t.installStatus('other'), null);
+    assert.ok(t.startInstall(['update', 'npm:pi-cost']).id);
+    assert.match(pty.spawned[1].args.join(' '), /pi update .npm:pi-cost./);
+    t.shutdown();
+  });
+
+  it('refuses when the terminal is off', () => {
+    const { t, pty } = service({ enabled: false });
+    assert.equal(t.startInstall(['install', 'npm:pi-subagents']).status, 403);
+    assert.equal(pty.spawned.length, 0);
+    t.shutdown();
+  });
+});
 
 describe('terminal restore', () => {
   const A = 'aaaaaaaa-0000-0000-0000-000000000001';

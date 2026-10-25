@@ -3220,6 +3220,107 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
   margin: 0 6px;
 }
 
+.companions-modal {
+  width: 90%;
+  max-width: 640px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.companion-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.companion-row:last-child {
+  border-bottom: none;
+}
+
+.companion-row.selected {
+  background: var(--bg-hover);
+}
+
+.companion-row:not(.installed) .terminal-manager-dot {
+  border-color: var(--warning);
+}
+
+.companion-row.update .terminal-manager-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.companion-row.installed .terminal-manager-dot {
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.companion-name {
+  font-weight: 500;
+}
+
+.companion-optional {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+.companions-output {
+  margin: 0 20px 12px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.companions-note {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+#companions-btn {
+  position: relative;
+}
+
+.companions-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.companion-hint {
+  display: block;
+  margin: 10px auto 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.companion-hint:hover {
+  text-decoration: underline;
+}
+
+.agent-footer-content .companion-hint {
+  margin: 8px 12px;
+}
+
 .terminal-manager-empty {
   color: var(--text-muted);
   padding: 24px 0;
