@@ -6,7 +6,7 @@ pi-kanban is an agent development environment (ADE) for the [pi coding agent](ht
 
 ### Runtime pieces
 
-1. **`server.js`** — Express server and the `pi-kanban` bin. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-sessions.js`, `lib/pi-transcript.js` and `lib/parsers.js`), plus terminal, dispatch, show/ask, pane, preview, and "open in editor" APIs. With a subcommand (`pi-kanban doc|pane|show|session|group|task|project|dispatch|terminal|skills`), it runs `cli.js` against a running board instead.
+1. **`server.js`** — Express server and the `pi-kanban` bin. Watches `~/.pi/agent/sessions` with chokidar and broadcasts changes via SSE (`/api/events`). Exposes session/task/agent endpoints (all delegate parsing to `lib/pi-sessions.js`, `lib/pi-transcript.js` and `lib/parsers.js`), plus terminal, dispatch, show/ask, pane, and preview APIs. With a subcommand (`pi-kanban doc|pane|show|session|group|task|project|dispatch|terminal|skills`), it runs `cli.js` against a running board instead.
 
 2. **Board terminal** — on by default, `--no-terminal` turns it off. `lib/terminal.js` keeps one PTY per session and serves it over a WebSocket behind the Host, Origin, and token gates. The PTYs live in a forked host process (`lib/terminal-host.js`, driven over IPC by `lib/terminal-client.js`), so a closed socket does not end pi. The token goes to the browser in the URL fragment (`#t=...`). `public/terminal.html` and `public/terminal-frame.js` render it with xterm.
 
