@@ -111,6 +111,7 @@ const LINKED_DOCS_FILE = path.join(PK_DIR, 'linked-docs.json');
 const PANES_FILE = path.join(PK_DIR, 'panes.json');
 const SERVER_INFO_FILE = path.join(PK_DIR, 'server.json');
 const TERMINAL_TOKENS_DIR = path.join(PK_DIR, 'terminal-tokens');
+const TERMINAL_SECRET_FILE = path.join(PK_DIR, 'terminal-secret.json');
 const SESSION_CACHE_FILE = path.join(PK_DIR, 'session-cache.json');
 // Every board on a config dir rewrites the whole file, so a test board points this elsewhere.
 const TERMINALS_FILE = process.env.PK_TERMINALS_FILE ? path.resolve(process.env.PK_TERMINALS_FILE) : path.join(PK_DIR, 'terminals.json');
@@ -203,6 +204,18 @@ function writeTerminalToken(port) {
   }
   terminalTokenFile = path.join(TERMINAL_TOKENS_DIR, `${port}.json`);
   writeJsonAtomicOrLog(terminalTokenFile,{ pid: process.pid, token: terminal.token }, 0o600);
+}
+
+// The token outlives the server, so a restart does not cut off the terminal in open board tabs.
+// --new-token replaces it.
+function persistentTerminalToken() {
+  if (process.env.PK_TERMINAL_TOKEN) return process.env.PK_TERMINAL_TOKEN;
+  if (process.argv.includes('--no-terminal')) return undefined;
+  const saved = !process.argv.includes('--new-token') && readJsonOrNull(TERMINAL_SECRET_FILE)?.token;
+  if (typeof saved === 'string' && /^[0-9a-f]{64}$/.test(saved)) return saved;
+  const token = crypto.randomBytes(32).toString('hex');
+  writeJsonAtomicOrLog(TERMINAL_SECRET_FILE, { token }, 0o600);
+  return token;
 }
 
 function ownerPid(file) {
@@ -2086,7 +2099,7 @@ const terminal = createTerminalClient({
   net,
   piAgentDir: PI_AGENT_DIR,
   sessionsDir: SESSIONS_DIR,
-  token: process.env.PK_TERMINAL_TOKEN,
+  token: persistentTerminalToken(),
   load: terminalsFile.load,
   save: (data) => {
     savedTerminals = data;

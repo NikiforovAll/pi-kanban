@@ -19,12 +19,17 @@ const TOKEN = 'a'.repeat(64);
 const SESSION = '11111111-2222-3333-4444-555555555555';
 const SHELL = process.platform === 'win32' ? 'cmd.exe' : 'sh';
 
-function startServer(extraArgs) {
+function tempAgentDir() {
   // os.tmpdir() can be an 8.3 short path, and libuv's Windows watcher asserts on an event
   // under one (fs-event.c), which kills the server the first time it writes to .pi-kanban.
-  const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pk-term-')));
+  return realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pk-term-')));
+}
+
+function startServer(extraArgs, { dir = tempAgentDir(), token = TOKEN } = {}) {
+  const env = { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, PK_TERMINAL_TOKEN: token };
+  if (!token) delete env.PK_TERMINAL_TOKEN;
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js'), ...extraArgs], {
-    env: { ...process.env, PORT: '0', PI_CODING_AGENT_DIR: dir, PK_TERMINAL_TOKEN: TOKEN },
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const port = new Promise((resolve, reject) => {
@@ -39,13 +44,14 @@ function startServer(extraArgs) {
   return { child, dir, port };
 }
 
-function stopServer(s) {
+function stopServer(s, { keepDir = false } = {}) {
   if (process.platform === 'win32') spawn('taskkill', ['/pid', String(s.child.pid), '/f', '/t'], { stdio: 'ignore' });
   else s.child.kill();
   // A child that outlives the kill must not keep the test process alive through its pipes.
   s.child.stdout.destroy();
   s.child.stderr.destroy();
   s.child.unref();
+  if (keepDir) return;
   try { rmSync(s.dir, { recursive: true, force: true }); } catch { /* locked by the dying child */ }
 }
 
@@ -560,6 +566,29 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
   it('writes its token in a file named by its port', () => {
     const file = path.join(srv.dir, 'kanban', 'terminal-tokens', `${port}.json`);
     assert.equal(JSON.parse(readFileSync(file, 'utf8')).token, TOKEN);
+  });
+
+  it('keeps a generated token across restarts until --new-token', async () => {
+    const dir = tempAgentDir();
+    const tokenOfRun = async (args) => {
+      const run = startServer(['--terminal-shell', SHELL, ...args], { dir, token: null });
+      try {
+        const runPort = await run.port;
+        return JSON.parse(readFileSync(path.join(dir, 'kanban', 'terminal-tokens', `${runPort}.json`), 'utf8')).token;
+      } finally {
+        stopServer(run, { keepDir: true });
+      }
+    };
+    try {
+      const first = await tokenOfRun([]);
+      assert.match(first, /^[0-9a-f]{64}$/);
+      assert.equal(await tokenOfRun([]), first);
+      const fresh = await tokenOfRun(['--new-token']);
+      assert.notEqual(fresh, first);
+      assert.equal(await tokenOfRun([]), fresh);
+    } finally {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* locked by the dying child */ }
+    }
   });
 
   it('refuses a cross-origin handshake', async () => {

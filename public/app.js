@@ -14302,11 +14302,11 @@ function readTerminalToken() {
     history.replaceState(null, '', location.pathname + location.search);
     return m[1];
   }
-  return tabStore.getItem(TERMINAL_TOKEN_KEY);
+  return store.getItem(TERMINAL_TOKEN_KEY);
 }
 
 function storeTerminalToken(token) {
-  tabStore.setItem(TERMINAL_TOKEN_KEY, token);
+  store.setItem(TERMINAL_TOKEN_KEY, token);
 }
 
 function terminalAvailable() {
