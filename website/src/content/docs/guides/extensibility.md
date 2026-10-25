@@ -39,7 +39,7 @@ pi-kanban pane add http://localhost:5173 --session <id>
 pi-kanban session list
 ```
 
-Run `pi-kanban help <command>` for the subcommands and flags, or see the [CLI reference](../../reference/cli/). `pi-kanban skills get <name>` prints a skill guide that ships with this version.
+Run `pi-kanban help <command>` for the subcommands and flags, or see the [CLI reference](../../reference/cli/). `pi-kanban skills get <name>` prints the SKILL.md of a skill that ships with this version.
 
 ## Themes
 
