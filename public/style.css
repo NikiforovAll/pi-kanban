@@ -2780,6 +2780,7 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
    only what actually differs (color, glyph size). */
 .team-info-btn,
 .plan-indicator,
+.cost-badge,
 .dispatched-badge,
 .terminal-badge {
   width: 18px;
@@ -2796,7 +2797,8 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
   transition: all 0.15s ease;
 }
 
-.team-info-btn:hover {
+.team-info-btn:hover,
+.cost-badge:hover {
   background: var(--bg-hover);
   border-color: var(--border);
   color: var(--text-secondary);

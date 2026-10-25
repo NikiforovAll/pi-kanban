@@ -358,4 +358,47 @@ describe('CLI argument parsing', () => {
       srv.close();
     }
   });
+
+  it('pane add --companion sends the companion and the terminal token, and no target', async () => {
+    const seen = [];
+    const srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url.startsWith('/api/session/resolve')) return res.end('{"id":"s1-full"}');
+        seen.push(`${req.method} ${req.url} ${req.headers['x-terminal-token'] || '-'} ${raw}`.trim());
+        res.end(JSON.stringify({ pane: { id: 'p2', kind: 'url', target: 'http://127.0.0.1:5/s/s1', title: 'pi-cost', companion: 'pi-cost' }, added: false }));
+      });
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const dir = tempConfigDir({ port: srv.address().port, pid: process.pid }, 'tok');
+      const env = { PI_CODING_AGENT_DIR: dir, PI_KANBAN_SESSION_ID: 's1' };
+      const add = await runCli(['pane', 'add', '--companion', 'pi-cost'], env);
+      assert.equal(add.code, 0, add.stderr);
+      assert.equal(add.stdout, 'p2  pi-cost (already there)\n');
+      assert.deepEqual(seen, ['POST /api/panes/s1-full tok {"companion":"pi-cost","title":""}']);
+
+      const both = await runCli(['pane', 'add', 'x.html', '--companion', 'pi-cost'], env);
+      assert.equal(both.code, 1);
+      assert.match(both.stdout, /Usage: pi-kanban pane add/);
+      assert.equal(seen.length, 1);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('pane add --companion needs the terminal token', async () => {
+    const srv = http.createServer((req, res) => res.end('{}'));
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const dir = tempConfigDir({ port: srv.address().port, pid: process.pid });
+      const { code, stderr } = await runCli(['pane', 'add', '--companion', 'pi-cost', '--session', 's1'], { PI_CODING_AGENT_DIR: dir });
+      assert.equal(code, 1);
+      assert.match(stderr, /No terminal token/);
+    } finally {
+      srv.close();
+    }
+  });
 });

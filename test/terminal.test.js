@@ -67,11 +67,12 @@ async function retryConnect(attempt) {
 }
 
 // A fresh connection per call: a pooled keep-alive socket can be closed by the server just as it is reused.
-function api(port, method, pathname, headers = {}) {
-  return retryConnect(() => apiOnce(port, method, pathname, headers));
+function api(port, method, pathname, headers = {}, body) {
+  return retryConnect(() => apiOnce(port, method, pathname, headers, body));
 }
 
-function apiOnce(port, method, pathname, headers) {
+function apiOnce(port, method, pathname, headers, body) {
+  if (body) headers = { ...headers, 'content-type': 'application/json' };
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, method, path: pathname, headers, agent: false }, (res) => {
       let body = '';
@@ -80,7 +81,7 @@ function apiOnce(port, method, pathname, headers) {
     });
     req.setTimeout(15000, () => req.destroy(new Error(`timeout: ${method} ${pathname}`)));
     req.on('error', reject);
-    req.end();
+    req.end(body && JSON.stringify(body));
   });
 }
 
@@ -597,6 +598,14 @@ describe('terminal endpoint', { skip: !ptyAvailable }, () => {
     const res = await api(port, 'POST', start, { origin: `http://localhost:${port}`, 'x-terminal-token': TOKEN });
     assert.deepEqual([res.status, res.json.error], [404, 'unknown companion']);
   });
+  it('adds a companion pane only with the token', async () => {
+    const panes = '/api/panes/00000000-0000-4000-8000-00000000c0a1';
+    const headers = (token) => ({ origin: `http://localhost:${port}`, 'x-terminal-token': token });
+    assert.equal((await api(port, 'POST', panes, headers('nope'), { companion: 'pi-cost' })).status, 401);
+    const res = await api(port, 'POST', panes, headers(TOKEN), { companion: 'pi-subagents' });
+    assert.deepEqual([res.status, res.json.error], [404, 'unknown companion']);
+    assert.deepEqual((await api(port, 'GET', panes)).json.panes, []);
+  });
   it('refuses an install of a package it does not know', async () => {
     const res = await api(port, 'POST', '/api/companions/install', { origin: `http://localhost:${port}`, 'x-terminal-token': TOKEN });
     assert.equal(res.status, 400);
@@ -1086,5 +1095,7 @@ describe('terminal endpoint when disabled', { skip: !ptyAvailable }, () => {
     const res = await api(port, 'POST', '/api/companions/pi-cost/start', { origin: `http://localhost:${port}`, 'x-terminal-token': 'x' });
     assert.equal(res.status, 403);
     assert.equal(res.json.error, 'Companions need the board terminal, which is disabled');
+    const pane = await api(port, 'POST', '/api/panes/00000000-0000-4000-8000-00000000c0a1', { origin: `http://localhost:${port}` }, { companion: 'pi-cost' });
+    assert.equal(pane.status, 403);
   });
 });

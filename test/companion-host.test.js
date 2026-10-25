@@ -58,12 +58,15 @@ describe('companion host', () => {
     fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ packages: [path.relative(agentDir, tool)] }));
   });
 
+  // stop() kills without waiting, and Windows refuses to remove a dir a dying child still has as cwd.
+  const rm = (p) => fs.rmSync(p, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+
   afterEach(() => {
     for (const h of hosts.splice(0)) h.stop();
-    fs.rmSync(dir, { recursive: true, force: true });
+    rm(dir);
   });
 
-  after(() => fs.rmSync(root, { recursive: true, force: true }));
+  after(() => rm(root));
 
   it('starts the tool on loopback, records its port, and reuses the running child', async () => {
     const h = host();

@@ -1,7 +1,7 @@
 import { dirname, join as joinPath } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
-import { linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
+import { addPane, linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
 import { registerDispatch } from "./tools/dispatch.js";
 import { registerInbox } from "./tools/inbox.js";
 import { registerScratchpad } from "./tools/scratchpad.js";
@@ -65,8 +65,11 @@ const SESSION_SUBCOMMANDS = [
 	"unpin",
 	"view-doc",
 	"link-doc",
+	"cost",
+	"inspect",
 ] as const;
 type SessionSub = (typeof SESSION_SUBCOMMANDS)[number];
+const COMPANION_OF = { cost: "pi-cost", inspect: "pi-inspect" } as const;
 
 // Whole commands, never an argument: Enter on a completion must not replace a typed path.
 const COMPLETIONS = [...SUBCOMMANDS, ...SESSION_SUBCOMMANDS.map((s) => `session ${s}`)];
@@ -308,6 +311,8 @@ function registerModelWindows(pi: ExtensionAPI) {
 					"  session unpin [<id>]",
 					"  session view-doc <file> [<id>]",
 					"  session link-doc <file> [<id>]",
+					"  session cost [<id>]       Add a pi-cost pane: cost, tokens and models",
+					"  session inspect [<id>]    Add a pi-inspect pane: what pi loaded",
 				];
 				notify(lines.join("\n"));
 			}
@@ -385,6 +390,22 @@ function registerModelWindows(pi: ExtensionAPI) {
 					try {
 						const target = resolveTarget(ctx.cwd, file);
 						notify(verb === "link-doc" ? await linkDoc(sessionId!, target) : await previewDoc(target, sessionId));
+					} catch (e: any) {
+						notify(`${verb} failed: ${e?.message ?? e}`, "error");
+					}
+					return;
+				}
+
+				if (verb === "cost" || verb === "inspect") {
+					const id = verbRest[0] ?? ctx.sessionManager.getSessionId() ?? null;
+					if (!id) {
+						notify(`Usage: /kanban session ${verb} <session-id> (no current session to default to)`, "error");
+						return;
+					}
+					const companion = COMPANION_OF[verb];
+					try {
+						const { pane, added } = await addPane(id, ctx.cwd, { companion });
+						notify(`${added ? "Added" : "Already there"}: ${pane.id}  ${pane.title}. Open its tab on the board.`);
 					} catch (e: any) {
 						notify(`${verb} failed: ${e?.message ?? e}`, "error");
 					}

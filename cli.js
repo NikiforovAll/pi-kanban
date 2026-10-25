@@ -65,10 +65,11 @@ const COMMANDS = {
     verbs: {
       add: {
         summary: 'Add a pane to a session; it opens as a tab next to Board, in the background',
-        usage: 'pi-kanban pane add <url|file> [--title <text>] [--session <id>] [--json]',
+        usage: 'pi-kanban pane add <url|file> | --companion <id> [--title <text>] [--session <id>] [--json]',
         flags: {
           '<url|file>': 'An http(s) URL, or a local HTML, markdown, text or image file (relative paths resolve against the current dir)',
-          '--title <text>': 'Tab title (default: the host or file name)',
+          '--companion <id>': 'pi-cost (the session\'s cost, tokens and models) or pi-inspect (what pi loaded), in place of a target. The board starts the tool; needs the terminal token, like dispatch start.',
+          '--title <text>': 'Tab title (default: the host, file name or companion)',
           [SESSION_FLAG]: SESSION_FLAG_HELP,
           '--json': 'Output JSON (the new pane, with frameable: true, false, or null when unknown)',
         },
@@ -76,6 +77,7 @@ const COMMANDS = {
         examples: [
           'pi-kanban pane add http://localhost:5173',
           'pi-kanban pane add ./report.html --title Report',
+          'pi-kanban pane add --companion pi-cost --session $PI_KANBAN_SESSION_ID',
         ],
         run: runPaneAddCli,
       },
@@ -702,20 +704,28 @@ const panesPath = (sessionId, paneId) =>
   `/api/panes/${encodeURIComponent(sessionId)}${paneId ? `/${encodeURIComponent(paneId)}` : ''}`;
 
 async function runPaneAddCli(args, entry) {
-  const [target] = positionals(args, ['--session', '--title']);
-  if (!target) {
+  const [target] = positionals(args, ['--session', '--title', '--companion']);
+  const companion = getArgValue(args, 'companion');
+  if (!target === !companion) {
     printLeafHelp(entry);
     return 1;
+  }
+  let headers;
+  if (companion) {
+    const token = readTerminalToken();
+    if (!token) return 1;
+    headers = { 'x-terminal-token': token };
   }
   const resolved = await resolveSessionArg(entry, args, PANES_WHY);
   if (!resolved) return 1;
   try {
-    const body = { target: cliTarget(target), title: getArgValue(args, 'title') || '' };
-    const out = await cliPostJson(panesPath(resolved.id), body, 'Pane add');
+    const title = getArgValue(args, 'title') || '';
+    const body = companion ? { companion, title } : { target: cliTarget(target), title };
+    const out = await cliPostJson(panesPath(resolved.id), body, 'Pane add', headers);
     if (!out) return 1;
     const { pane } = out;
     let frameable;
-    if (pane.kind === 'url') {
+    if (pane.kind === 'url' && !pane.companion) {
       try {
         ({ frameable } = await cliGetJson(`${panesPath(resolved.id, pane.id)}/framing`, 'Pane framing'));
       } catch {}

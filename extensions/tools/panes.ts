@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { boardFetch, okJson, postJson, sessionIdOf, toolText as text } from "./board-api.js";
+import { boardFetch, lib, okJson, postJson, sessionIdOf, terminalToken, toolText as text } from "./board-api.js";
 
 const { linkUrl } = createRequire(import.meta.url)("../../public/link-url.js") as { linkUrl: (v: unknown) => string | null };
 const isUrl = (target: string) => linkUrl(target) !== null;
@@ -21,7 +21,7 @@ export function resolveTarget(cwd: string, input: string): string {
 }
 
 const boardJson = (path: string, init?: RequestInit) => okJson(boardFetch(path, init));
-const postBoardJson = (path: string, body: unknown) => okJson(postJson(path, body));
+const postBoardJson = (path: string, body: unknown, headers?: Record<string, string>) => okJson(postJson(path, body, { headers }));
 
 const panesPath = (sessionId: string, paneId?: string) =>
 	`/api/panes/${encodeURIComponent(sessionId)}${paneId ? `/${encodeURIComponent(paneId)}` : ""}`;
@@ -46,27 +46,41 @@ export async function previewDoc(target: string, sessionId: string | null): Prom
 
 const TARGET = Type.String({ description: "An http(s) URL, or a file path: absolute, relative to the session cwd, or starting with ~" });
 
+const COMPANION_IDS: string[] = lib("companions.js").COMPANIONS.filter((c: any) => c.optional).map((c: any) => c.id);
+
+// The board starts the tool, which runs package code, so a companion pane takes the terminal token.
+export async function addPane(sessionId: string, cwd: string, params: { target?: string; title?: string; companion?: string }) {
+	if (params.companion) {
+		const body = { companion: params.companion, title: params.title ?? "" };
+		return postBoardJson(panesPath(sessionId), body, { "x-terminal-token": terminalToken() });
+	}
+	if (!params.target) throw new Error("Give a target, or a companion.");
+	return postBoardJson(panesPath(sessionId), { target: resolveTarget(cwd, params.target), title: params.title ?? "" });
+}
+
 export function registerPaneTools(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "pane_add",
 		label: "Add Pane",
 		description:
-			"Add a URL or a local HTML, markdown, text or image file to this session's view on the pi-kanban board, as a tab next to Board. The board does not switch to it; the user opens it when ready. Adding the same target again returns the pane it already has. Returns the pane id.",
-		promptSnippet: "Add a URL or a local file as a background tab on the pi-kanban board",
+			"Add a URL or a local HTML, markdown, text or image file to this session's view on the pi-kanban board, as a tab next to Board. With companion instead of target, the board starts that tool and adds its page for this session: pi-cost shows the session's cost, tokens and models; pi-inspect shows what pi loaded (system prompt, tools, extensions, skills, context). The board does not switch to the pane; the user opens it when ready. Adding the same target or companion again returns the pane it already has. Returns the pane id.",
+		promptSnippet: "Add a URL, a local file, or the pi-cost or pi-inspect page as a background tab on the pi-kanban board",
 		promptGuidelines: [
 			"Use pane_add for a page the user will want to keep open beside the board, such as a dev server or a generated HTML report.",
+			"When the user asks what this session costs, use pane_add with companion pi-cost. When the user asks what pi loaded (tools, extensions, skills, the system prompt), use pane_add with companion pi-inspect.",
 		],
 		parameters: Type.Object({
-			target: TARGET,
-			title: Type.Optional(Type.String({ description: "Tab title. Default: the host or the file name." })),
+			target: Type.Optional(TARGET),
+			companion: Type.Optional(Type.Union(COMPANION_IDS.map((id) => Type.Literal(id)), { description: "A board-hosted tool to show for this session, instead of target" })),
+			title: Type.Optional(Type.String({ description: "Tab title. Default: the host, the file name, or the companion." })),
 		}),
 		annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const sessionId = sessionIdOf(ctx);
-			const out = await postBoardJson(panesPath(sessionId), { target: resolveTarget(ctx.cwd, params.target), title: params.title ?? "" });
+			const out = await addPane(sessionId, ctx.cwd, params);
 			const { pane } = out;
 			const lines = [`${pane.id}  ${pane.title}${out.added ? "" : " (already there)"}`];
-			if (pane.kind === "url") {
+			if (pane.kind === "url" && !pane.companion) {
 				const { frameable } = await boardJson(`${panesPath(sessionId, pane.id)}/framing`).catch(() => ({ frameable: null }));
 				if (frameable === false) {
 					lines.push(`note: ${new URL(pane.target).host} refuses framing, so the pane shows an "Open in new tab" card. Look for a URL of the same content that allows framing.`);

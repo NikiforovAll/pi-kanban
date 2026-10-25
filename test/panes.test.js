@@ -56,6 +56,8 @@ describe('pane store', () => {
     assert.equal(panes.add('s1', { ...url(1), companion: 'pi-cost' }).pane.companion, 'pi-cost');
     assert.equal('companion' in panes.add('s1', { kind: 'html', target: 'C:\\pad\\a.html', companion: 'pi-cost' }).pane, false);
     assert.equal(open().get('s1').panes[0].companion, 'pi-cost');
+    const moved = panes.add('s1', { ...url(2), companion: 'pi-cost' });
+    assert.deepEqual([moved.added, moved.pane.id, moved.pane.target], [false, 'p1', url(1).target]);
   });
 
   it('drops the show panes of removed posts and keeps a plain pane of the same file', () => {

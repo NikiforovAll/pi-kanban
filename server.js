@@ -2281,14 +2281,22 @@ const companionHost = createCompanionHost({ agentDir: PI_AGENT_DIR, dir: path.jo
 process.on('exit', companionHost.stop);
 
 // Starting a companion runs package code, so it takes the terminal token like `pi install`.
-app.post('/api/companions/:id/start', async (req, res) => {
+async function startCompanion(req, id) {
   const reason = terminal.unavailableReason();
-  if (reason) return res.status(403).json({ error: `Companions need the board terminal, which is ${reason}` });
-  if (!terminal.authorized(req.get('x-terminal-token'))) return res.status(401).json({ error: 'invalid terminal token' });
-  const entry = await companionHost.start(req.params.id);
-  if (entry.error) return res.status(entry.status).json({ error: entry.error });
-  const session = typeof req.body?.session === 'string' ? req.body.session : null;
-  res.json({ url: companionHost.url(entry, session), port: entry.port });
+  if (reason) throw previewError(403, `Companions need the board terminal, which is ${reason}`, 'terminal_unavailable');
+  if (!terminal.authorized(req.get('x-terminal-token'))) throw previewError(401, 'invalid terminal token', 'bad_token');
+  const entry = await companionHost.start(id);
+  if (entry.error) throw previewError(entry.status, entry.error, 'companion');
+  return entry;
+}
+
+app.post('/api/companions/:id/start', async (req, res) => {
+  try {
+    const { port } = await startCompanion(req, req.params.id);
+    res.json({ port });
+  } catch (error) {
+    paneRouteError(res, error, 'POST /api/companions/start');
+  }
 });
 
 // `pi install` and `pi update` write the user's settings and run package code, so they take the terminal token.
@@ -3129,11 +3137,16 @@ app.get('/api/panes/:sessionId', (req, res) => {
 app.post('/api/panes/:sessionId', async (req, res) => {
   try {
     const { target, base, title, kind, show, companion } = req.body || {};
+    if (companion != null) {
+      // The pane keeps the tool's own URL for this session, which only a started tool can give.
+      const entry = await startCompanion(req, companion);
+      const pane = { kind: 'url', target: companionHost.url(entry, req.params.sessionId), title: title || companion, companion };
+      return res.json(panes.add(req.params.sessionId, pane));
+    }
     if (typeof target !== 'string' || !target) throw previewError(400, 'target is required', 'bad_target');
     // A message target is a session log message id, which the board resolves when it shows the pane.
     const resolved = kind === 'message' ? { kind, target } : await resolvePaneTarget(target, base);
-    const hosted = COMPANIONS.some((c) => c.optional && c.id === companion) ? companion : null;
-    res.json(panes.add(req.params.sessionId, { ...resolved, title, show: show === true, companion: hosted }));
+    res.json(panes.add(req.params.sessionId, { ...resolved, title, show: show === true }));
   } catch (error) {
     paneRouteError(res, error, 'POST /api/panes');
   }

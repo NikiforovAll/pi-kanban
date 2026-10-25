@@ -1929,6 +1929,8 @@ const ICON_AGENT_ACTIVE =
 const ICON_TERMINAL =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 const TERMINAL_TITLE = 'Running in a terminal here';
+const ICON_COST =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>';
 const ICON_DISPATCHED =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>';
 const ICON_CHAT =
@@ -4014,6 +4016,7 @@ function renderSessions() {
     return out;
   };
 
+  const canOpenCost = companionReady('pi-cost');
   const renderSessionCard = (session) => {
     if (session.placeholder) return renderPlaceholderCard(session, childDepth.get(session.id));
     const total = session.taskCount;
@@ -4066,6 +4069,7 @@ function renderSessions() {
                 ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${sid}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}">${BOOKMARK_SVG}${bookmarksCount}</span>` : ''}
                 ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
                 ${session.hasPlan ? `<span class="plan-indicator" onclick="event.stopPropagation(); openPlanForSession('${sid}')" title="View plan">${ICON_PLAN}</span>` : ''}
+                ${canOpenCost ? `<span class="cost-badge" onclick="event.stopPropagation(); openCompanion('pi-cost', '${escAttrJs(session.id)}')" title="Cost in pi-cost ($)">${ICON_COST}</span>` : ''}
                 ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
                 ${session.dispatched ? `<span class="dispatched-badge"${session.dispatched.parent ? ` onclick="event.stopPropagation(); revealSession('${escAttrJs(session.dispatched.parent)}')"` : ''} title="${escapeHtml(dispatchedTitle(session.dispatched))}">${ICON_DISPATCHED}</span>` : ''}
                 ${runningTerminals.has(session.id) ? `<span class="terminal-badge" onclick="event.stopPropagation(); showSessionTerminal('${escAttrJs(session.id)}')" title="${TERMINAL_TITLE}">${ICON_TERMINAL}</span>` : ''}
@@ -6349,6 +6353,7 @@ const SHORTCUT_TABS = [
           { keys: ['Ctrl', 'Shift', 'P'], combo: true, label: 'Session picker' },
           { keys: ['Shift', 'P'], combo: true, label: 'Project picker (this board)' },
           { keys: ['I'], label: 'Session info' },
+          { keys: ['$'], label: 'Open in pi-cost (when installed)' },
           { keys: ['.'], label: 'Pin / unpin' },
           { keys: ['>'], label: 'Toggle sticky' },
           { keys: ['Ctrl', 'Shift', '.'], combo: true, label: 'Toggle sticky (from the terminal)' },
@@ -7440,6 +7445,7 @@ async function fetchCompanions(cwd = companionsCwd) {
   if (companions.filter((c) => !c.scope).map((c) => c.id).join() !== missingBefore) {
     renderKanban();
     renderAgentFooter();
+    renderSessions();
   }
   if (document.getElementById('companions-modal').classList.contains('visible')) renderCompanions();
 }
@@ -7527,7 +7533,7 @@ async function runCompanion(id) {
 
 async function pollCompanionInstall() {
   const status = await getJson(apiPath`/api/companions/install/${companionInstall.id}`, null, {
-    headers: { 'X-Terminal-Token': terminalToken || '' },
+    headers: terminalHeaders(),
     cache: 'no-store',
   });
   const out = document.getElementById('companions-output');
@@ -7560,20 +7566,18 @@ const COMPANION_COLORS = {
 async function openCompanion(id, sid) {
   const c = companions.find((x) => x.id === id);
   if (!c?.scope) return showCompanions(id);
-  const started = await startCompanion(id, sid);
-  if (started.error) return showToast(started.error, 'error');
-  const onScreen = await postPane(sid, { target: started.url, title: c.pkg, companion: id });
+  const onScreen = await postPane(sid, { companion: id }, terminalHeaders());
   if (onScreen) syncPanes();
   toastPaneAdded(sid, onScreen, c.pkg);
 }
 
-// The tool stops with the board and can come back on another port, so each load starts it.
-function startCompanion(id, session) {
-  return paneRequest('POST', apiPath`/api/companions/${id}/start`, { session }, { 'X-Terminal-Token': terminalToken || '' });
+function companionReady(id) {
+  return terminalAvailable() && !!companions.find((c) => c.id === id)?.scope;
 }
 
+// The tool stops with the board and can come back on another port, so each load starts it.
 async function companionPaneSrc(pane) {
-  const started = await startCompanion(pane.companion);
+  const started = await paneRequest('POST', apiPath`/api/companions/${pane.companion}/start`, {}, terminalHeaders());
   if (started.error) return pane.target;
   const u = new URL(pane.target);
   u.port = String(started.port);
@@ -7953,6 +7957,14 @@ document.addEventListener('keydown', (e) => {
     if (sid) {
       e.preventDefault();
       (e.shiftKey ? toggleSessionSticky : toggleSessionPin)(sid);
+      return;
+    }
+  }
+  if (plainShift && e.key === '$' && companionReady('pi-cost')) {
+    const sid = contextSessionId();
+    if (sid) {
+      e.preventDefault();
+      openCompanion('pi-cost', sid);
       return;
     }
   }
@@ -13966,8 +13978,8 @@ async function addPane(raw) {
 }
 
 // Shows the added pane. True when its session is still on screen, null when the add failed.
-async function postPane(sid, body) {
-  const res = await paneRequest('POST', apiPath`/api/panes/${sid}`, body);
+async function postPane(sid, body, headers) {
+  const res = await paneRequest('POST', apiPath`/api/panes/${sid}`, body, headers);
   if (!res.pane) {
     showToast(res.error, 'error');
     return null;
@@ -15403,8 +15415,12 @@ async function renderTerminalManager() {
   });
 }
 
+function terminalHeaders() {
+  return { 'X-Terminal-Token': terminalToken || '' };
+}
+
 function terminalFetch(url, method, body) {
-  return api(url, { method, body, headers: { 'X-Terminal-Token': terminalToken || '' } });
+  return api(url, { method, body, headers: terminalHeaders() });
 }
 
 const TERMINAL_DOT_STATE = { working: 'busy', waiting: 'wait', idle: 'idle' };
