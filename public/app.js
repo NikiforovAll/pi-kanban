@@ -1881,8 +1881,6 @@ const ICON_AGENT_ACTIVE =
 const ICON_TERMINAL =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 const TERMINAL_TITLE = 'Running in a terminal here';
-const ICON_COST =
-  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>';
 const ICON_DISPATCHED =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>';
 const ICON_CHAT =
@@ -3961,7 +3959,6 @@ function renderSessions() {
     return out;
   };
 
-  const canOpenCost = companionReady('pi-cost');
   const renderSessionCard = (session) => {
     if (session.placeholder) return renderPlaceholderCard(session, childDepth.get(session.id));
     const total = session.taskCount;
@@ -4013,7 +4010,6 @@ function renderSessions() {
                 ${hasScratchpad ? `<span class="scratchpad-badge${padEmoji ? ' has-emoji' : ''}" onclick="event.stopPropagation(); openSessionScratchpad('${sid}')" title="Open scratchpad">${padEmoji ? escapeHtml(padEmoji) : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`}</span>` : ''}
                 ${bookmarksCount > 0 ? `<span class="bookmarks-badge" onclick="event.stopPropagation(); openSessionWithBookmarks('${sid}')" title="${bookmarksCount} bookmarked message${bookmarksCount > 1 ? 's' : ''}">${BOOKMARK_SVG}${bookmarksCount}</span>` : ''}
                 ${linkedDocsCount > 0 ? `<span class="linked-docs-badge" onclick="event.stopPropagation(); showSessionInfoModal('${sid}')" title="${linkedDocsCount} linked document${linkedDocsCount > 1 ? 's' : ''}">${linkSvg(10)}${linkedDocsCount}</span>` : ''}
-                ${canOpenCost ? `<span class="cost-badge" onclick="event.stopPropagation(); openCompanion('pi-cost', '${escAttrJs(session.id)}')" title="Cost in pi-cost ($)">${ICON_COST}</span>` : ''}
                 ${session.sharedTaskList ? `<span class="shared-tasklist-badge" title="Shared task list: ${escapeHtml(session.sharedTaskList)}">${linkSvg(12)}</span>` : ''}
                 ${session.dispatched ? `<span class="dispatched-badge"${session.dispatched.parent ? ` onclick="event.stopPropagation(); revealSession('${escAttrJs(session.dispatched.parent)}')"` : ''} title="${escapeHtml(dispatchedTitle(session.dispatched))}">${ICON_DISPATCHED}</span>` : ''}
                 ${runningTerminals.has(session.id) ? `<span class="terminal-badge" onclick="event.stopPropagation(); showSessionTerminal('${escAttrJs(session.id)}')" title="${TERMINAL_TITLE}">${ICON_TERMINAL}</span>` : ''}
@@ -6297,6 +6293,7 @@ const SHORTCUT_TABS = [
           { keys: ['Shift', 'P'], combo: true, label: 'Project picker (this board)' },
           { keys: ['I'], label: 'Session info' },
           { keys: ['$'], label: 'Open in pi-cost (when installed)' },
+          { keys: ['Shift', 'I'], combo: true, label: 'Open in pi-inspect (when installed)' },
           { keys: ['.'], label: 'Pin / unpin' },
           { keys: ['>'], label: 'Toggle sticky' },
           { keys: ['Ctrl', 'Shift', '.'], combo: true, label: 'Toggle sticky (from the terminal)' },
@@ -7509,9 +7506,7 @@ const COMPANION_COLORS = {
 async function openCompanion(id, sid) {
   const c = companions.find((x) => x.id === id);
   if (!c?.scope) return showCompanions(id);
-  const onScreen = await postPane(sid, { companion: id }, terminalHeaders());
-  if (onScreen) syncPanes();
-  toastPaneAdded(sid, onScreen, c.pkg);
+  if ((await postPane(sid, { companion: id }, terminalHeaders())) !== null) showAddedPane(sid);
 }
 
 function companionReady(id) {
@@ -7906,6 +7901,14 @@ document.addEventListener('keydown', (e) => {
     if (sid) {
       e.preventDefault();
       openCompanion('pi-cost', sid);
+      return;
+    }
+  }
+  if (shiftOnly(e, 'KeyI') && companionReady('pi-inspect')) {
+    const sid = contextSessionId();
+    if (sid) {
+      e.preventDefault();
+      openCompanion('pi-inspect', sid);
       return;
     }
   }
@@ -10310,7 +10313,7 @@ function renderCacheTimer({ at, ttl, usage, model }) {
 
 // The Cache row and the current-usage rows come from the last reply (session.cache), the totals,
 // cost and duration from the whole transcript (session.totals).
-function renderContextDetail(session, { tokens = true } = {}) {
+function renderContextDetail(session, { tokens = true, costLink = true } = {}) {
   const ctx = getCtx(session);
   const reply = session.cache;
   const totals = session.totals;
@@ -10356,7 +10359,7 @@ function renderContextDetail(session, { tokens = true } = {}) {
             ${totals ? `<div class="stat-item"><span class="stat-label">Cost</span><span class="stat-value" style="color:${getCostColor(totals.costUsd)}">${formatCost(totals.costUsd)}</span></div>` : ''}
             ${reply ? renderCacheTimer(reply) : ''}
             ${totals?.durationMs != null ? `<div class="stat-item"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(totals.durationMs)}</span></div>` : ''}
-            ${totals ? `<button class="detail-context-open" data-session="${escapeHtml(session.id)}" onclick="closeTeamModal(); openCompanion('pi-cost', this.dataset.session)">Open in pi-cost</button>` : ''}
+            ${totals && costLink ? `<button class="detail-context-open" data-session="${escapeHtml(session.id)}" onclick="openCompanion('pi-cost', this.dataset.session)">Open in pi-cost</button>` : ''}
           </div>
         </div>`;
 }
@@ -11954,7 +11957,7 @@ function showInfoModal(session, parentInfo) {
   });
   html += `</div>`;
 
-  const contextHtml = renderContextDetail(session);
+  const contextHtml = renderContextDetail(session, { costLink: false });
   if (contextHtml) {
     html += `<hr style="border: none; border-top: 1px solid var(--border); margin: 12px 0;">`;
     html += contextHtml;
@@ -11968,6 +11971,9 @@ function showInfoModal(session, parentInfo) {
   // would stack up once per open and fire the click handler N times.
   bindLinkedDocsHandlers(bodyEl.querySelector('.linked-docs-section'), session.id);
   _infoModalSessionId = session.id;
+  for (const id of ['pi-cost', 'pi-inspect']) {
+    document.getElementById(`session-info-${id}-btn`).style.display = companionReady(id) ? '' : 'none';
+  }
   updateStickyBtnState();
   updateDismissBtnState();
   modal.classList.add('visible');
@@ -11975,6 +11981,12 @@ function showInfoModal(session, parentInfo) {
 
 function closeTeamModal() {
   document.getElementById('team-modal').classList.remove('visible');
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: used in HTML
+function openCompanionFromInfo(id) {
+  closeTeamModal();
+  openCompanion(id, _infoModalSessionId);
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: used in HTML
@@ -16093,6 +16105,13 @@ function revealPane(sid, onScreen) {
   if (onScreen && !wantsTerminal()) syncPanes();
   else if (sid === currentSessionId && wantsTerminal()) toggleTerminal();
   else openSession(sid);
+}
+
+function showAddedPane(sid) {
+  setTerminalMode(sid, false);
+  if (sid !== paneSessionId()) return openSession(sid);
+  syncTerminal();
+  focusActivePane();
 }
 
 function toastPaneAdded(sid, onScreen, label) {

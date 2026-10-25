@@ -2772,7 +2772,6 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
    resizing the row means editing this rule, not four. Per-icon rules below override
    only what actually differs (color, glyph size). */
 .team-info-btn,
-.cost-badge,
 .dispatched-badge,
 .terminal-badge {
   width: 18px;
@@ -2789,8 +2788,7 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
   transition: all 0.15s ease;
 }
 
-.team-info-btn:hover,
-.cost-badge:hover {
+.team-info-btn:hover {
   background: var(--bg-hover);
   border-color: var(--border);
   color: var(--text-secondary);
@@ -2799,8 +2797,7 @@ code.ct .ct-has[aria-expanded='false'] .ct-name::after {
 /* The boxes are wider than their 12px glyphs, so the leading icon would sit inset
    from the card text above it. Cancel that inset — but only when a boxed icon leads;
    the pill badges have a different inset and must not be shifted. */
-.session-indicators > .team-info-btn:first-child,
-.session-indicators > .cost-badge:first-child {
+.session-indicators > .team-info-btn:first-child {
   margin-left: -3px;
 }
 
