@@ -18,6 +18,7 @@ const IDS = {
   links: ID(6),
 };
 const SHOW_IDS = { bench: ID(101), knobs: ID(102), ask: ID(103) };
+const TERMINALS = { limiter: '7e1a0000-0000-4000-8000-000000000001', checkout: '7e1a0000-0000-4000-8000-000000000003' };
 const LIVE_START_MIN = 95;
 
 const minutesAgo = (now) => (min) => new Date(now - min * 60_000).toISOString();
@@ -229,7 +230,7 @@ function sessions({ api, web, docs }, pads) {
         {
           at: 62,
           text: 'The benchmark is on the board as a card.',
-          tools: [{ name: 'bash', args: { command: 'pi-kanban show bench.html --title "Limiter benchmark" --key bench' }, result: `Shown "Limiter benchmark" (bench, 1/1). ${SHOWN_NOTE}` }],
+          tools: [{ name: 'bash', args: { command: 'pi-kanban show "$PI_SCRATCHPAD_DIR/bench.html" --title "Limiter benchmark" --key bench' }, result: `Shown "Limiter benchmark" (bench, 1/1). ${SHOWN_NOTE}` }],
         },
         {
           at: 58,
@@ -243,7 +244,7 @@ function sessions({ api, web, docs }, pads) {
         {
           at: 24,
           tools: [
-            { name: 'bash', args: { command: 'pi-kanban show knobs.md --title "Tuning knobs" --key knobs' }, result: `Shown "Tuning knobs" (knobs, 2/2). ${SHOWN_NOTE}` },
+            { name: 'bash', args: { command: 'pi-kanban show "$PI_SCRATCHPAD_DIR/knobs.md" --title "Tuning knobs" --key knobs' }, result: `Shown "Tuning knobs" (knobs, 2/2). ${SHOWN_NOTE}` },
             { name: 'bash', args: { command: 'pi-kanban pane add docs/tuning.md' }, result: 'p2  tuning.md' },
           ],
         },
@@ -328,14 +329,15 @@ function sessions({ api, web, docs }, pads) {
 }
 
 function writeShowPosts(pad, sessionId, at) {
-  const dir = path.join(pad, '.pi-kanban', 'show');
+  const bench = path.join(pad, 'bench.html');
+  const knobs = path.join(pad, 'knobs.md');
   const posts = [
-    { id: SHOW_IDS.bench, title: 'Limiter benchmark', key: 'bench', kind: 'html', file: null, base: null, updatedAt: at(62) },
-    { id: SHOW_IDS.knobs, title: 'Tuning knobs', key: 'knobs', kind: 'markdown', file: null, base: null, updatedAt: at(24) },
+    { id: SHOW_IDS.bench, title: 'Limiter benchmark', key: 'bench', kind: 'html', file: bench, base: null, updatedAt: at(62) },
+    { id: SHOW_IDS.knobs, title: 'Tuning knobs', key: 'knobs', kind: 'markdown', file: knobs, base: null, updatedAt: at(24) },
   ];
-  write(path.join(dir, `${SHOW_IDS.bench}.html`), BENCH_HTML);
-  write(path.join(dir, `${SHOW_IDS.knobs}.md`), KNOBS_TABLE);
-  write(path.join(dir, 'index.json'), JSON.stringify({ sessionId, posts }, null, 2));
+  write(bench, BENCH_HTML);
+  write(knobs, KNOBS_TABLE);
+  write(path.join(pad, '.pi-kanban', 'show', 'index.json'), JSON.stringify({ sessionId, posts }, null, 2));
 }
 
 // The lib modules write to the agent dir and scratchpad root the env names, so a missing env
@@ -417,6 +419,7 @@ async function seedFiles({ root, now = Date.now() }) {
   write(path.join(pads.limiter, 'notes.md'), '# Notes\n\n- `PEXPIRE ... NX` keeps the first request of a window as its start.\n- Fail open when Redis is down; alert on `ratelimit.redis_error`.\n');
   write(path.join(pads.limiter, 'logs', 'npm-test.log'), 'Tests: 3 passed, 3 total\n');
   writeShowPosts(pads.limiter, IDS.limiter, at);
+  write(path.join(kanban, 'terminals.json'), JSON.stringify({ showSessions: { [TERMINALS.limiter]: IDS.limiter } }, null, 2));
   write(path.join(pads.checkout, 'step-layout.html'), ASK_HTML);
   write(path.join(pads.gettingStarted, 'outline.md'), '# Outline\n\n1. Create a key\n2. Send the header\n3. Limits and 429\n');
 
@@ -442,7 +445,7 @@ async function seedLive({ agentDir, projects, pids, now = Date.now() }) {
   const started = now - LIVE_START_MIN * 60_000;
   await writeLiveSession(live, { sessionId: IDS.limiter, pid: pids[0], cwd: projects.api, startedAt: started, status: 'busy', statusUpdatedAt: now - 5 * 60_000, name: 'redis-rate-limiter' });
   await writeLiveSession(live, { sessionId: IDS.checkout, pid: pids[1], cwd: projects.web, startedAt: started, status: 'waiting', statusUpdatedAt: now - 12 * 60_000, name: 'checkout-steps' });
-  const marker = promptMarker({ kind: 'input', title: 'Step indicator layout' }, { toolName: 'ask', args: { title: 'Step indicator layout' } }, projects.web, at(12));
+  const marker = promptMarker({ kind: 'input', title: 'Step indicator layout' }, { toolName: 'ask', args: { title: 'Step indicator layout' } }, at(12));
   await writeWaiting(path.join(kanban, 'agent-activity', IDS.checkout), marker);
 }
 
@@ -460,4 +463,4 @@ async function seedBoard({ post, projects, report }) {
   await post(`/api/dispatch/${IDS.loadTest}/report`, { text: report });
 }
 
-module.exports = { IDS, SHOW_IDS, LIVE_START_MIN, MODELS, modelRef, seedFiles, seedLive, seedBoard };
+module.exports = { IDS, SHOW_IDS, TERMINALS, LIVE_START_MIN, MODELS, modelRef, seedFiles, seedLive, seedBoard };

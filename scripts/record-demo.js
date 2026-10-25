@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Records the static demo's data: seeds fake pi sessions into a temp agent dir, runs server.js on
-// it, and saves the replies of the routes the board reads to demo/mock-data.js. The terminal and
-// its show and ask cards need a live pi, so their replies are built here from the seeded files.
+// it, and saves the replies of the routes the board reads to demo/mock-data.js. The terminal list
+// and its ask card need a live pi, so their replies are built here from the seeded files.
 //
 // Run it after a change to the seed or to a route's reply shape: `npm run demo:record`.
 
@@ -16,7 +16,6 @@ const FAKE_HOME = '/home/dev';
 // package.json keeps a dev version, and the release tag sets the real one.
 const DEMO_VERSION = /^## (\d+\.\d+\.\d+)/m.exec(fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8'))?.[1];
 if (!DEMO_VERSION) throw new Error('CHANGELOG.md has no "## x.y.z" release heading');
-const TERMINALS = { limiter: '7e1a0000-0000-4000-8000-000000000001', checkout: '7e1a0000-0000-4000-8000-000000000003' };
 
 const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-demo-')));
 Object.assign(process.env, {
@@ -27,9 +26,8 @@ delete process.env.PI_DIR;
 delete process.env.PI_CODING_AGENT_SESSION_DIR;
 
 const { encodeProjectDirName } = require('../lib/board-dir');
-const { createShowStore } = require('../lib/show');
 const { readTerminalConfig, clientConfigFor } = require('../lib/terminal');
-const { IDS, SHOW_IDS, LIVE_START_MIN, MODELS, seedFiles, seedLive, seedBoard } = require('../demo/seed');
+const { IDS, SHOW_IDS, TERMINALS, LIVE_START_MIN, MODELS, seedFiles, seedLive, seedBoard } = require('../demo/seed');
 
 // The server marks projects under its temp dir as temp, and the New session dialog hides those,
 // so it gets a temp dir outside the seed. It runs without a terminal, so the terminal config and replies are built here.
@@ -60,6 +58,7 @@ function makeRewriter() {
   const pairs = [
     [tmp, FAKE_HOME],
     [tmp.replace(/\\/g, '/'), FAKE_HOME],
+    [JSON.stringify(tmp).slice(1, -1), FAKE_HOME],
     [encodeProjectDirName(tmp), encodeProjectDirName(FAKE_HOME)],
   ].sort(([a], [b]) => b.length - a.length);
   const flags = process.platform === 'win32' ? 'gi' : 'g';
@@ -68,7 +67,7 @@ function makeRewriter() {
   const str = (s) => {
     let out = s;
     for (const [re, to] of res) out = out.replace(re, to);
-    return out === s ? s : out.replace(slashes, (p) => p.replace(/\\/g, '/'));
+    return out === s ? s : out.replace(slashes, (p) => p.replace(/\\+/g, '/'));
   };
   const walk = (v) => {
     if (typeof v === 'string') return str(v);
@@ -133,6 +132,10 @@ async function main() {
     for (const docs of Object.values(responses['/api/document/links'])) for (const d of docs) files.add(typeof d === 'string' ? d : d.path);
     for (const { project, encoded } of responses['/api/projects']) if (encoded || project) await get(`/api/projects/${encodeURIComponent(encoded || project)}/tasks`).catch(() => {});
     for (const f of files) await get('/api/preview', { path: f });
+    for (const t of Object.values(TERMINALS)) {
+      const { posts } = await get(`/api/terminals/${t}/show`);
+      for (const { id } of posts) await get(`/api/terminals/${t}/show/${id}`);
+    }
 
     Object.assign(responses, liveReplies(seeded, list, now));
   } finally {
@@ -155,7 +158,7 @@ async function main() {
   console.log(`wrote ${path.relative(ROOT, OUT)}: ${Object.keys(responses).length} replies`);
 }
 
-// The terminal list and the cards a running pi would post, read from the seeded files.
+// The terminal list and the ask card a running pi would post, read from the seeded files.
 function liveReplies({ pads, projects }, list, now) {
   const byId = Object.fromEntries(list.map((s) => [s.id, s]));
   const startedAt = now - LIVE_START_MIN * 60_000;
@@ -166,15 +169,6 @@ function liveReplies({ pads, projects }, list, now) {
     '/api/terminals/stats': { pk: null, host: null, terminals: {} },
     '/api/pi/models': { models: Object.values(MODELS).map((m) => ({ provider: m.provider, id: m.modelId })) },
   };
-  const shows = createShowStore({ load: () => ({ [TERMINALS.limiter]: IDS.limiter }), onChange() {}, resolveDir: (id) => (id === IDS.limiter ? pads.limiter : null) });
-  for (const terminalId of Object.values(TERMINALS)) {
-    const index = shows.list(terminalId);
-    out[`/api/terminals/${terminalId}/show`] = index;
-    for (const { id } of index.posts) {
-      const { entry, content, path: file } = shows.get(terminalId, id);
-      out[`/api/terminals/${terminalId}/show/${id}`] = { id, title: entry.title, key: entry.key, kind: entry.kind, content, file: null, path: file, url: null };
-    }
-  }
   const askFile = path.join(pads.checkout, 'step-layout.html');
   const ask = { ask: { id: SHOW_IDS.ask, title: 'Step indicator layout', size: 'medium', file: askFile, sessionId: IDS.checkout, content: fs.readFileSync(askFile, 'utf8') } };
   out[`/api/terminals/${TERMINALS.checkout}/ask`] = ask;
