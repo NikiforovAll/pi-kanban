@@ -7,13 +7,13 @@ interface Props {
   src?: string;
   /** Gallery view name: the image is shots/<set>/<palette>-<view>-<mode>.webp and follows the site theme. */
   themed?: string;
-  /** Folder under shots/: `themes` holds the board's default theme, other folders one board theme each. */
+  /** Folder under shots/, named for the board color theme the shots were taken in. */
   set?: string;
   eager?: boolean;
   width?: number;
   height?: number;
 }
-const { alt, src, themed, set = 'themes', eager = false, width = 2400, height = 1350 } = Astro.props;
+const { alt, src, themed, set = 'nord', eager = false, width = 2400, height = 1350 } = Astro.props;
 const dir = `shots/${set}/`;
 const initial = url(themed ? `${dir}${DEFAULT_PALETTE}-${themed}-${DEFAULT_MODE}.webp` : src!);
 // A themed image gets its src from an inline script. A src in the markup is fetched before the

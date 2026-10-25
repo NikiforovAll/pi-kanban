@@ -13,9 +13,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.resolve(here, '../../dist');
 const args = process.argv.slice(2);
 const themeAt = args.indexOf('--color-theme');
-// The landing page uses the board's default theme; the docs use their own, in shots/<theme>.
-const COLOR_THEME = themeAt < 0 ? null : args.splice(themeAt, 2)[1];
-const outDir = path.resolve(here, `../public/shots/${COLOR_THEME ?? 'themes'}`);
+// Shot.astro reads shots/nord unless a page passes another set.
+const COLOR_THEME = themeAt < 0 ? 'nord' : args.splice(themeAt, 2)[1];
+const outDir = path.resolve(here, `../public/shots/${COLOR_THEME}`);
 const PALETTE = 'pi';
 const PORT = 8799;
 
@@ -289,7 +289,7 @@ try {
             return type === 'webgl2' ? null : getContext.call(this, type, ...rest);
           };
           localStorage.setItem('theme', m);
-          if (colorTheme) localStorage.setItem('color-theme', colorTheme);
+          localStorage.setItem('color-theme', colorTheme);
           localStorage.setItem('terminal-sessions', JSON.stringify(terminal));
         },
         [mode, view.terminal ?? [], COLOR_THEME],

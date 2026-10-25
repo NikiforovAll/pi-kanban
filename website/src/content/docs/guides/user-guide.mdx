@@ -57,7 +57,7 @@ Run these inside pi. The session commands use the current session when you leave
 
 ## Layout
 
-<Shot themed="board" set="nord" alt="The board with the session sidebar, todo columns, document tabs, and the agents log" eager />
+<Shot themed="board" alt="The board with the session sidebar, todo columns, document tabs, and the agents log" eager />
 
 - **Sidebar.** Sessions in groups and projects. Each card shows progress, context use, age, pins, linked docs, and icons for a terminal, a dispatched session, or a question that waits for you. The pills at the top count the sessions that wait, the active sessions, and the open terminals.
 - **Board.** Pending, In Progress, and Completed columns for the selected session, from `@juicesharp/rpiv-todo`. Tabs next to **Board** hold panes and show cards.
@@ -68,19 +68,19 @@ Run these inside pi. The session commands use the current session when you leave
 
 When `pi-subagents` starts a child session, the board lists it in the agents log of its parent. Open one to read its prompt and its response, rendered as markdown.
 
-<Shot themed="subagent" set="nord" alt="A scout subagent with its response" />
+<Shot themed="subagent" alt="A scout subagent with its response" />
 
 ## Tool stats
 
 Session info has a button that counts the tool calls of the session, with the failures of each tool and its share of the context.
 
-<Shot themed="tool-stats" set="nord" alt="Tool statistics for a session: calls, successes, and impact per tool" />
+<Shot themed="tool-stats" alt="Tool statistics for a session: calls, successes, and impact per tool" />
 
 ## Notes and storage
 
 `N` opens notes for the session. The board keeps them in your browser, with pins, groups, and linked docs. `Shift+S` opens the storage manager, which shows what the board keeps for each session and clears it.
 
-<Shot themed="storage" set="nord" alt="The Storage Manager with tabs for sessions, scratchpads, linked docs, and groups" />
+<Shot themed="storage" alt="The Storage Manager with tabs for sessions, scratchpads, linked docs, and groups" />
 
 ## Board messages to pi
 

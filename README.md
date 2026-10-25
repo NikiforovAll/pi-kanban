@@ -4,7 +4,7 @@
 
 Agent PI - Agent Development Environment (ADE) for the [pi coding agent](https://pi.dev/packages/pi-kanban?name=kanban).
 
-![pi in the board terminal, with the session sidebar and a show card](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/website/public/shots/themes/pi-terminal-light.webp)
+![pi in the board terminal, with the session sidebar and a show card](https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/website/public/shots/nord/pi-terminal-light.webp)
 
 ## What it is
 

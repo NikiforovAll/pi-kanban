@@ -8,7 +8,7 @@ import Lightbox from '../../../kit/Lightbox.astro';
 
 ## Show
 
-<Shot themed="show" set="nord" width={1778} height={1350} alt="A show card with a latency bar chart over the top right of the terminal" eager />
+<Shot themed="show" width={1778} height={1350} alt="A show card with a latency bar chart over the top right of the terminal" eager />
 
 The `show` tool posts a markdown or HTML card: a table, a chart, a diagram. In the board terminal, the card shows over the top right corner of the terminal. When pi runs in another terminal, the card opens as a tab next to the board. The agent edits the card file, and the card refreshes on each save. A card with the same key replaces the one before it.
 
@@ -27,7 +27,7 @@ When the card has the focus:
 
 ## Ask
 
-<Shot themed="ask" set="nord" width={1778} height={1350} alt="An ask card with two layout choices over the terminal" />
+<Shot themed="ask" width={1778} height={1350} alt="An ask card with two layout choices over the terminal" />
 
 The `ask` tool shows an HTML card in a modal: a form, a choice between two layouts, sliders over a preview. pi waits until you answer or skip, and gets the answer as the tool result. While pi waits, the session card shows a question icon and the sidebar counts it as waiting. `Esc` hides the modal, and a button brings it back. When the board is not running, pi asks in its own prompt.
 
