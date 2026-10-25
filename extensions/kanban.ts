@@ -237,9 +237,6 @@ function registerLiveState(pi: ExtensionAPI) {
 	});
 }
 
-export default function kanbanExtension(pi: ExtensionAPI) {
-	registerLiveState(pi);
-	registerScratchpad(pi);
 function registerModelWindows(pi: ExtensionAPI) {
 	const record = (ctx: ExtensionContext) => {
 		modelWindows.recordModelWindows(MODEL_WINDOWS_FILE, ctx.modelRegistry.getAvailable())
@@ -249,9 +246,12 @@ function registerModelWindows(pi: ExtensionAPI) {
 	pi.on("model_select", async (_event, ctx) => record(ctx));
 }
 
+export default function kanbanExtension(pi: ExtensionAPI) {
+	registerLiveState(pi);
+	registerModelWindows(pi);
+	registerScratchpad(pi);
 	registerShowAsk(pi);
 	registerDispatch(pi);
-	registerModelWindows(pi);
 	registerInbox(pi);
 
 	pi.on("tool_result", async (event, ctx) => {
