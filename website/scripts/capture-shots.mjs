@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import sharp from 'sharp';
+import { startCompanions } from './companions.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.resolve(here, '../../dist');
@@ -36,6 +37,51 @@ const { limiter: LIMITER, checkout: CHECKOUT, loadTest: LOAD_TEST } = IDS;
 const openSession = async (page, id) => {
   await page.click(`.session-item[data-session-id="${id}"]`);
   await page.waitForTimeout(600);
+};
+
+const openPane = async (page, title) => {
+  await page.click(`.pane-tab:has-text("${title}")`);
+  await page.waitForTimeout(800);
+};
+
+// A triple click can select past the document's end, which the review does not take.
+const comment = async (page, quote, text) => {
+  await page.evaluate((quote) => {
+    const body = document.querySelector('.pane-doc-body');
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const at = walker.currentNode.data.indexOf(quote);
+      if (at < 0) continue;
+      const range = document.createRange();
+      range.setStart(walker.currentNode, at);
+      range.setEnd(walker.currentNode, at + quote.length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      body.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return;
+    }
+    throw new Error(`no text "${quote}" in the pane`);
+  }, quote);
+  await page.click('.review-offer-btn');
+  await page.fill('#review-pop textarea, .review-pop textarea, textarea[placeholder^="Comment"]', text);
+  await page.click('button[data-act="add"]');
+  await page.waitForTimeout(300);
+};
+
+// The demo has no companion server, so the pane's target carries the port of the one started here.
+const openCompanion = async (page, id, url) => {
+  await openSession(page, LIMITER);
+  await page.evaluate(
+    ([sid, id, target]) => {
+      const layout = paneLayout(sid);
+      applyPaneLayout(sid, { ...layout, rev: layout.rev + 1, panes: [...layout.panes, { id: 'p9', kind: 'url', target, title: id, companion: id }] });
+      setActivePaneId(sid, 'p9');
+      showAddedPane(sid);
+    },
+    [LIMITER, id, url],
+  );
+  await page.frameLocator('.companion-frame').locator('body').waitFor();
+  await page.waitForTimeout(2500);
 };
 
 // `terminal` lists the sessions that open in the terminal; the others open on the board.
@@ -98,15 +144,67 @@ const views = [
       await page.click('[title^="Keyboard shortcuts"]');
     },
   },
+  {
+    name: 'show',
+    terminal: [LIMITER],
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.waitForSelector('.terminal-frame');
+      await page.waitForTimeout(1500);
+      await page.click('#show-card button[title="Previous post"]');
+      await page.waitForTimeout(1200);
+    },
+  },
+  {
+    name: 'split',
+    async run(page) {
+      await openSession(page, LIMITER);
+      await openPane(page, 'rate-limiter.md');
+      await page.click('#pane-split-btn');
+      await page.waitForTimeout(1000);
+    },
+  },
+  {
+    name: 'review',
+    async run(page) {
+      await openSession(page, LIMITER);
+      await openPane(page, 'rate-limiter.md');
+      await comment(page, 'Spike a token bucket on Redis', 'Use a Lua script so the two calls stay atomic under retries.');
+      await comment(page, 'fail open and log', 'Fail open only for reads. Writes should get a 503.');
+    },
+  },
+  {
+    name: 'themes',
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.click('#themePickerBtn');
+    },
+  },
+  {
+    name: 'cost',
+    companion: 'pi-cost',
+    async run(page, urls) {
+      await openCompanion(page, 'pi-cost', urls['pi-cost']);
+    },
+  },
+  {
+    name: 'inspect',
+    companion: 'pi-inspect',
+    async run(page, urls) {
+      await openCompanion(page, 'pi-inspect', urls['pi-inspect']);
+    },
+  },
 ];
 
 const only = process.argv.slice(2);
+const wanted = views.filter((v) => !only.length || only.includes(v.name));
+const companions = wanted.some((v) => v.companion) ? await startCompanions({ repoRoot: path.resolve(here, '../..'), sessionId: LIMITER }) : null;
 fs.mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch();
 try {
   for (const mode of ['light', 'dark']) {
-    for (const view of views) {
-      if (only.length && !only.includes(view.name)) continue;
+    for (const view of wanted) {
+      if (view.companion && !companions) continue;
       const context = await browser.newContext({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1.5, colorScheme: mode, reducedMotion: 'reduce' });
       await context.addInitScript(
         ([m, terminal]) => {
@@ -126,7 +224,7 @@ try {
       await page.evaluate(() => {
         document.getElementById('demo-banner')?.remove();
       });
-      await view.run(page);
+      await view.run(page, companions?.urls);
       await page.waitForTimeout(700);
       const png = await page.screenshot();
       const file = path.join(outDir, `${PALETTE}-${view.name}-${mode}.webp`);
@@ -138,4 +236,5 @@ try {
 } finally {
   await browser.close();
   server.close();
+  companions?.stop();
 }

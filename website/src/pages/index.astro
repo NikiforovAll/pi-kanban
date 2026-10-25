@@ -12,63 +12,153 @@ const NPM = 'https://www.npmjs.com/package/pi-kanban';
 const INSTALL = 'pi install npm:pi-kanban';
 const VIDEO = 'https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-demo.mp4';
 
-const watch = [
+const COST_REPO = 'https://github.com/NikiforovAll/pi-cost';
+const INSPECT_REPO = 'https://github.com/NikiforovAll/pi-inspect';
+
+const sections = [
   {
-    title: 'Todos move as pi works',
-    body: 'Pending, in progress, completed. The agents log under the board lists every subagent, and the session log shows each prompt, reply, and tool call in order. [Ctrl+Shift+L] opens it.',
-    shot: 'board',
-    alt: 'Board with three columns of todos, two document tabs, and the agents log',
+    id: 'run',
+    title: 'Run',
+    intro: 'Start pi from the board, keep it running when you close the tab, and hand tasks to other sessions.',
+    items: [
+      {
+        title: 'Run pi in the board',
+        body: 'Each session opens pi in a terminal next to its board. Close the browser tab and pi keeps running in the board server. Open it again and you are back where you were. [Ctrl+`] shows or hides the terminal.',
+        shot: 'terminal',
+        alt: 'A pi session in the board terminal, with a show card over its top right corner',
+      },
+      {
+        title: 'Start a session from the board',
+        body: 'Click + New or press [Ctrl+Alt+N]. Pick a folder from your projects, then give a name, a first prompt, a model, and a thinking level. [Ctrl+Alt+R] resumes a past session.',
+        shot: 'new-session',
+        alt: 'New session dialog with the folder field showing two matching projects',
+      },
+      {
+        title: 'Hand work to another session',
+        body: 'dispatch_start starts a worker session in the board terminal with a self-contained task. The worker sends one report with dispatch_report, and the parent session gets it from dispatch_wait.',
+        shot: 'dispatch',
+        alt: 'A dispatched load-test session and its log, which ends with the report it sent back',
+      },
+    ],
   },
   {
-    title: 'Run pi in the board',
-    body: 'Each session opens pi in a terminal next to its board. Close the browser tab and pi keeps running in the board server; open it again and you are back where you were. [Ctrl+`] shows or hides the terminal.',
-    shot: 'terminal',
-    alt: 'A pi session in the board terminal, with a show card over its top right corner',
+    id: 'talk',
+    title: 'Talk',
+    intro: 'The agent shows you cards and asks you questions on the board. Your answers and comments go back to pi as messages.',
+    items: [
+      {
+        title: 'See what the agent shows you',
+        body: 'The show tool posts a markdown or HTML card over the terminal: a table, a chart, a diagram. The card refreshes on each save. Page through the posts, fill the terminal with one, or open it as a tab.',
+        shot: 'show',
+        alt: 'A show card with a latency bar chart over the top right of the terminal',
+      },
+      {
+        title: 'Answer the agent in place',
+        body: 'The ask tool puts an HTML card in a modal: a form, a choice between two layouts, sliders over a preview. pi waits for your answer, and the sidebar counts the sessions that wait on you.',
+        shot: 'ask',
+        alt: 'An ask modal over the terminal with two layout choices and a Send button',
+      },
+      {
+        title: 'Comment on a doc',
+        body: 'Select text in a pane or the preview, press [C], and write a comment. [Ctrl+Enter] sends all the comments to pi as one message, with the quoted text and the file.',
+        shot: 'review',
+        alt: 'A plan in a pane with two highlighted quotes and their comments in a side panel',
+      },
+    ],
   },
   {
-    title: 'Answer the agent in place',
-    body: 'The ask tool puts an HTML card in a modal: a form, a choice between two layouts, sliders over a preview. pi waits for your answer, and the sidebar counts the sessions that wait on you.',
-    shot: 'ask',
-    alt: 'An ask modal over the terminal with two layout choices and a Send button',
+    id: 'watch',
+    title: 'Watch',
+    intro: 'The board reads the pi session files and pushes each change to your browser.',
+    items: [
+      {
+        title: 'Todos move as pi works',
+        body: 'Pending, in progress, completed. The agents log under the board lists every subagent, and the session log shows each prompt, reply, and tool call in order. [Ctrl+Shift+L] opens it.',
+        shot: 'board',
+        alt: 'Board with three columns of todos, three document tabs, and the agents log',
+      },
+      {
+        title: 'Read what each subagent did',
+        body: 'Open a subagent from the agents log to read its prompt and the full response, rendered as markdown, with its model, status, and run time.',
+        shot: 'subagent',
+        alt: 'A scout subagent with its response about public routes',
+      },
+      {
+        title: 'Find the session behind the work',
+        body: 'Session info shows the id, project, path, tasks folder, and scratchpad, each with a copy button, plus token use and linked documents. [I] opens it for the selected session.',
+        shot: 'session-info',
+        alt: 'Session info modal with session id, paths, token use, and linked documents',
+      },
+    ],
   },
   {
-    title: 'Start a session from the board',
-    body: 'Click + New or press [Ctrl+Alt+N]. Pick a folder from your projects, then give a name, a first prompt, a model, and a thinking level.',
-    shot: 'new-session',
-    alt: 'New session dialog with the folder field showing two matching projects',
+    id: 'panes',
+    title: 'Panes',
+    intro: 'Keep the plan, the dev server, or a report open beside the board, as tabs of the session.',
+    items: [
+      {
+        title: 'Files and pages next to the board',
+        body: 'pane_add opens a URL or a local markdown, HTML, text, or image file as a tab. Press [|] to split a tab with the one before it, and [Ctrl+Alt+1…9] to go to a tab. Linked docs open in the preview modal.',
+        shot: 'split',
+        alt: 'The board split with a markdown plan in a pane on the right',
+      },
+    ],
+  },
+];
+
+const companionItems = [
+  {
+    title: 'pi-cost: what a session costs',
+    body: 'Cost, tokens, and models per message, session, and project, with actual and estimated spend. Press [$] on a session, or run /kanban cost in pi.',
+    shot: 'cost',
+    alt: 'pi-cost in a board tab: the cost of a session as a chart and a table of messages',
   },
   {
-    title: 'Hand work to another session',
-    body: 'dispatch_start starts a worker session in the board terminal with a self-contained task. The worker sends one report with dispatch_report, and the parent session gets it from dispatch_wait.',
-    shot: 'dispatch',
-    alt: 'A dispatched load-test session and its log, which ends with the report it sent back',
+    title: 'pi-inspect: what pi loaded',
+    body: 'The system prompt, tools, slash commands, skills, and context files of a session. Press [Shift+I] on a session, or run /kanban inspect in pi.',
+    shot: 'inspect',
+    alt: 'pi-inspect in a board tab: the tools and context a session loaded, grouped by package',
   },
+];
+
+const style = [
   {
-    title: 'Read what each subagent did',
-    body: 'Open a subagent from the agents log to read its prompt and the full response, rendered as markdown, with its model, status, and run time.',
-    shot: 'subagent',
-    alt: 'A scout subagent with its response about public routes',
-  },
-  {
-    title: 'Find the session behind the work',
-    body: 'Session info shows the id, project, path, tasks folder, and scratchpad, each with a copy button, plus token use and linked documents. [I] opens it for the selected session.',
-    shot: 'session-info',
-    alt: 'Session info modal with session id, paths, token use, and linked documents',
+    title: 'Pick a color theme',
+    body: 'Each theme comes in light and dark, and the board passes it on to pi-cost and pi-inspect. [T] switches between light and dark.',
+    shot: 'themes',
+    alt: 'The color theme menu open over the board',
   },
   {
     title: 'Keep your hands on the keyboard',
-    body: 'Arrow keys move through todos, [Tab] switches between the sidebar and the board, [\\] hides the sidebar, and [T] switches the theme. Press [?] for the full list.',
+    body: 'Arrow keys move through todos, [Tab] switches between the sidebar and the board, and [\\] hides the sidebar. Press [?] for the full list.',
     shot: 'shortcuts',
     alt: 'Keyboard shortcuts help with board, session, and terminal tabs',
   },
 ];
 
+const more = [
+  { name: 'Groups and pins', body: 'Put sessions in groups. [.] pins a session to the top, and [>] makes the pin sticky.' },
+  { name: 'Search', body: 'Find tasks, sessions, and projects from the sidebar.' },
+  { name: 'Session picker', body: '[Ctrl+Shift+P] jumps to any session by name.' },
+  { name: 'All terminals', body: '[Ctrl+Shift+`] lists the terminals the board runs. End the ones you are done with.' },
+  { name: 'Context bar', body: 'Each session card shows how full its context window is.' },
+  { name: 'Zen mode', body: '[Ctrl+Shift+Z] shows only the session you work on.' },
+  { name: 'Scratchpad', body: '[N] keeps notes for a session. pi gets a scratch folder for each session too.' },
+  { name: 'Tool stats', body: 'Counts the tool calls of a session. Open it from session info.' },
+  { name: 'Storage manager', body: '[Shift+S] shows what the board keeps in your browser for each session, and clears it.' },
+  { name: 'Packages', body: '[Shift+X] lists the pi packages the board reads from, and installs the missing ones.' },
+  { name: 'Messages to pi', body: 'Review comments, card answers, and task moves reach pi as user messages.' },
+  { name: 'Install as an app', body: 'The board is a PWA: install it from the browser to get its own window.' },
+];
+
 const tools = [
-  { name: 'show', body: 'Posts a markdown or HTML card: over the terminal, or as a board tab when pi runs elsewhere. The card refreshes on each save.' },
-  { name: 'ask', body: 'Asks through an HTML card in a modal and waits for the answer. Without a board, pi asks in its own prompt.' },
+  { name: 'show, ask', body: 'Post a card over the terminal. Ask through a card in a modal and wait for the answer.' },
   { name: 'dispatch_start, dispatch_wait, dispatch_report', body: 'Start a worker session, wait for its report, send a report back. dispatch_list and dispatch_end list and end workers.' },
   { name: 'pane_add, pane_rm, pane_list', body: 'Add a URL or a local file as a tab next to the board, without switching to it.' },
   { name: 'link_doc, unlink_doc, preview_doc', body: 'Link files and URLs to the session, or open a file in the preview modal now.' },
+  { name: 'companion_open', body: 'Open pi-cost or pi-inspect for the session as a tab.' },
+  { name: '/kanban', body: 'In pi: open the board, open pi-cost or pi-inspect, or pin and link the session.' },
+  { name: 'pi-kanban doc | pane | session | group | task | project | dispatch | terminal', body: 'The same board from a shell. pi-kanban help lists the subcommands.' },
 ];
 
 const setup = [
@@ -78,6 +168,8 @@ const setup = [
 ];
 
 const companions = [
+  { name: 'pi-cost', href: '#companions', body: 'The cost of each session, as a tab on the board.' },
+  { name: 'pi-inspect', href: '#companions', body: 'What pi loaded into each session, as a tab on the board.' },
   { name: 'pi-subagents', href: 'https://www.npmjs.com/package/pi-subagents', body: 'Starts named subagent sessions. The board shows them under each parent session.' },
   { name: '@juicesharp/rpiv-todo', href: 'https://www.npmjs.com/package/@juicesharp/rpiv-todo', body: 'Todo tracking that the board shows as columns.' },
   { name: '@juicesharp/rpiv-ask-user-question', href: 'https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question', body: 'Questions from the agent, shown as cards on the board.' },
@@ -133,18 +225,70 @@ const companions = [
         <video class="video" controls preload="none" playsinline src={VIDEO} poster={url('shots/themes/pi-board-light.webp')} aria-label="pi-kanban tour"></video>
       </section>
 
-      <section class="half" aria-labelledby="watch">
+      {
+        sections.map((s, i) => (
+          <section class="half" aria-labelledby={s.id}>
+            <div class="half-head">
+              <h2 id={s.id}>{s.title}</h2>
+              <p>{s.intro}</p>
+              {i === 0 && <p class="aside">The <a href={url('demo/')}>live demo</a> runs in your browser with sample sessions. No install.</p>}
+            </div>
+            <div class="items">
+              {s.items.map((it) => (
+                <article class="item">
+                  <div class="item-text">
+                    <h3>{it.title}</h3>
+                    <p><Keys text={it.body} /></p>
+                  </div>
+                  <Shot themed={it.shot} alt={it.alt} />
+                </article>
+              ))}
+            </div>
+          </section>
+        ))
+      }
+
+      <section class="half" aria-labelledby="companions">
         <div class="half-head">
-          <h2 id="watch">Work</h2>
-          <p>
-            pi-kanban watches <code>~/.pi/agent/sessions</code> and pushes each change to your browser. The pi tools send
-            cards, panes, and reports to the board.
+          <h2 id="companions" class="long">Add-ons</h2>
+          <p>Two pi packages open as tabs on the board, in the board theme, for the session you look at.</p>
+          <p class="aside">
+            Both also run on their own: <code>/cost</code> and <code>/inspect</code> in pi. <Keys text="[Shift+X]" /> opens Packages, which installs the ones you do not have.
           </p>
-          <p class="aside">The <a href={url('demo/')}>live demo</a> runs in your browser with sample sessions. No install.</p>
         </div>
         <div class="items">
           {
-            watch.map((it) => (
+            companionItems.map((it) => (
+              <article class="item">
+                <div class="item-text">
+                  <h3>{it.title}</h3>
+                  <p><Keys text={it.body} /></p>
+                </div>
+                <Shot themed={it.shot} alt={it.alt} />
+              </article>
+            ))
+          }
+          <ul class="companions">
+            <li>
+              <a href={COST_REPO}><code>pi-cost</code></a>
+              <code class="step-cmd">pi install npm:pi-cost</code>
+            </li>
+            <li>
+              <a href={INSPECT_REPO}><code>pi-inspect</code></a>
+              <code class="step-cmd">pi install npm:pi-inspect</code>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="half" aria-labelledby="yours">
+        <div class="half-head">
+          <h2 id="yours">Yours</h2>
+          <p>Pick the colors, learn the keys, and hide what you do not need.</p>
+        </div>
+        <div class="items">
+          {
+            style.map((it) => (
               <article class="item">
                 <div class="item-text">
                   <h3>{it.title}</h3>
@@ -157,10 +301,27 @@ const companions = [
         </div>
       </section>
 
+      <section class="half" aria-labelledby="more">
+        <div class="half-head">
+          <h2 id="more">More</h2>
+          <p>Smaller things that save time every day.</p>
+        </div>
+        <ul class="more">
+          {
+            more.map((m) => (
+              <li>
+                <h3>{m.name}</h3>
+                <p><Keys text={m.body} /></p>
+              </li>
+            ))
+          }
+        </ul>
+      </section>
+
       <section class="half" aria-labelledby="tools">
         <div class="half-head">
           <h2 id="tools">Tools</h2>
-          <p>The package gives pi these tools. Each one talks to the board on your machine.</p>
+          <p>The package gives pi these tools and commands. Each one talks to the board on your machine.</p>
         </div>
         <ul class="companions">
           {
@@ -390,6 +551,10 @@ const companions = [
     letter-spacing: -0.03em;
     color: var(--c-accent-ink);
   }
+  .half-head h2.long {
+    font-size: clamp(3rem, 4.2vw, 4.25rem);
+    white-space: nowrap;
+  }
   .half-head p {
     margin: 0 0 1rem;
     color: var(--c-ink2);
@@ -453,6 +618,31 @@ const companions = [
   .companions p {
     margin: 0.375rem 0 0;
     color: var(--c-ink2);
+  }
+
+  .more {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+    gap: 1.75rem 2rem;
+  }
+  .more li {
+    padding-top: 1rem;
+    border-top: 1px solid var(--c-border);
+  }
+  .more h3 {
+    margin: 0 0 0.375rem;
+    font: 600 1.125rem/1.3 var(--font-display);
+  }
+  .more p {
+    margin: 0;
+    font-size: 0.9375rem;
+    color: var(--c-ink2);
+  }
+  .companions .step-cmd {
+    margin-bottom: 0;
   }
 
   .setup {
