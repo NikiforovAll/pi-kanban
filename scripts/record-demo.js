@@ -111,7 +111,7 @@ async function main() {
       return responses[k];
     };
 
-    for (const p of ['/api/config', '/api/projects', '/api/tasks/all', '/api/groups', '/api/session/pins', '/api/document/links', '/api/sessions/known', '/api/dispatch']) await get(p);
+    for (const p of ['/api/config', '/api/projects', '/api/tasks/all', '/api/groups', '/api/session/pins', '/api/document/links', '/api/sessions/known', '/api/dispatch', '/api/companions']) await get(p);
     const list = await get('/api/sessions', { limit: 200 });
     const files = new Set();
     for (const { id } of list) {
@@ -120,7 +120,7 @@ async function main() {
       const { agents = [] } = await get(`/api/sessions/${id}/agents`);
       for (const a of agents) await get(`/api/sessions/${id}/agents/${a.agentId}/messages`);
       const panes = await get(`/api/panes/${id}`);
-      for (const p of panes.panes || []) if (p.path) files.add(p.path);
+      for (const p of panes.panes || []) if (p.kind !== 'url' && p.kind !== 'message') files.add(p.target);
       const walkPad = async (query) => {
         const { files: entries = [] } = await get(`/api/sessions/${id}/scratchpad-files`, query);
         for (const e of entries) {
