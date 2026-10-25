@@ -11,6 +11,7 @@ export default defineConfig({
 			title: 'pi-kanban',
 			description: 'An agent development environment for the pi coding agent: sessions, terminal, todos, and subagents in one board.',
 			favicon: '/favicon.svg',
+			logo: { src: './src/assets/logo.svg' },
 			head: [
 				{ tag: 'meta', attrs: { property: 'og:image', content: 'https://nikiforovall.blog/pi-kanban/og.png' } },
 				{ tag: 'meta', attrs: { name: 'twitter:image', content: 'https://nikiforovall.blog/pi-kanban/og.png' } },

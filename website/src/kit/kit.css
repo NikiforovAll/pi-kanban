@@ -136,6 +136,14 @@ h1#_top,
 header .site-title {
   font-size: var(--sl-text-lg);
 }
+header .site-title,
+.mark {
+  gap: 0.6rem;
+}
+header .site-title img,
+.mark img {
+  height: 1.375rem;
+}
 
 .sl-markdown-content img {
   border: 1px solid var(--c-border);

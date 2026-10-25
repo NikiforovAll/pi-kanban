@@ -1,4 +1,4 @@
-// themes.json maps pi-kanban's themes/pi-light.json and pi-dark.json onto the kit tokens.
+// themes.json maps the board's nord theme (public/themes.css) onto the kit tokens, to match the nord shots.
 import themes from './themes.json';
 
 type Tokens = (typeof themes)[number]['dark'];

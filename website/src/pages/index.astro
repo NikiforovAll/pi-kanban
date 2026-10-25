@@ -6,6 +6,7 @@ import ModeToggle from '../kit/ModeToggle.astro';
 import Lightbox from '../kit/Lightbox.astro';
 import FamilyFooter from '../kit/FamilyFooter.astro';
 import { url } from '../kit/family';
+import logo from '../assets/logo.svg';
 
 const GITHUB = 'https://github.com/NikiforovAll/pi-kanban';
 const NPM = 'https://www.npmjs.com/package/pi-kanban';
@@ -200,7 +201,7 @@ const companions = [
 >
   <div class="page">
     <header class="nav">
-      <a class="mark" href={url()}>pi-kanban</a>
+      <a class="mark" href={url()}><img src={logo.src} alt="" width="22" height="22" />pi-kanban</a>
       <nav aria-label="Site">
         <a href={url('getting-started/')}>Docs</a>
         <a href={url('demo/')}>Demo</a>
@@ -434,6 +435,8 @@ const companions = [
     padding-block: 1.25rem;
   }
   .mark {
+    display: inline-flex;
+    align-items: center;
     font: 600 1.25rem/1 var(--font-display);
     color: var(--c-ink1);
     text-decoration: none;
