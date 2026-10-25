@@ -1,7 +1,7 @@
 import { dirname, join as joinPath } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
-import { addPane, linkDoc, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
+import { linkDoc, openCompanion, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
 import { registerDispatch } from "./tools/dispatch.js";
 import { registerInbox } from "./tools/inbox.js";
 import { registerScratchpad } from "./tools/scratchpad.js";
@@ -404,7 +404,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 					}
 					const companion = COMPANION_OF[verb];
 					try {
-						const { pane, added } = await addPane(id, ctx.cwd, { companion });
+						const { pane, added } = await openCompanion(id, companion);
 						notify(`${added ? "Added" : "Already there"}: ${pane.id}  ${pane.title}. Open its tab on the board.`);
 					} catch (e: any) {
 						notify(`${verb} failed: ${e?.message ?? e}`, "error");

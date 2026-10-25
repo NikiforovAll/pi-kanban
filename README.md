@@ -54,6 +54,7 @@ Press `?` on the board for the keyboard shortcuts.
 | `dispatch_start`, `dispatch_wait`, `dispatch_list`, `dispatch_end` | Hand a task to a new pi session in the board terminal and get its report back |
 | `dispatch_report` | The worker's report, kept by the board until the parent reads it |
 | `pane_add`, `pane_rm`, `pane_list` | Add a URL or a local file as a tab next to the board |
+| `companion_open` | Open pi-cost or pi-inspect for the session as a tab next to the board |
 | `link_doc`, `unlink_doc`, `preview_doc` | Link a file or URL to the session, or open it in the preview |
 | `bind_plan` | Bind a markdown plan to the session |
 

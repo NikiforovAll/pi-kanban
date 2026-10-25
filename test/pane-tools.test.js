@@ -21,11 +21,12 @@ if (canRunTs) {
   });
 }
 
-describe('pane_add', { skip: !canRunTs && 'needs Node with registerHooks and type stripping' }, () => {
+describe('pane_add and companion_open', { skip: !canRunTs && 'needs Node with registerHooks and type stripping' }, () => {
   const requests = [];
   let server;
   let root;
   let addPane;
+  let openCompanion;
   const env = {};
 
   before(async () => {
@@ -48,7 +49,7 @@ describe('pane_add', { skip: !canRunTs && 'needs Node with registerHooks and typ
       env[k] = process.env[k];
       process.env[k] = v;
     }
-    ({ addPane } = await import('../extensions/tools/panes.ts'));
+    ({ addPane, openCompanion } = await import('../extensions/tools/panes.ts'));
   });
 
   after(() => {
@@ -61,17 +62,13 @@ describe('pane_add', { skip: !canRunTs && 'needs Node with registerHooks and typ
   });
 
   it('asks the board for a companion pane with the terminal token', async () => {
-    const out = await addPane('s1', root, { companion: 'pi-cost' });
+    const out = await openCompanion('s1', 'pi-cost');
     assert.equal(out.pane.companion, 'pi-cost');
-    assert.deepEqual(requests.at(-1), { url: '/api/panes/s1', token: 'tok', body: { companion: 'pi-cost', title: '' } });
+    assert.deepEqual(requests.at(-1), { url: '/api/panes/s1', token: 'tok', body: { companion: 'pi-cost' } });
   });
 
-  it('sends a target as before, without the token', async () => {
+  it('sends a target without the token', async () => {
     await addPane('s1', root, { target: 'report.html', title: 'R' });
     assert.deepEqual(requests.at(-1), { url: '/api/panes/s1', token: undefined, body: { target: path.join(root, 'report.html'), title: 'R' } });
-  });
-
-  it('needs a target or a companion', async () => {
-    await assert.rejects(addPane('s1', root, {}), /target, or a companion/);
   });
 });
