@@ -18,7 +18,7 @@ const {
   scanSessionIds,
 } = require('../lib/pi-sessions');
 
-const PI_DIR = path.join(__dirname, 'fixtures', 'pi');
+const PI_DIR = fs.realpathSync.native(path.join(__dirname, 'fixtures', 'pi'));
 const AGENT_DIR = path.join(PI_DIR, 'agent');
 const NESTED = path.join(AGENT_DIR, 'sessions');
 const PROJECT = path.join(NESTED, '--C--work-demo--');
