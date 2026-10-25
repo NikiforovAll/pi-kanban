@@ -1238,12 +1238,13 @@ app.post('/api/sessions/:sessionId/plan', async (req, res) => {
     const { sessionId } = req.params;
     const raw = req.body?.path;
     if (linkUrl(raw)) throw previewError(400, 'A plan is a local markdown file, not a URL', 'bad_target');
-    const abs = resolveFileTarget(raw);
+    const abs = realpathDeepest(resolveFileTarget(raw));
     await statFileTarget(abs);
     const [old] = plans.get(sessionId);
     plans.link(sessionId, abs);
     plansWatcher.add(abs);
-    if (old && !planPaths().some((p) => canonicalPath(p) === canonicalPath(old))) plansWatcher.unwatch(old);
+    const oldLong = old && realpathDeepest(old);
+    if (oldLong && !planPaths().some((p) => canonicalPath(realpathDeepest(p)) === canonicalPath(oldLong))) plansWatcher.unwatch(oldLong);
     broadcast({ type: 'metadata-update' });
     res.json({ path: abs, title: getPlanInfo(sessionId).planTitle });
   } catch (error) {
@@ -3465,7 +3466,11 @@ function watchSessionRoots() {
 }
 watchSessionRoots();
 
-const plansWatcher = chokidar.watch(planPaths(), {
+// libuv aborts the process when a directory it watches on Windows is named in 8.3 short form
+// (src/win/fs-event.c asserts that the changed file's name starts with the watched dir), and
+// chokidar watches the parent dir of a plan file that is gone. Plans saved by older boards can
+// name short paths, so the watcher gets only long ones.
+const plansWatcher = chokidar.watch(planPaths().map(realpathDeepest), {
   persistent: true,
   ignoreInitial: true,
 });

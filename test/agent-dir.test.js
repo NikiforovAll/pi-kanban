@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { getAgentDir } = require('../lib/agent-dir');
+const chokidar = require('chokidar');
+const { getAgentDir, longPath } = require('../lib/agent-dir');
 const { resolvePiAgentDir } = require('../lib/board-dir');
 
 const ROOT = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-agent-dir-')));
@@ -48,5 +49,16 @@ describe('agent dir', () => {
     assert.equal(getAgentDir(), path.join(LONG, 'agent'));
     process.argv = [...saved.argv, '--dir', SHORT];
     assert.equal(resolvePiAgentDir(), LONG);
+  });
+
+  // libuv aborts the process when a file appears under a dir watched by its short name.
+  it('gives a path that chokidar can watch for a file not created yet', { timeout: 10_000 }, async (t) => {
+    if (!SHORT) return t.skip('no 8.3 short name on this volume');
+    const watcher = chokidar.watch(longPath(path.join(SHORT, 'plan.md')), { ignoreInitial: true });
+    t.after(() => watcher.close());
+    const seen = new Promise((resolve) => watcher.on('add', resolve));
+    for (let i = 0; i < 200 && !(LONG in watcher.getWatched()); i++) await new Promise((r) => setTimeout(r, 20));
+    fs.writeFileSync(path.join(LONG, 'plan.md'), '# plan');
+    assert.equal(await seen, path.join(LONG, 'plan.md'));
   });
 });
