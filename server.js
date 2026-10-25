@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// The bin is also the CLI, which agents run per card: it skips the server's requires.
+if (require('./cli').runCli(process.argv)) return;
+
 // #region SETUP
 const express = require('express');
 const path = require('node:path');
@@ -70,9 +73,7 @@ const { foldAgentLines } = require('./lib/agent-log');
 const { projectMatcher, normalizeProjectPath, sessionProjectKey } = require('./public/project-match');
 const { sessionRoots, listSessionFiles, readSessionHeader, describeSessionFile, decodeProjectDir, scanSessionIds } = require('./lib/pi-sessions');
 
-if (!require("./cli").runCli(process.argv)) {
-  startServer();
-}
+startServer();
 
 // Not indented: the formatter is off for this file, and a reindent would rewrite every line.
 function startServer() {
@@ -292,6 +293,13 @@ const PK_CONFIG_FILE = path.join(PK_DIR, 'config.json');
 const LEGACY_APPROVALS_FILE = path.join(PK_DIR, 'approvals.json');
 const pkConfigCache = new Map();
 const readCckConfig = () => JSON.parse(readFileSync(PK_CONFIG_FILE, 'utf8'));
+function pkConfigSection(name) {
+  try {
+    return readCckConfig()?.[name] ?? null;
+  } catch {
+    return null;
+  }
+}
 function approvalsConfig() {
   return cachedByMtime(pkConfigCache, 'approvals', PK_CONFIG_FILE,
     () => approvalsFrom(readCckConfig()), approvalsFrom(null));
@@ -2095,7 +2103,7 @@ function saveTerminals() {
 }
 
 const terminal = createTerminalClient({
-  config: readTerminalConfig({ getArgValue }),
+  config: readTerminalConfig({ getArgValue, file: pkConfigSection('terminal') }),
   net,
   piAgentDir: PI_AGENT_DIR,
   sessionsDir: SESSIONS_DIR,

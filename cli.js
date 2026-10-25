@@ -1,9 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { resolvePiAgentDir, boardDir, displayPath, SESSION_ID_ENV } = require('./lib/board-dir');
+const { resolvePiAgentDir, boardDir, displayPath, SESSION_ID_ENV, boardTerminalId } = require('./lib/board-dir');
 const { linkUrl } = require('./public/link-url');
 const { sessionProjectKey } = require('./public/project-match');
-const { dispatchLine, matchDispatches } = require('./lib/dispatch-reports');
+const { dispatchLine, matchDispatches, reportText, WAIT_MAX_MS } = require('./lib/dispatch-reports');
 const { THINKING_LEVELS } = require('./lib/pi-agents');
 // Help is auto-generated from this table — keep flags/usage in sync with `run` behavior.
 const SESSION_FLAG = '--session <id>';
@@ -59,6 +59,23 @@ const COMMANDS = {
         run: runPreviewCli,
       },
     },
+  },
+  show: {
+    summary: 'Show the user a card: a markdown or HTML file you wrote, rendered on the board',
+    usage: 'pi-kanban show <file> [--title <text>] [--key <name>] [--base <dir>] [--session <id>]',
+    flags: {
+      '<file>': 'A markdown, HTML, image or text file (relative paths resolve against the current dir)',
+      '--title <text>': 'Card title (default: the file name)',
+      '--key <name>': 'Card name, e.g. latency-chart: a card with the same key is replaced in place',
+      '--base <dir>': 'Folder that the card\'s path:line links resolve against, usually the repo root (default: the session cwd)',
+      [SESSION_FLAG]: SESSION_FLAG_HELP,
+    },
+    notes: 'From pi in the board terminal, the card opens in the overlay above the terminal. Elsewhere it opens as a background tab of the session, and --key and --base do nothing. The card refreshes on each save of the file. The show skill has the card guide.',
+    examples: [
+      'pi-kanban show ./scratch/latency.html --title "p95 latency" --key latency-chart',
+      'pi-kanban show ./scratch/plan.md',
+    ],
+    run: runShowCli,
   },
   pane: {
     summary: 'Add live panes (a URL or a local file) to a session\'s view, without switching to them',
@@ -166,6 +183,22 @@ const COMMANDS = {
         notes: 'Needs the pi-kanban hooks in this config dir (pi-kanban --install); without them the list is empty.',
         examples: ['pi-kanban session agents $PI_KANBAN_SESSION_ID'],
         run: runSessionAgentsCli,
+      },
+      cost: {
+        summary: 'Open pi-cost for a session as a board tab: its cost, tokens and models',
+        usage: 'pi-kanban session cost [<id>]',
+        flags: { '<id>': 'Full session id, or a unique prefix (default: $PI_KANBAN_SESSION_ID)' },
+        notes: 'From pi in the board terminal, the board switches to the tab. Needs the terminal token, like dispatch start.',
+        companion: 'pi-cost',
+        run: runSessionCompanionCli,
+      },
+      inspect: {
+        summary: 'Open pi-inspect for a session as a board tab: the system prompt, tools, extensions, skills and context pi loaded',
+        usage: 'pi-kanban session inspect [<id>]',
+        flags: { '<id>': 'Full session id, or a unique prefix (default: $PI_KANBAN_SESSION_ID)' },
+        notes: 'From pi in the board terminal, the board switches to the tab. Needs the terminal token, like dispatch start.',
+        companion: 'pi-inspect',
+        run: runSessionCompanionCli,
       },
       pin: {
         summary: 'Pin (or unpin) a session in the sidebar; every board on this config dir shows it',
@@ -312,7 +345,7 @@ const COMMANDS = {
     },
   },
   dispatch: {
-    summary: 'Start, list and end pi sessions for tasks in pi-kanban\'s terminal',
+    summary: 'Start, wait for, list and end pi sessions for tasks in pi-kanban\'s terminal',
     verbs: {
       start: {
         summary: 'Start pi in pi-kanban\'s terminal with a task; prints the session id',
@@ -328,12 +361,20 @@ const COMMANDS = {
           '--json': 'Output JSON',
           '-- <pi args>': 'Passed to pi as they are, e.g. --tools read,bash. No quotes, % or control characters; pi-kanban sets --session-id, --name, --model and --thinking',
         },
-        notes: 'Needs the terminal token, so it runs on the machine of the pi-kanban server. The session gets the dispatch_report tool and reports through the board; its starter reads the report with the dispatch_wait tool. Run `pi-kanban skills get dispatch` for how to write the spec.',
+        notes: 'Needs the terminal token, so it runs on the machine of the pi-kanban server. The session gets the dispatch_report tool and reports through the board; read the report with `dispatch wait`. Run `pi-kanban skills get dispatch` for how to write the spec.',
         examples: [
           'pi-kanban dispatch start --cwd . --spec-file spec.md --name fix-login-redirect --group auth-refactor --thinking high',
           'pi-kanban dispatch start --cwd . --spec "Run the tests and report the failures" --model codemie/gpt-6-luna',
         ],
         run: runDispatchStartCli,
+      },
+      wait: {
+        summary: 'Wait for the reports of sessions this session started, and print them',
+        usage: 'pi-kanban dispatch wait <session id>...',
+        flags: { '<session id>': 'The full id `dispatch start` printed; give several to wait for each in turn' },
+        notes: 'Prints a report at once when it is already in, and says so when the session\'s terminal ended without one. It waits with no time limit, so run it without a timeout.',
+        examples: ['pi-kanban dispatch wait 01a30000-0000-7000-8000-000000000004'],
+        run: runDispatchWaitCli,
       },
       list: {
         summary: 'List sessions this session started that still run in pi-kanban\'s terminal',
@@ -453,6 +494,7 @@ const SERVER_FLAGS = [
   ['--dir <path>', 'PI_CODING_AGENT_DIR', 'pi agent dir (default ~/.pi/agent)'],
   ['--session-dir <dir>', 'PI_CODING_AGENT_SESSION_DIR', 'pi session dir (default: sessionDir in pi settings)'],
   ['--no-terminal', '', 'Turn off the board terminal'],
+  ['--new-token', '', 'Replace the saved terminal token'],
   ['--terminal-shell <shell>', 'PK_TERMINAL_SHELL', 'gitbash, a program on PATH, or a path'],
   ['--host <addr>', 'HOST', 'Listen address (default 127.0.0.1)'],
   ['--allowed-hosts <list>', 'ALLOWED_HOSTS', 'Extra Host header values, comma-separated'],
@@ -486,17 +528,14 @@ function printTopHelp() {
 
 function printNounHelp(noun) {
   const entry = COMMANDS[noun];
+  if (!entry.verbs) return printLeafHelp(entry);
   console.log(`${entry.summary}\n`);
-  if (entry.verbs) {
-    console.log(`Usage: pi-kanban ${noun} <subcommand> [args] [--flags]\n`);
-    console.log('Subcommands:');
-    for (const [vName, v] of Object.entries(entry.verbs)) {
-      console.log(`  ${vName.padEnd(12)}${v.summary}`);
-    }
-    console.log(`\nRun \`pi-kanban help ${noun} <subcommand>\` for flags and examples.`);
-  } else {
-    printLeafHelp(entry);
+  console.log(`Usage: pi-kanban ${noun} <subcommand> [args] [--flags]\n`);
+  console.log('Subcommands:');
+  for (const [vName, v] of Object.entries(entry.verbs)) {
+    console.log(`  ${vName.padEnd(12)}${v.summary}`);
   }
+  console.log(`\nRun \`pi-kanban help ${noun} <subcommand>\` for flags and examples.`);
 }
 
 function printLeafHelp(entry) {
@@ -700,18 +739,15 @@ async function runPaneAddCli(args, entry) {
     printLeafHelp(entry);
     return 1;
   }
-  let headers;
-  if (companion) {
-    const token = readTerminalToken();
-    if (!token) return 1;
-    headers = { 'x-terminal-token': token };
-  }
+  const token = companion && readTerminalToken();
+  if (companion && !token) return 1;
   const resolved = await resolveSessionArg(entry, args, PANES_WHY);
   if (!resolved) return 1;
   try {
     const title = getArgValue(args, 'title') || '';
-    const body = companion ? { companion, title } : { target: cliTarget(target), title };
-    const out = await cliPostJson(panesPath(resolved.id), body, 'Pane add', headers);
+    const out = companion
+      ? await postCompanion(resolved.id, companion, title, token)
+      : await cliPostJson(panesPath(resolved.id), { target: cliTarget(target), title }, 'Pane add');
     if (!out) return 1;
     const { pane } = out;
     let frameable;
@@ -721,7 +757,7 @@ async function runPaneAddCli(args, entry) {
       } catch {}
     }
     if (args.includes('--json')) console.log(JSON.stringify({ ...pane, frameable }, null, 2));
-    else console.log(`${pane.id}  ${pane.title}${out.added ? '' : ' (already there)'}`);
+    else console.log(paneLine(out));
     if (frameable === false && !args.includes('--json')) {
       console.log(`note: ${new URL(pane.target).host} refuses framing, so the pane shows an "Open in new tab" card. Look for a URL of the same content that allows framing.`);
     }
@@ -752,6 +788,58 @@ async function runPaneListCli(args, entry) {
     if (args.includes('--json')) console.log(JSON.stringify(layout, null, 2));
     else if (!layout.panes.length) console.log(`No panes for session ${resolved.id.slice(0, 8)}.`);
     else printTable(['ID', 'KIND', 'TITLE', 'TARGET'], layout.panes.map((p) => [p.id, p.kind, p.title, p.target]));
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+const paneLine = (out) => `${out.pane.id}  ${out.pane.title}${out.added ? '' : ' (already there)'}`;
+
+// With a board terminal id, the board tab that shows that terminal switches to the pane.
+const postCompanion = (sessionId, companion, title, token) =>
+  cliPostJson(panesPath(sessionId), { companion, title, terminal: boardTerminalId() || undefined }, 'Companion', { 'x-terminal-token': token });
+
+async function runShowCli(args, entry) {
+  const [file] = positionals(args, ['--session', '--title', '--key', '--base']);
+  if (!file) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  const terminal = boardTerminalId();
+  const token = terminal && readTerminalToken();
+  if (terminal && !token) return 1;
+  const resolved = await resolveSessionArg(entry, args, 'a card belongs to a session.');
+  if (!resolved) return 1;
+  const abs = cliPath(file);
+  const title = getArgValue(args, 'title') || path.basename(abs);
+  try {
+    if (!terminal) {
+      const out = await cliPostJson(panesPath(resolved.id), { target: abs, title, show: true }, 'Show');
+      if (!out) return 1;
+      console.log(out.added
+        ? `Added "${title}" as a background tab of session ${resolved.id.slice(0, 8)} on the board. In your reply, say what the card shows and that it waits there.`
+        : 'The board already has a tab for this file; it refreshes on each save.');
+      return 0;
+    }
+    const base = getArgValue(args, 'base');
+    const body = { sessionId: resolved.id, title, file: abs, key: getArgValue(args, 'key'), base: base && cliPath(base) };
+    const out = await cliPostJson(`/api/terminals/${encodeURIComponent(terminal)}/show`, body, 'Show', { 'x-terminal-token': token });
+    if (!out) return 1;
+    console.log(`Shown "${out.title}" (${out.key ? `${out.key}, ` : ''}${out.index}/${out.count}). The user sees the rendered card and you do not: in your reply, say what the card shows, and take the render as given.`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runSessionCompanionCli(args, entry) {
+  const idArg = positionals(args, [])[0] || process.env[SESSION_ID_ENV];
+  if (!idArg) return usageError(entry, '<id> is required outside a pi session.');
+  const token = readTerminalToken();
+  if (!token) return 1;
+  const resolved = await resolveSessionByIdOrPrefix(idArg);
+  if (!resolved) return 1;
+  try {
+    const out = await postCompanion(resolved.id, entry.companion, undefined, token);
+    if (!out) return 1;
+    console.log(paneLine(out));
     return 0;
   } catch (e) { reportCliError(e); return 1; }
 }
@@ -1384,6 +1472,23 @@ async function runDispatchStartCli(argv) {
     if (args.includes('--json')) console.log(JSON.stringify(out, null, 2));
     else console.log(`Started session ${out.session} in ${out.cwd}${out.group ? ` [${out.group}${out.transient ? ', transient' : ''}]` : ''}`);
     if (out.groupError) console.error(`Not grouped: ${out.groupError}`);
+    return 0;
+  } catch (e) { reportCliError(e); return 1; }
+}
+
+async function runDispatchWaitCli(args, entry) {
+  const ids = positionals(args, []);
+  if (!ids.length) {
+    printLeafHelp(entry);
+    return 1;
+  }
+  try {
+    for (const id of ids) {
+      let got;
+      do got = await cliGetJson(`/api/dispatch/${encodeURIComponent(id)}/report?wait=${WAIT_MAX_MS}`, 'Dispatch wait');
+      while (got.status === 'pending');
+      console.log(reportText(id, got));
+    }
     return 0;
   } catch (e) { reportCliError(e); return 1; }
 }

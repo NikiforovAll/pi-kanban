@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join as joinPath } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_PORT = 3460;
@@ -8,6 +9,21 @@ export const DEFAULT_PORT = 3460;
 const requireHere = createRequire(import.meta.url);
 // The board's CommonJS modules, shared with the extension.
 export const lib = (name: string) => requireHere(`../../lib/${name}`);
+
+const { linkUrl } = requireHere("../../public/link-url.js") as { linkUrl: (v: unknown) => string | null };
+export const isUrl = (target: string) => linkUrl(target) !== null;
+
+// The board resolves a path against its own cwd, so a relative path is made absolute here.
+// A file:// URL is left to the board, which converts it.
+export function resolveTarget(cwd: string, input: string): string {
+	const target = input.trim();
+	if (!target) throw new Error("A path or URL is required.");
+	if (isUrl(target) || /^file:/i.test(target)) return target;
+	const expanded = target === "~" || /^~[\\/]/.test(target) ? joinPath(homedir(), target.slice(1)) : target;
+	// Git Bash hands out `/c/x` for `C:\x`, as cliPath in cli.js also handles.
+	const native = process.platform === "win32" ? expanded.replace(/^\/([a-zA-Z])(?=\/|$)/, "$1:/") : expanded;
+	return isAbsolute(native) ? resolvePath(native) : resolvePath(cwd, native);
+}
 
 export const BOARD_DOWN = 'The pi-kanban board is not running. Ask the user to start it with "pi-kanban".';
 
@@ -72,10 +88,7 @@ export function terminalToken(): string {
 	throw new Error(`No terminal token for the pi-kanban board on port ${port}. It must run with the terminal enabled.`);
 }
 
-// Both vars come from the board terminal's ptyEnv, so only a session started there has them.
-export function boardTerminalId(): string | null {
-	return (process.env.PK_URL && process.env.PK_TERMINAL_ID) || null;
-}
+export const { boardTerminalId } = lib("board-dir.js") as { boardTerminalId: () => string | null };
 
 // Under the board's 25 s cap on a long-poll, so each poll answers before the board gives up on it.
 export const POLL_MS = 20_000;

@@ -6,13 +6,7 @@ A dispatch is a plain pi session that pi-kanban starts in its embedded terminal,
 
 The started session sees only the spec, not this conversation, so the spec carries everything it needs: the goal, the files, the constraints, and what the report must say.
 
-## Report
-
-The started session gets the `dispatch_report` tool and an instruction to call it once, with a short report, when it is done or cannot finish. The board keeps the report. Read it with the `dispatch_wait` tool, which waits until the report comes or the session's terminal ends. A report that comes before you wait is kept for you.
-
 ## Start
-
-From a pi session, use the `dispatch_start` tool. From a shell:
 
 ```bash
 pi-kanban dispatch start --cwd <dir> --spec-file <spec.md> --name <name> --group <group> --json -- <pi args>
@@ -26,11 +20,19 @@ pi-kanban dispatch start --cwd <dir> --spec-file <spec.md> --name <name> --group
 - After a pi-kanban restart the terminal comes back with `pi --session <id>` alone, so the args after `--` apply to the first run only.
 - The result holds the `session` id.
 
+## Report
+
+The started session gets the `dispatch_report` tool and an instruction to call it once, with a short report, when it is done or cannot finish. The board keeps the report, so a report that comes before you wait is kept for you.
+
+```bash
+pi-kanban dispatch wait <session-id>...
+```
+
+It prints each report, or says that the session's terminal ended without one. It waits with no time limit, so run it without a timeout.
+
 ## Status and end
 
 ```bash
 pi-kanban dispatch list --json            # still running in pi-kanban's terminal; reportedAt once it reported
 pi-kanban dispatch end <session-id>       # ends its terminal
 ```
-
-The `dispatch_list` and `dispatch_end` tools do the same from a pi session.

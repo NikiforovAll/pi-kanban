@@ -1,11 +1,11 @@
 import { dirname, join as joinPath } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, terminalToken } from "./tools/board-api.js";
-import { linkDoc, openCompanion, previewDoc, registerPaneTools, resolveTarget } from "./tools/panes.js";
+import { boardFetch, boardTerminalId, boardUrl, errorText, kanbanDir, lib, okJson, postJson, resolveTarget, terminalToken } from "./tools/board-api.js";
+import { linkDoc, openCompanion, previewDoc } from "./tools/panes.js";
 import { registerDispatch } from "./tools/dispatch.js";
 import { registerInbox } from "./tools/inbox.js";
 import { registerScratchpad } from "./tools/scratchpad.js";
-import { ASK_CLOSE, ASK_OPEN, ASK_TOOL, type AskOpen, registerShowAsk } from "./tools/show-ask.js";
+import { ASK_CLOSE, ASK_OPEN, ASK_TOOL, type AskOpen, registerAsk } from "./tools/ask.js";
 
 type Line = Record<string, unknown>;
 
@@ -259,7 +259,7 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 	registerLiveState(pi);
 	registerModelWindows(pi);
 	registerScratchpad(pi);
-	registerShowAsk(pi);
+	registerAsk(pi);
 	registerDispatch(pi);
 	registerInbox(pi);
 
@@ -292,8 +292,6 @@ export default function kanbanExtension(pi: ExtensionAPI) {
 			return;
 		}
 	});
-
-	registerPaneTools(pi);
 
 	pi.registerCommand("kanban", {
 		description: `pi-kanban board: ${CAN_OPEN ? "open | " : ""}session <verb> | cost | inspect`,

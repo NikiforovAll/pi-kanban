@@ -21,11 +21,10 @@ if (canRunTs) {
   });
 }
 
-describe('pane_add and companion_open', { skip: !canRunTs && 'needs Node with registerHooks and type stripping' }, () => {
+describe('/kanban companion panes', { skip: !canRunTs && 'needs Node with registerHooks and type stripping' }, () => {
   const requests = [];
   let server;
   let root;
-  let addPane;
   let openCompanion;
   const env = {};
 
@@ -49,7 +48,7 @@ describe('pane_add and companion_open', { skip: !canRunTs && 'needs Node with re
       env[k] = process.env[k];
       process.env[k] = v;
     }
-    ({ addPane, openCompanion } = await import('../extensions/tools/panes.ts'));
+    ({ openCompanion } = await import('../extensions/tools/panes.ts'));
   });
 
   after(() => {
@@ -77,10 +76,5 @@ describe('pane_add and companion_open', { skip: !canRunTs && 'needs Node with re
     assert.equal(values('session cost'), null);
     assert.deepEqual(values('session in'), ['session inspect']);
     assert.ok(values('session ').includes('session cost'));
-  });
-
-  it('sends a target without the token', async () => {
-    await addPane('s1', root, { target: 'report.html', title: 'R' });
-    assert.deepEqual(requests.at(-1), { url: '/api/panes/s1', token: undefined, body: { target: path.join(root, 'report.html'), title: 'R' } });
   });
 });

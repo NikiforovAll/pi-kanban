@@ -41,6 +41,7 @@
     "lib/",
     "public/",
     "skill-guides/",
+    "skills/",
     "extensions/",
     "README.md",
     "CHANGELOG.md"
@@ -75,6 +76,9 @@
   "pi": {
     "extensions": [
       "./extensions"
+    ],
+    "skills": [
+      "./skills"
     ],
     "image": "https://raw.githubusercontent.com/NikiforovAll/pi-kanban/main/assets/pi-kanban-poster.png"
   },
