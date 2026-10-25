@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { schemaValidator } = require('./schema-validator');
 
-const PI_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pk-tasks-'));
+const PI_DIR = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pk-tasks-')));
 process.env.PI_DIR = PI_DIR;
 const taskStore = require('../lib/task-store');
 const { countTaskDir } = require('../lib/task-counts');
