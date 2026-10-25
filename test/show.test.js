@@ -129,7 +129,7 @@ describe('show routes', () => {
     assert.equal(r.status, 200);
     fs.writeFileSync(md, 'two');
     const got = await api.call('GET', `${showUrl()}/${r.body.id}`);
-    assert.deepEqual(got.body, { id: r.body.id, title: 'Doc', key: null, kind: 'markdown', content: 'two', file: md, path: md, url: null });
+    assert.deepEqual(got.body, { id: r.body.id, title: 'Doc', key: null, kind: 'markdown', content: 'two', file: md, url: null });
 
     const img = await postShow(api, { sessionId: A, title: 'Shot', file: png });
     const gotImg = await api.call('GET', `${showUrl()}/${img.body.id}`);

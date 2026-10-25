@@ -43,7 +43,6 @@ const {
   readLines
 } = require('./lib/parsers');
 const { inlineHtmlAssets, MIME_BY_EXT } = require('./lib/inline-assets');
-const { buildDecision, decisionFileName, isDecisionFile, approvalsFrom, boardRefusal } = require('./lib/approvals');
 const { resolvePiAgentDir, boardDir, getArgValue,storageNamespace } = require('./lib/board-dir');
 const { readTerminalConfig } = require('./lib/terminal');
 const { THINKING_LEVELS } = require('./lib/pi-agents');
@@ -288,9 +287,7 @@ function persistAgent(dir, agent) {
 }
 
 // <PK_DIR>/config.json — pi-kanban's own settings, per pi agent dir.
-// Normalization lives in lib/approvals (kept in sync with the gate's own parse).
 const PK_CONFIG_FILE = path.join(PK_DIR, 'config.json');
-const LEGACY_APPROVALS_FILE = path.join(PK_DIR, 'approvals.json');
 const pkConfigCache = new Map();
 const readCckConfig = () => JSON.parse(readFileSync(PK_CONFIG_FILE, 'utf8'));
 function pkConfigSection(name) {
@@ -300,28 +297,9 @@ function pkConfigSection(name) {
     return null;
   }
 }
-function approvalsConfig() {
-  return cachedByMtime(pkConfigCache, 'approvals', PK_CONFIG_FILE,
-    () => approvalsFrom(readCckConfig()), approvalsFrom(null));
-}
 function boardEventsEnabled() {
   return cachedByMtime(pkConfigCache, 'boardEvents', PK_CONFIG_FILE,
     () => boardEventsOn(readCckConfig()), boardEventsOn(null));
-}
-// approvals.json predates config.json (and was opt-in). Fold it into
-// config.json once so an existing opt-in keeps its tuning, then drop it.
-function migrateLegacyApprovalsConfig() {
-  if (!existsSync(LEGACY_APPROVALS_FILE)) return;
-  try {
-    const legacy = JSON.parse(readFileSync(LEGACY_APPROVALS_FILE, 'utf8'));
-    let cfg = {};
-    try { cfg = JSON.parse(readFileSync(PK_CONFIG_FILE, 'utf8')) || {}; } catch { /* absent */ }
-    if (!cfg.approvals) writeJsonAtomicOrLog(PK_CONFIG_FILE, { ...cfg, approvals: legacy });
-    unlinkSync(LEGACY_APPROVALS_FILE);
-    pkConfigCache.clear();
-  } catch (e) {
-    console.error(`[pi-kanban] could not migrate ${LEGACY_APPROVALS_FILE}: ${e.message}`);
-  }
 }
 
 function checkWaitingForUser(agentDir, logMtime) {
@@ -336,9 +314,6 @@ function checkWaitingForUser(agentDir, logMtime) {
       // The mod sees the ask before auto mode's classifier decides it, and no dialog may follow.
       // An ask from a settings rule always opens the dialog.
       if (data.kind === 'permission' && !data.rule && loadSessionMetadata()[path.basename(agentDir)]?.permissionMode === 'auto') return null;
-      // Opted out reads the same as lapsed to the board: the ask is only
-      // answerable in the terminal, so no buttons.
-      if (boardRefusal(data, approvalsConfig())) return { ...data, lapsed: true };
       return data;
     }
   } catch { /* skip — missing or invalid */ }
@@ -1672,30 +1647,6 @@ app.post('/api/sessions/:sessionId/read', (req, res) => {
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'Failed to mark session read' });
-  }
-});
-
-// UI-driven approvals: answers the ask the plugin's mod is polling for by writing
-// _decision-<id>.json next to the marker. The mod cannot delete files, so it clears
-// the marker and leaves the decision, and a write for an ask that is already over
-// is accepted anyway (D13); cleanupAgentActivity's sweep removes both kinds.
-app.post('/api/sessions/:sessionId/waiting/respond', (req, res) => {
-  const sessionId = req.params.sessionId;
-  const dir = path.join(AGENT_ACTIVITY_DIR, sessionId);
-  let marker = null;
-  try { marker = JSON.parse(readFileSync(path.join(dir, '_waiting.json'), 'utf8')); }
-  catch { /* missing or invalid → buildDecision reports 410 */ }
-  // The gate stopped polling after waitSeconds — an orphaned decision file would
-  // sit unconsumed while the card pretends the click worked.
-  const refusal = marker && boardRefusal(marker, approvalsConfig());
-  if (refusal) return res.status(refusal.status).json({ error: refusal.error });
-  const result = buildDecision(marker, req.body || {});
-  if (result.error) return res.status(result.status).json({ error: result.error });
-  try {
-    writeJsonAtomic(path.join(dir, decisionFileName(marker.id)), result.decision);
-    res.json({ ok: true });
-  } catch {
-    res.status(500).json({ error: 'Failed to write decision' });
   }
 });
 
@@ -3485,22 +3436,10 @@ async function cleanupAgentActivity() {
       // Map files are rewritten in place, so the dir mtime does not track their use.
       if (dirPath === TASK_MAPS_DIR) continue;
       try {
-        const contents = await fs.readdir(dirPath);
-        const stat = await fs.stat(dirPath);
-        const age = now - stat.mtimeMs;
-        if ((contents.length === 0 && age > AGENT_STALE_MS) || age > CLEANUP_MAX_AGE_MS) {
+        const age = now - (await fs.stat(dirPath)).mtimeMs;
+        if (age <= AGENT_STALE_MS) continue;
+        if (age > CLEANUP_MAX_AGE_MS || (await fs.readdir(dirPath)).length === 0) {
           await fs.rm(dirPath, { recursive: true, force: true });
-          continue;
-        }
-        // Mods cannot delete files, so every decision file is swept here. The mod
-        // waits at most PERMISSION_TTL_MS, so anything older is unclaimable.
-        for (const f of contents) {
-          if (!isDecisionFile(f)) continue;
-          const fp = path.join(dirPath, f);
-          try {
-            const fst = await fs.stat(fp);
-            if (now - fst.mtimeMs > PERMISSION_TTL_MS) await fs.rm(fp, { force: true });
-          } catch { /* ignore per-file errors */ }
         }
       } catch { /* ignore per-folder errors */ }
     }
@@ -3573,7 +3512,6 @@ function prewarmCaches() {
     writeTerminalToken(actualPort);
     console.log(`pi-kanban running at http://localhost:${actualPort}`);
     setInterval(() => reclaimServerInfo(actualPort), 30000).unref();
-    migrateLegacyApprovalsConfig();
     const warning = net.exposureWarning();
     if (warning) console.log(warning);
     terminal.started.then((terminalReason) => {

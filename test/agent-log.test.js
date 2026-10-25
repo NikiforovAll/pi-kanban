@@ -32,26 +32,24 @@ test('an agent id keeps only file-name characters', () => {
 
 test('a prompt marker names the newest running tool, or the prompt', () => {
   const tool = { toolName: 'bash', args: { command: 'rm x' } };
-  assert.deepEqual(promptMarker({ kind: 'confirm', title: 'Run?' }, tool, 'C:\\sandbox', 'T'), {
+  assert.deepEqual(promptMarker({ kind: 'confirm', title: 'Run?' }, tool, 'T'), {
     kind: 'permission',
     toolName: 'bash',
     toolInput: '{"command":"rm x"}',
-    cwd: 'C:\\sandbox',
     timestamp: 'T',
   });
-  const bare = promptMarker({ kind: 'select', title: 'Pick one' }, undefined, 'C:\\sandbox', 'T');
+  const bare = promptMarker({ kind: 'select', title: 'Pick one' }, undefined, 'T');
   assert.deepEqual([bare.kind, bare.toolName, bare.toolInput], ['question', 'Pick one', '{"title":"Pick one"}']);
 });
 
 test('waiting marker matches the schema and clears', async () => {
   const dir = tempDir();
   const file = path.join(dir, '_waiting.json');
-  await writeWaiting(dir, { kind: 'permission', toolName: 'bash', toolInput: '{"command":"rm x"}', cwd: 'C:\\sandbox', timestamp: '2026-10-24T16:19:30.000Z' });
+  await writeWaiting(dir, { kind: 'permission', toolName: 'bash', toolInput: '{"command":"rm x"}', timestamp: '2026-10-24T16:19:30.000Z' });
   const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
   const validate = schemaValidator('waiting.schema.json');
   assert.ok(validate(marker), JSON.stringify(validate.errors));
   assert.equal(marker.status, 'waiting');
-  assert.equal(marker.id, undefined);
   await clearWaiting(dir);
   await clearWaiting(dir);
   assert.equal(fs.existsSync(file), false);

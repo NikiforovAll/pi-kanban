@@ -23,7 +23,7 @@ const liveSessions = lib("live-sessions.js") as {
 };
 const agentLog = lib("agent-log.js") as {
 	appendAgentLines: (dir: string, records: Line[]) => Promise<void>;
-	promptMarker: (prompt: { kind: string; title?: string }, tool: { toolName: string; args: unknown } | undefined, cwd: string, now: string) => Line;
+	promptMarker: (prompt: { kind: string; title?: string }, tool: { toolName: string; args: unknown } | undefined, now: string) => Line;
 	writeWaiting: (dir: string, marker: Line) => Promise<void>;
 	clearWaiting: (dir: string) => Promise<void>;
 	markStopped: (dir: string) => Promise<void>;
@@ -192,7 +192,7 @@ function registerLiveState(pi: ExtensionAPI) {
 	function openPrompt(prompt: { kind: string; title?: string }, tool?: { toolName: string; args: unknown }) {
 		if (!session) return;
 		openPrompts++;
-		const marker = agentLog.promptMarker(prompt, tool, session.cwd, now());
+		const marker = agentLog.promptMarker(prompt, tool, now());
 		inActivityDir("waiting", (dir) => agentLog.writeWaiting(dir, marker));
 		publish("waiting");
 	}

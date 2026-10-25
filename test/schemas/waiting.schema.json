@@ -11,10 +11,8 @@
       "enum": ["waiting", "cleared"]
     },
     "kind": { "type": "string" },
-    "id": { "type": "string" },
     "toolName": { "type": ["string", "null"] },
     "toolInput": { "type": ["string", "null"] },
-    "cwd": { "type": ["string", "null"] },
     "rule": { "type": "string" },
     "timestamp": { "type": "string", "format": "date-time" }
   },

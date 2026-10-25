@@ -850,7 +850,6 @@ async function fetchAgents(sessionId) {
       lastWaitingHash = waitHash;
       if (messagePanelOpen && currentMessages.length) renderMessages(currentMessages);
       maybeFollowLatest();
-      maybeAutoOpenWaiting();
     }
   } catch (e) {
     console.error('[fetchAgents]', e);
@@ -1708,27 +1707,12 @@ function renderWaitingBody(tool, params) {
   return renderToolParamsHtml(params);
 }
 
-// Answerable only when the marker carries a request id (written by
-// the plugin's mod, which is polling for a decision) and the gate hasn't
-// lapsed past its wait window — older or lapsed markers are only answerable
-// in the terminal.
-function isWaitingAnswerable() {
-  return !!(currentWaiting?.id && !currentWaiting.lapsed);
-}
-
 function parseWaitingInput() {
   try {
     return JSON.parse(currentWaiting?.toolInput || '');
   } catch (_) {
     return null; /* toolInput may be truncated/non-JSON */
   }
-}
-
-// One source for the Allow/Deny pair on every surface; only the css class prefix differs.
-// Questions return '' (answered via the form in the detail modal).
-function waitingDecisionButtons(cls) {
-  if (!isWaitingAnswerable() || currentWaiting.kind === 'question') return '';
-  return `<button class="${escapeHtml(cls)}-allow" onclick="event.stopPropagation();respondWaiting({behavior:'allow'})">Allow</button><button class="${escapeHtml(cls)}-deny" onclick="event.stopPropagation();respondWaiting({behavior:'deny'})">Deny</button>`;
 }
 
 function renderWaitingEntry() {
@@ -1740,57 +1724,17 @@ function renderWaitingEntry() {
   const bodyHtml = renderWaitingBody(tool, params);
   const bodyWrap = bodyHtml ? `<div class="msg-waiting-body">${bodyHtml}</div>` : '';
   const discardBtn = `<button class="msg-waiting-discard" title="Discard permission prompt" onclick="event.stopPropagation();discardWaiting()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
-  // Questions are answered in the detail modal.
-  const buttons = waitingDecisionButtons('msg-waiting');
-  const actions = buttons ? `<span class="msg-waiting-actions">${buttons}</span>` : '';
-  // Lapsed = gate stopped polling — the ask is only answerable in the terminal
-  const lapsed = !!currentWaiting.lapsed;
-  const keyHint = lapsed ? 'answer in the terminal' : buttons ? `${sendKbd()} allow` : '';
-  const hintHtml = keyHint ? `<div class="msg-time waiting-key-hint-line">${keyHint}</div>` : '';
-  const footer = hintHtml || actions ? `<div class="msg-waiting-footer">${hintHtml}${actions}</div>` : '';
+  const footer = '<div class="msg-time">answer in the terminal</div>';
   return `<div class="msg-item msg-waiting" onclick="msgDetailFollowLatest=false;showWaitingDetail()">${getToolIcon(tool)}<div class="msg-body"><div class="msg-text"><span style="font-weight:600">${escapeHtml(tool)}</span>${detailHtml}</div>${bodyWrap}${footer}</div>${discardBtn}</div>`;
 }
 
-// UI-driven approvals: POST the decision the plugin's mod is polling for.
-// First writer wins (D5) — a 409/410 means the ask was answered in the
-// terminal or superseded, so just drop the card.
-async function respondWaiting(payload) {
-  if (!currentSessionId || !currentWaiting?.id) return;
-  try {
-    const res = await api(apiPath`/api/sessions/${currentSessionId}/waiting/respond`, {
-      method: 'POST',
-      body: { id: currentWaiting.id, ...payload },
-    });
-    if (res.ok || res.status === 409 || res.status === 410) {
-      clearWaitingUi();
-    } else {
-      // Surface a respond failure — a silent console error reads as a dead button
-      const text = await res.text();
-      console.error('[respondWaiting]', res.status, text);
-      let msg = text;
-      try {
-        msg = JSON.parse(text).error || text;
-      } catch (_) {
-        /* plain text */
-      }
-      showToast(msg, 'error');
-    }
-  } catch (e) {
-    console.error('[respondWaiting]', e);
-    showToast(String(e), 'error');
-  }
-}
-
-// Drop the answered/discarded ask from every surface it renders on
+// Drop the discarded ask from every surface it renders on
 function clearWaitingUi() {
   currentWaiting = null;
-  waitingAnswerDraft = {};
-  waitingCustomDraft = {};
   if (currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX) {
     // In follow mode stay in the modal and swap to the latest message —
-    // closing it would silently drop the user out of following. An ask that
-    // opened its own window is the exception: there was no following to drop.
-    if (msgDetailFollowLatest && !waitingDetailAutoOpened && currentMessages.length) {
+    // closing it would silently drop the user out of following.
+    if (msgDetailFollowLatest && currentMessages.length) {
       showMsgDetail(currentMessages.length - 1);
     } else {
       closeMsgDetailModal();
@@ -2453,7 +2397,6 @@ const msgPosition = (idx) => `${idx + 1} of ${currentMessages.length}`;
 
 function showMsgDetail(idx) {
   currentMsgDetailIdx = idx;
-  document.getElementById('msg-detail-waiting-footer').innerHTML = '';
   msgHighlightDimmed = false;
   const m = currentMessages[idx];
   if (!m) return;
@@ -2464,7 +2407,6 @@ function showMsgDetail(idx) {
 // A message outside the loaded log has no index, so it shows like a pinned message, with follow off.
 function showUnloadedMsgDetail(m) {
   currentMsgDetailIdx = null;
-  document.getElementById('msg-detail-waiting-footer').innerHTML = '';
   highlightSelectedMsg();
   msgDetailFollowLatest = false;
   renderMsgDetail(m);
@@ -2564,7 +2506,6 @@ function closeMsgDetailModal() {
   }
   msgDetailFromTerminal = false;
   msgDetailFollowLatest = false;
-  waitingDetailAutoOpened = false;
   // Drop the message highlight on close, mirroring task-card behavior.
   msgHighlightDimmed = true;
   const container = document.getElementById('message-panel-content');
@@ -6355,14 +6296,6 @@ const IS_MAC = /^Mac/i.test(navigator.userAgentData?.platform || navigator.platf
 const MAC_KEYS = { Ctrl: '⌃', Alt: '⌥', Shift: '⇧' };
 if (IS_MAC) document.getElementById('new-session-btn')?.setAttribute('title', 'New session (⌃⌥N)');
 
-// Ctrl+Enter sends on macOS as Cmd+Enter too (the handlers accept metaKey), so the hints show ⌘ and ⌥ there.
-function sendKbd() {
-  return `<kbd>${IS_MAC ? '⌘' : 'Ctrl'}</kbd>+<kbd>Enter</kbd>`;
-}
-function termKbd() {
-  return `<kbd>${IS_MAC ? '⌥' : 'Alt'}</kbd>+<kbd>\`</kbd>`;
-}
-
 // The keys of a help row as they read on this system. On macOS the Ctrl+Alt rows read Control+Option.
 function helpKeys(row, mac = IS_MAC) {
   if (!mac) return row.keys;
@@ -7755,27 +7688,7 @@ document.addEventListener('keydown', (e) => {
       e.preventDefault();
       closeMsgDetailModal();
     } else if (document.getElementById('msg-detail-modal').classList.contains('visible')) {
-      const askOpen = currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX && isWaitingAnswerable();
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && askOpen && currentWaiting.kind !== 'question') {
-        e.preventDefault();
-        respondWaiting({ behavior: 'allow' });
-      } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && askOpen) {
-        e.preventDefault();
-        submitWaitingAnswers();
-      } else if (
-        askOpen &&
-        currentWaiting.kind === 'question' &&
-        !e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        /^[1-9]$/.test(e.key)
-      ) {
-        e.preventDefault();
-        pickWaitingOptionByNumber(Number(e.key) - 1);
-      } else if (askOpen && currentWaiting.kind === 'question' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-        e.preventDefault();
-        setWaitingTab(waitingTab + (e.key === 'ArrowRight' ? 1 : -1));
-      } else if (matchKey(e, 'ArrowDown')) {
+      if (matchKey(e, 'ArrowDown')) {
         e.preventDefault();
         if (currentMsgDetailIdx === MSG_DETAIL_WAITING_IDX) {
           msgDetailFollowLatest = true;
@@ -7803,20 +7716,6 @@ document.addEventListener('keydown', (e) => {
         }
       }
     }
-    return;
-  }
-
-  if (
-    e.key === 'Enter' &&
-    (e.ctrlKey || e.metaKey) &&
-    !e.altKey &&
-    !e.shiftKey &&
-    isWaitingFresh() &&
-    isWaitingAnswerable() &&
-    currentWaiting.kind !== 'question'
-  ) {
-    e.preventDefault();
-    respondWaiting({ behavior: 'allow' });
     return;
   }
 
@@ -10383,227 +10282,9 @@ function maybeFollowLatest() {
   }
 }
 
-// A new answerable ask opens its modal on its own, but only onto an empty
-// screen: an open modal means the user is reading something, so the ask stays
-// on the card and the badge until they get to it. Each ask id is offered once,
-// so closing the modal does not bring it back on the next poll.
-let lastAutoOpenedWaitingId = null;
-// Set only on that self-opening path: answering an ask the user never asked to see
-// should put the screen back the way it was, where answering one they navigated to
-// keeps them following. Cleared with the modal, so a manual reopen is not "auto".
-let waitingDetailAutoOpened = false;
-function maybeAutoOpenWaiting() {
-  if (!isWaitingAnswerable() || !isWaitingFresh()) return;
-  if (currentWaiting.id === lastAutoOpenedWaitingId || isAnyModalOpen()) return;
-  // The terminal on screen shows the same ask; hiding it lets the next poll open the modal.
-  if (termState.shown) return;
-  lastAutoOpenedWaitingId = currentWaiting.id;
-  msgDetailFollowLatest = true;
-  waitingDetailAutoOpened = true;
-  maybeFollowLatest();
-}
-
 function isWaitingFresh() {
   if (!currentWaiting?.timestamp) return false;
   return Date.now() - new Date(currentWaiting.timestamp).getTime() < WAITING_TTL_MS;
-}
-
-// Per-question selections for the AskUserQuestion form, keyed by question text
-// (the shape the tool's `answers` input expects). Picks hold arrays of option
-// labels (length <= 1 unless multiSelect); free text lives separately so a
-// multi-select can combine both, the way the TUI's "Other" row does. Reset
-// when the ask changes.
-let waitingAnswerDraft = {};
-let waitingCustomDraft = {};
-let waitingDraftId = null;
-let waitingQuestions = [];
-
-function waitingAnswerFor(q) {
-  const picks = waitingAnswerDraft[q.question] || [];
-  const custom = waitingCustomDraft[q.question] || '';
-  if (q.multiSelect) {
-    const all = custom ? picks.concat(custom) : picks;
-    return all.length ? all : null;
-  }
-  return picks[0] || custom || null;
-}
-
-// The action buttons live in the modal's fixed footer (#msg-detail-waiting-footer),
-// not the scrollable body — long content must not push them out of reach.
-function renderWaitingFooter(tool, params) {
-  if (currentWaiting?.kind !== 'question') {
-    const buttons = waitingDecisionButtons('waiting-btn');
-    const hint = `<span class="waiting-footer-hint">${sendKbd()} allow · ${termKbd()} terminal</span>`;
-    return buttons ? hint + buttons : '';
-  }
-  if (!isWaitingAnswerable()) return '';
-  if (tool !== 'AskUserQuestion') return '';
-  const questions = Array.isArray(params?.questions) ? params.questions : [];
-  if (!questions.length) return '';
-  const picked = questions.filter((q) => waitingAnswerFor(q)).length;
-  const partial = picked > 0 && picked < questions.length ? ` (${picked}/${questions.length})` : '';
-  return `<span class="waiting-footer-hint"><kbd>1</kbd>–<kbd>9</kbd> pick · ${sendKbd()} send</span><button id="waiting-answer-btn" class="waiting-btn-allow" ${picked > 0 ? '' : 'disabled'} onclick="submitWaitingAnswers()">Send answers${partial}</button>`;
-}
-
-function renderWaitingActions(tool, params) {
-  if (!isWaitingAnswerable() || currentWaiting.kind !== 'question' || tool !== 'AskUserQuestion') return '';
-  waitingQuestions = Array.isArray(params?.questions) ? params.questions : [];
-  if (!waitingQuestions.length) return '';
-  const multiQ = waitingQuestions.length > 1;
-  waitingTab = Math.max(0, Math.min(waitingTab, multiQ ? waitingQuestions.length : 0));
-  const onReview = multiQ && waitingTab === waitingQuestions.length;
-  const tabs = multiQ
-    ? `<div class="waiting-qtabs" role="tablist">${waitingQuestions
-        .map((q, idx) => {
-          const done = !!waitingAnswerFor(q);
-          return `<button class="waiting-qtab${idx === waitingTab ? ' active' : ''}${done ? ' done' : ''}" role="tab" onclick="setWaitingTab(${idx})"><span class="waiting-qtab-n">${idx + 1}</span>${escapeHtml(q.header || `Question ${idx + 1}`)}${done ? '<span class="waiting-qtab-check">✓</span>' : ''}</button>`;
-        })
-        .join(
-          '',
-        )}<button class="waiting-qtab${onReview ? ' active' : ''}" role="tab" onclick="setWaitingTab(${escapeHtml(String(waitingQuestions.length))})">Review</button><span class="waiting-qtabs-hint"><kbd>←</kbd><kbd>→</kbd> switch</span></div>`
-    : '';
-  if (onReview) {
-    const rows = waitingQuestions
-      .map((q) => {
-        const a = waitingAnswerFor(q);
-        const text = Array.isArray(a) ? a.join(', ') : a;
-        return `<div class="waiting-review-row"><div class="waiting-review-q">${escapeHtml(q.header || q.question || '')}</div><div class="waiting-review-a${text ? '' : ' empty'}">${text ? escapeHtml(text) : 'Not answered'}</div></div>`;
-      })
-      .join('');
-    return `<div class="waiting-actions">${tabs}<div class="waiting-review">${rows}</div></div>`;
-  }
-  const qs = waitingQuestions
-    .map((q, idx) => {
-      if (idx !== waitingTab && multiQ) return '';
-      const picks = waitingAnswerDraft[q.question] || [];
-      const opts = (q.options || [])
-        .map((o, oi) => {
-          const label = waitingOptionLabel(o);
-          const desc = typeof o === 'object' ? o?.description || '' : '';
-          const descHtml = desc ? `<span class="waiting-option-desc">${renderMarkdown(desc)}</span>` : '';
-          // The option `preview` field is the TUI's side-by-side visualization
-          // pane (mockups, code snippets, diagrams) — rendered as markdown
-          const preview = typeof o === 'object' ? o?.preview || '' : '';
-          const previewHtml = preview ? `<span class="waiting-option-preview">${renderMarkdown(preview)}</span>` : '';
-          return `<button class="waiting-option${picks.includes(label) ? ' selected' : ''}" data-label="${escapeHtml(label)}" onclick="selectWaitingAnswer(${idx}, this.dataset.label)"><kbd class="waiting-option-key">${oi + 1}</kbd><span class="waiting-option-text"><span class="waiting-option-label">${escapeHtml(label)}</span>${descHtml}${previewHtml}</span></button>`;
-        })
-        .join('');
-      const header = q.header ? `<span class="waiting-question-header">${escapeHtml(q.header)}</span>` : '';
-      const multi = q.multiSelect ? '<span class="waiting-question-multi">multi-select</span>' : '';
-      const input = `<input type="text" class="waiting-option-input" placeholder="Or type your own answer" value="${escapeHtml(waitingCustomDraft[q.question] || '')}" oninput="setWaitingCustomAnswer(${idx}, this)" onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();submitWaitingAnswers()}">`;
-      return `<div class="waiting-question">${multiQ ? '' : header}${multi}<div class="waiting-question-text">${renderMarkdown(q.question || '')}</div><div class="waiting-options">${opts}</div>${input}</div>`;
-    })
-    .join('');
-  return `<div class="waiting-actions">${tabs}${qs}</div>`;
-}
-
-let waitingTab = 0;
-
-function waitingOptionLabel(o) {
-  return typeof o === 'string' ? o : o?.label || '';
-}
-
-function setWaitingTab(i) {
-  const last = waitingQuestions.length > 1 ? waitingQuestions.length : 0;
-  const next = Math.max(0, Math.min(i, last));
-  if (next === waitingTab) return;
-  waitingTab = next;
-  showWaitingDetail();
-}
-
-function pickWaitingOptionByNumber(n) {
-  const qi = waitingQuestions.length > 1 ? waitingTab : 0;
-  const o = waitingQuestions[qi]?.options?.[n];
-  if (!o) return;
-  selectWaitingAnswer(qi, waitingOptionLabel(o));
-}
-
-function selectWaitingAnswer(qi, label) {
-  const q = waitingQuestions[qi];
-  if (!q) return;
-  // Clicking a picked option unpicks it, in both modes
-  const picks = waitingAnswerDraft[q.question] || [];
-  if (q.multiSelect) {
-    waitingAnswerDraft[q.question] = picks.includes(label) ? picks.filter((l) => l !== label) : picks.concat(label);
-  } else if (picks.includes(label)) {
-    delete waitingAnswerDraft[q.question];
-  } else {
-    waitingAnswerDraft[q.question] = [label];
-    delete waitingCustomDraft[q.question];
-    if (waitingQuestions.length > 1 && waitingTab < waitingQuestions.length) waitingTab += 1;
-  }
-  showWaitingDetail();
-}
-
-// Free-text path — the TUI's "type your own answer". Updates the draft and the
-// Answer button in place: a full re-render here would drop the input's focus
-// on every keystroke.
-// biome-ignore lint/correctness/noUnusedVariables: used in HTML oninput
-function setWaitingCustomAnswer(qi, el) {
-  const q = waitingQuestions[qi];
-  if (!q) return;
-  const v = el.value.trim();
-  if (v) waitingCustomDraft[q.question] = v;
-  else delete waitingCustomDraft[q.question];
-  if (v && !q.multiSelect) {
-    delete waitingAnswerDraft[q.question];
-    for (const b of el.closest('.waiting-question')?.querySelectorAll('.waiting-option.selected') || []) {
-      b.classList.remove('selected');
-    }
-  }
-  const btn = document.getElementById('waiting-answer-btn');
-  if (btn) {
-    const picked = waitingQuestions.filter((qq) => waitingAnswerFor(qq)).length;
-    btn.disabled = picked === 0;
-    btn.textContent =
-      picked > 0 && picked < waitingQuestions.length
-        ? `Send answers (${picked}/${waitingQuestions.length})`
-        : 'Send answers';
-  }
-}
-
-function submitWaitingAnswers() {
-  // Partial submits are fine — send only the questions actually answered.
-  // multiSelect answers go as arrays of labels (the shape the TUI validates).
-  const answers = {};
-  for (const q of waitingQuestions) {
-    const a = waitingAnswerFor(q);
-    if (a) answers[q.question] = a;
-  }
-  if (!Object.keys(answers).length) return;
-  respondWaiting({ answers });
-}
-
-function renderPermissionDiff(oldText, newText) {
-  const rows = (text, sign, cls) =>
-    String(text)
-      .split('\n')
-      .map(
-        (l) =>
-          `<div class="perm-diff-row ${escapeHtml(cls)}"><span class="perm-diff-sign">${sign}</span>${escapeHtml(l)}</div>`,
-      )
-      .join('');
-  return `<div class="perm-diff">${rows(oldText, '−', 'del')}${rows(newText, '+', 'add')}</div>`;
-}
-
-// The permission card shows what Claude wants to run in full, not a one-line gist:
-// the command or the diff, where it runs, and how long the ask has been waiting.
-function renderPermissionSummary(tool, params) {
-  const waited = formatDuration(Math.max(0, Date.now() - new Date(currentWaiting.timestamp).getTime()));
-  const head = `<div class="perm-head"><span class="perm-tool">${escapeHtml(tool)}</span><span class="perm-wait" title="How long pi has been waiting">waiting ${escapeHtml(waited)}</span></div>`;
-  let body = '';
-  if (typeof params.command === 'string') {
-    body = `<div class="perm-label">Command</div><pre class="perm-code">${escapeHtml(params.command)}</pre>`;
-    if (params.description) body += `<div class="perm-note">${escapeHtml(params.description)}</div>`;
-  } else if (typeof params.old_string === 'string' && typeof params.new_string === 'string') {
-    body = `<div class="perm-label">${escapeHtml(params.file_path || 'File')}</div>${renderPermissionDiff(params.old_string, params.new_string)}`;
-  } else if (typeof params.file_path === 'string') {
-    body = `<div class="perm-label">File</div><pre class="perm-code">${escapeHtml(params.file_path)}</pre>`;
-  } else if (typeof params.description === 'string') {
-    body = `<pre class="perm-code">${escapeHtml(params.description)}</pre>`;
-  }
-  const cwd = currentWaiting.cwd ? `<div class="perm-cwd">in ${escapeHtml(currentWaiting.cwd)}</div>` : '';
-  return `<div class="perm-card">${head}${body}${cwd}</div>`;
 }
 
 function showWaitingDetail() {
@@ -10612,32 +10293,16 @@ function showWaitingDetail() {
   unmountMsgReview();
   msgHighlightDimmed = false;
   highlightSelectedMsg();
-  if (currentWaiting.id !== waitingDraftId) {
-    waitingDraftId = currentWaiting.id || null;
-    waitingAnswerDraft = {};
-    waitingCustomDraft = {};
-    waitingTab = 0;
-  }
   const tool = currentWaiting.toolName || 'unknown';
   const label = getWaitingLabel(currentWaiting.kind, tool);
   const body = document.getElementById('msg-detail-body');
   let inputHtml = '';
-  const params = parseWaitingInput();
   if (currentWaiting.toolInput) {
+    const params = parseWaitingInput();
     const pretty = params ? JSON.stringify(params, null, 2) : currentWaiting.toolInput;
     inputHtml = `<pre class="${TINTED_PRE_CLASS}">${escapeHtml(pretty)}</pre>`;
   }
-  const actionsHtml = renderWaitingActions(tool, params);
-  const footerHtml = renderWaitingFooter(tool, params);
-  // With actions on screen the form/buttons are the content — tuck the raw
-  // JSON behind a toggle, but keep what the user is approving visible: for a
-  // permission ask surface the command (or description) as a one-line summary
-  if ((actionsHtml || footerHtml) && inputHtml) {
-    const summaryHtml = currentWaiting.kind !== 'question' && params ? renderPermissionSummary(tool, params) : '';
-    inputHtml = `${summaryHtml}<details class="waiting-raw-input"><summary>Raw tool input</summary>${inputHtml}</details>`;
-  }
-  body.innerHTML = inputHtml + actionsHtml;
-  document.getElementById('msg-detail-waiting-footer').innerHTML = footerHtml;
+  body.innerHTML = inputHtml;
   document.getElementById('msg-detail-title').textContent = label;
   document.getElementById('msg-detail-agent-btn').style.display = 'none';
   const modal = document.getElementById('msg-detail-modal').querySelector('.modal');
@@ -15571,7 +15236,7 @@ const showState = {
   bodySeq: 0,
   lookup: null,
   review: null,
-  path: null,
+  file: null,
 };
 let showSize = store.readJson(SHOW_SIZE_KEY);
 // Terminal id → { closed?, collapsed?, expanded? }; a terminal with no entry yet starts collapsed. Ids gone from the terminal list are pruned.
@@ -15842,8 +15507,8 @@ async function renderShowBody(p, samePost) {
   const card = showCardEl();
   const body = card.querySelector('.show-body');
   if (seq !== showState.bodySeq || !body) return;
-  showState.path = data && !data.waiting ? data.path : null;
-  const html = data?.kind === 'html' && !data.waiting;
+  showState.file = data?.file ?? null;
+  const html = data?.kind === 'html';
   // A new frame or document drops focus to the page, and Ctrl +/- then zooms the terminal.
   const refocus = isShowCardFocused() ? focusShowBody : () => {};
   card.classList.toggle('html', html);
@@ -15866,8 +15531,7 @@ async function renderShowBody(p, samePost) {
   const md = document.createElement('div');
   md.className = 'show-md modal-zoomable';
   if (!data) md.innerHTML = '<p class="show-gone">This post is gone.</p>';
-  else if (data.waiting) md.innerHTML = '<p class="show-gone">Waiting for content.</p>';
-  else renderPreviewContent(md, data.file || p.file || '', data.content ?? '', data.kind);
+  else renderPreviewContent(md, data.file, data.content ?? '', data.kind);
   for (const pre of md.querySelectorAll('pre.mermaid')) {
     if (/^\s*(---|%%\{)/.test(pre.textContent)) continue;
     pre.textContent = SHOW_MERMAID_INIT + pre.textContent;
@@ -15875,12 +15539,12 @@ async function renderShowBody(p, samePost) {
   body.replaceChildren(md);
   refocus();
   body.scrollTop = keepScroll;
-  setShowReview(data && !data.waiting ? showReviewOpts(p, data, md, null) : null);
+  setShowReview(data ? showReviewOpts(p, data, md, null) : null);
   layoutShow();
 }
 
 function showReviewOpts(p, data, contentEl, frame) {
-  const opts = fileReviewOpts(data.path ?? '', data.kind, contentEl, frame);
+  const opts = fileReviewOpts(data.file, data.kind, contentEl, frame);
   if (!opts) return null;
   const card = showCardEl();
   return {
@@ -15892,7 +15556,7 @@ function showReviewOpts(p, data, contentEl, frame) {
       kind: 'show',
       id: p.id,
       label: `the show card "${p.title}"`,
-      locate: data.path ? `The card shows ${data.path}.` : null,
+      locate: `The card shows ${data.file}.`,
     },
   };
 }
@@ -16112,8 +15776,8 @@ function layoutShow() {
 
 async function openShowInPane() {
   const sid = showState.sessionId;
-  const target = showState.path;
-  if (!sid || !target) return showToast('The post has no file yet');
+  const target = showState.file;
+  if (!sid || !target) return showToast('The post is gone');
   const title = showState.posts[showState.idx]?.title;
   const onScreen = await postPane(sid, { target, title, show: true, base: getSessionBaseDir(sid) || undefined });
   toastPaneAdded(sid, onScreen, 'Card');
