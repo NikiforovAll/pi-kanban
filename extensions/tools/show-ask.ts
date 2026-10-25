@@ -9,7 +9,8 @@ export type AskOpen = { title: string; args: unknown };
 
 export function shownText({ title, key, index, count, path }: Shown, claim: boolean): string {
 	const at = `"${title}" (${key ? `${key}, ` : ""}${index}/${count})`;
-	return claim ? `Card ${at} is ready. Write it to ${path}; the card refreshes on each save.` : `Shown ${at}`;
+	const reply = "The user sees the rendered card and you do not: in your reply, say what the card shows, and take the render as given.";
+	return claim ? `Card ${at} is ready. Write it to ${path}; the card refreshes on each save. ${reply}` : `Shown ${at}. ${reply}`;
 }
 
 export const CLAIM_OFF_TERMINAL =
@@ -17,32 +18,32 @@ export const CLAIM_OFF_TERMINAL =
 
 export function paneText(title: string, added: boolean): string {
 	return added
-		? `Added "${title}" as a tab of this session on the pi-kanban board, in the background. Tell the user it waits there; the tab refreshes on each save.`
+		? `Added "${title}" as a background tab of this session on the pi-kanban board. In your reply, say what the card shows and that it waits there.`
 		: "The board already has a tab for this file; it refreshes on each save.";
 }
 
 export function answerText(title: string, a: Answer): string {
 	if (a.status === "answered") return `The user answered "${title}":\n${JSON.stringify(a.data, null, 2)}`;
 	if (a.status === "dismissed" && a.reason === "replaced") return `"${title}" was replaced by a newer question.`;
-	if (a.status === "dismissed") return `The user skipped "${title}" without answering.`;
+	if (a.status === "dismissed") return `The user skipped "${title}" without answering. Go on with your best default, and ask in chat only when no default works.`;
 	return `"${title}" is no longer open on the board; the user did not answer it.`;
 }
 
-const WHEN =
-	"Post one when the user asks you to show, draw or visualize something, or when your answer is a comparison of 4 or more rows, a flow, or numbers over time. Pick the form that makes the point best: a table, chart, diagram, mockup, small widget or a mix.";
+const FORM = "Pick the form that makes the point best, a small widget or a mix of forms included.";
 
+// One string for show and ask, so pi puts it in the prompt once.
 const HTML_CONTRACT =
-	"An HTML card is a body fragment, with no doctype, html, head or body tag; <style> and <script> work, with no network. Take colors and fonts from the board's CSS variables (--color-bg, --color-bg-subtle, --color-text, --color-text-muted, --color-border, --color-accent, --color-info, --color-success, --color-warning, --color-danger, --color-series-1 to --color-series-8, --font-sans, --font-mono) so the card follows the light or dark theme.";
+	"A show or ask HTML card is a body fragment, with no doctype, html, head or body tag; <style> and <script> work, with no network. Take colors and fonts from the board's CSS variables (--color-bg, --color-bg-subtle, --color-text, --color-text-muted, --color-border, --color-accent, --color-info, --color-success, --color-warning, --color-danger, --color-series-1 to --color-series-8, --font-sans, --font-mono) so the card follows the light or dark theme.";
 
 const FILE = Type.String({ description: "Path of an existing markdown, HTML, image or text file: absolute, or relative to the session cwd" });
 
 const PANE_SHOW = {
-	description: `Show a card as a tab of this session on the pi-kanban board. ${WHEN} Write the card to a markdown or HTML file in your scratchpad directory, then pass it as file; post again after a new file, and edit the same file to update its tab, which refreshes on each save. The tab opens in the background: in your reply, say what the card shows and that it waits on the board.`,
+	description: `Show a card as a background tab of this session on the pi-kanban board. ${FORM} Write the card to a markdown or HTML file in your scratchpad directory and pass it as file. Edit the same file to update its tab, which refreshes on each save; post a new file for a new card.`,
 	parameters: Type.Object({ title: Type.String({ description: "Tab title" }), file: FILE }),
 };
 
 const OVERLAY_SHOW = {
-	description: `Show a card in the pi-kanban overlay above this terminal. ${WHEN} Give each card a key that names what it shows (for example latency-chart), and post again with that key to update the card in place instead of adding a new one. Without file, the tool answers with a path: write the card there, and edit it to change it; the card refreshes on each save. Pass file to show a file that already exists. The user sees the rendered card and knows you do not; in your reply, say what the card shows, and take the render as given.`,
+	description: `Show a card in the pi-kanban overlay above this terminal. ${FORM} Give each card a key that names what it shows (for example latency-chart); post again with that key to update the card in place. Without file, the tool answers with a path to write the card to; edit that file to change the card. Pass file to show a file that already exists.`,
 	parameters: Type.Object({
 		title: Type.String({ description: "Card title" }),
 		kind: Type.Optional(
@@ -85,12 +86,6 @@ const ASK_PARAMS = Type.Object({
 	),
 });
 
-const ASK_GUIDELINES = [
-	`For an ask card: ${HTML_CONTRACT} Open the card with an <h2> that states the question.`,
-	'The ask card sends the answer with pk.send(data), any JSON value, from a click or a key press; or with <form data-pk-submit="name">, which sends {action, label, fields}; or with <button data-pk-action="name">, which sends its action and label. The first answer ends the question, so send once, with values that read without the card.',
-	"A skipped ask comes back as a line that says so. Go on without the answer, and ask in chat only if you cannot.",
-];
-
 const INTERRUPTED = "Interrupted; the question was closed.";
 
 export const ASK_TOOL = "ask";
@@ -131,8 +126,9 @@ export function registerShowAsk(pi: ExtensionAPI) {
 		name: "show",
 		label: "Show",
 		description: show.description,
-		promptSnippet: "Show a table, chart, diagram or mockup as a card on the pi-kanban board",
-		promptGuidelines: [`For a show card: ${HTML_CONTRACT}`],
+		promptSnippet:
+			"Card: a table, chart, diagram or mockup you make, on the pi-kanban board, when the user asks you to show, draw or visualize, or your answer compares 4 or more rows, traces a flow, or tracks numbers over time",
+		promptGuidelines: [HTML_CONTRACT],
 		parameters: show.parameters,
 		annotations: { destructiveHint: false, openWorldHint: false },
 		async execute(_toolCallId, params: ShowParams, _signal, _onUpdate, ctx) {
@@ -146,9 +142,10 @@ export function registerShowAsk(pi: ExtensionAPI) {
 		name: ASK_TOOL,
 		label: "Ask",
 		description:
-			"Ask the user through an HTML card in a modal on the pi-kanban board, and wait for the answer, which comes back as the tool result: the data the card sent, as JSON, or a line that says the user skipped. Use it when the answer needs something to see or control: a preview, a diagram, sliders, a long form, a quiz sheet, a playground. Write the card to an HTML file in your scratchpad, then pass it as file.",
-		promptSnippet: "Ask the user through an HTML card on the pi-kanban board and wait for the answer",
-		promptGuidelines: ASK_GUIDELINES,
+			"Ask the user through an HTML card in a modal on the pi-kanban board, and wait. The result is the data the card sent, as JSON, or a line that says the user skipped. Write the card to an HTML file in your scratchpad and pass it as file. Open the card with an <h2> that states the question. The card sends the answer with pk.send(data), any JSON value, from a click or a key press; or with <form data-pk-submit=\"name\">, which sends {action, label, fields}; or with <button data-pk-action=\"name\">, which sends its action and label. The first answer ends the question, so send once, with values that read without the card.",
+		promptSnippet:
+			"Ask the user on an HTML card on the pi-kanban board and wait for the answer, when it needs something to see or control: swatches, a diagram, sliders, a long form, a quiz sheet, a playground",
+		promptGuidelines: [HTML_CONTRACT],
 		parameters: ASK_PARAMS,
 		annotations: { destructiveHint: false, openWorldHint: false },
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {

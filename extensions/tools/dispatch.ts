@@ -66,11 +66,8 @@ export function registerDispatch(pi: ExtensionAPI) {
 		name: "dispatch_start",
 		label: "Dispatch",
 		description:
-			"Start a new pi session in the pi-kanban board's terminal with a task, sent as its first message. The session sees only the task, not this conversation, so make the task self-contained: goal, files, constraints, and what to report. It runs on its own; get its result with dispatch_wait.",
-		promptSnippet: "Start another pi session in the pi-kanban terminal with a task",
-		promptGuidelines: [
-			"Dispatch a task only when the user asks to dispatch or delegate it. After dispatch_start, call dispatch_wait with the session id to get the report; the report comes only through it.",
-		],
+			"Start a new pi session in the pi-kanban board's terminal, with the task as its first message. The session sees only the task, not this conversation: give it the goal, the files, the constraints, and what to report. It runs on its own; dispatch_wait returns its report.",
+		promptSnippet: "Dispatch a task to a new pi session in the pi-kanban terminal, when the user asks to dispatch or delegate it",
 		parameters: Type.Object({
 			task: Type.String({ description: "The task, self-contained" }),
 			cwd: Type.Optional(Type.String({ description: "Folder to run in: absolute, or relative to this session's cwd (default: this session's cwd)" })),

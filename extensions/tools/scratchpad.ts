@@ -22,9 +22,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 function promptSection(dir: string): string {
 	return [
-		`Use this session's scratchpad dir for temporary files instead of /tmp or the project: ${dir}`,
-		`It is also in $${SCRATCHPAD_ENV}. Put notes, scripts, logs and command output there. The pi-kanban board lists its files.`,
-		`It is deleted ${Math.round(pads.PAD_MAX_AGE_MS / DAY_MS)} days after the session ends, so do not keep files there that the user needs.`,
+		`Use this session's scratchpad dir for temporary files, such as notes, scripts, logs and command output, in place of /tmp or the project: ${dir}`,
+		`It is also in $${SCRATCHPAD_ENV}, and the pi-kanban board lists its files.`,
+		`It is deleted ${Math.round(pads.PAD_MAX_AGE_MS / DAY_MS)} days after the session ends, so put files the user keeps in the project or where the user says.`,
 	].join("\n");
 }
 
