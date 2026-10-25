@@ -12,12 +12,12 @@ import Lightbox from '../../../kit/Lightbox.astro';
 
 A pane is a URL or a local file (markdown, HTML, text, or an image) that shows as a tab of the session, next to **Board**. A file pane refreshes on each save.
 
-| Tool | What it does |
+| `pi-kanban` command | What it does |
 | --- | --- |
-| `pane_add`, `pane_rm`, `pane_list` | Add a URL or a local file as a tab next to the board, without switching to it |
-| `companion_open` | Open pi-cost or pi-inspect for the session as a tab |
+| `pane add`, `pane rm`, `pane list` | Add a URL or a local file as a tab next to the board, without switching to it |
+| `session cost`, `session inspect` | Open pi-cost or pi-inspect for the session as a tab. See [Companions](../companions/). |
 
-From a shell, `pi-kanban pane add | rm | list` does the same. See the [CLI reference](../../reference/cli/#pane).
+The `kanban` skill teaches pi these commands. They also run from a shell. See the [CLI reference](../../reference/cli/#pane).
 
 ## Tabs and splits
 
@@ -33,12 +33,12 @@ From a shell, `pi-kanban pane add | rm | list` does the same. See the [CLI refer
 
 ## Linked docs
 
-| Tool | What it does |
+| `pi-kanban` command | What it does |
 | --- | --- |
-| `link_doc`, `unlink_doc` | Link a file or URL to the session. Linked docs show on the session card and in session info. |
-| `preview_doc` | Open a file in the preview modal now |
+| `doc link`, `doc unlink`, `doc list` | Link a file or URL to the session. Linked docs show on the session card and in session info. |
+| `doc preview` | Open a markdown or HTML file in the preview modal now |
 
-Click a linked doc to open it in the preview. A file the preview cannot show opens in your editor. From pi, `/kanban session link-doc` and `/kanban session view-doc` do the same.
+Click a linked doc to open it in the preview. A file the preview cannot show opens in your editor. From pi, `/kanban session link-doc` and `/kanban session view-doc` do the same. See the [CLI reference](../../reference/cli/#doc).
 
 ## Scratch folder
 

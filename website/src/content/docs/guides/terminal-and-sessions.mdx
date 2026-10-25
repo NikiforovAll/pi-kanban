@@ -10,7 +10,7 @@ import Lightbox from '../../../kit/Lightbox.astro';
 
 <Shot themed="terminal" alt="pi in the board terminal with a show card at the top right" eager />
 
-Each session can run pi in a terminal next to its board. The terminal keeps running in the server when you close the browser tab. Open the board again and you are back where you were. Start the server with `--no-terminal` to turn the terminal off and only watch sessions.
+Each session can run pi in a terminal next to its board. The terminal keeps running in the server when you close the browser tab. Open the board again and you are back where you were. Start the server with `--no-terminal` to turn the terminal off and only watch sessions. To make pi's colors follow the board, see [pi's theme in the board terminal](../../reference/theming/#pis-theme-in-the-board-terminal).
 
 The terminal needs the access token. The URL that the server prints carries it in the URL fragment (`#t=...`), and so does `/kanban open`. Open that URL once: the browser keeps the token, and the server keeps the same token when it restarts. Start the server with `--new-token` to replace it, for example after you shared the URL by mistake.
 

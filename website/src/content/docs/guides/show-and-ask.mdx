@@ -1,6 +1,6 @@
 ---
 title: Show and ask
-description: The show tool posts cards for you to read. The ask tool puts a question in a modal and waits for your answer.
+description: The show command posts cards for you to read. The ask tool puts a question in a modal and waits for your answer.
 ---
 
 import Shot from '../../../kit/Shot.astro';
@@ -10,7 +10,7 @@ import Lightbox from '../../../kit/Lightbox.astro';
 
 <Shot themed="show" width={1778} height={1350} alt="A show card with a latency bar chart over the top right of the terminal" eager />
 
-The `show` tool posts a markdown or HTML card: a table, a chart, a diagram. In the board terminal, the card shows over the top right corner of the terminal. When pi runs in another terminal, the card opens as a tab next to the board. The agent edits the card file, and the card refreshes on each save. A card with the same key replaces the one before it.
+`pi-kanban show` posts a markdown or HTML file as a card: a table, a chart, a diagram. The `show` skill teaches pi the card styles. In the board terminal, the card shows over the top right corner of the terminal. When pi runs in another terminal, the card opens as a tab next to the board. The agent edits the card file, and the card refreshes on each save. A card with the same `--key` replaces the one before it. See the [CLI reference](../../reference/cli/#show).
 
 When the card has the focus:
 
@@ -33,6 +33,6 @@ The `ask` tool shows an HTML card in a modal: a form, a choice between two layou
 
 ## Card style
 
-An HTML card is a body fragment. Take colors and fonts from the board's CSS variables (`--color-bg`, `--color-text`, `--color-accent`, `--font-sans`, and others) so the card follows the light or dark mode and the color theme. See [Extensibility](../extensibility/#cards-and-panes).
+An HTML card is a body fragment. Take colors and fonts from the board's CSS variables (`--color-bg`, `--color-text`, `--color-accent`, `--font-sans`, and others) so the card follows the light or dark mode and the color theme.
 
 <Lightbox />
