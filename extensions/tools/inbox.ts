@@ -12,6 +12,11 @@ type Events = { events: string[]; seqs: number[]; board: string };
 const WAIT_SEC = 110;
 const RETRY_MS = [2_000, 5_000, 15_000, 30_000];
 
+// pi names a session file <ISO timestamp>_<id>.jsonl.
+function sessionIdOf(file: string | undefined): string | undefined {
+	return file ? /_([^_\\/]+)\.jsonl$/.exec(file)?.[1] : undefined;
+}
+
 // A review or answer line ends with the path of the file that holds the batch (lib/session-events.js).
 const FILE_RE = /: (.+\.md)$/;
 
@@ -25,7 +30,9 @@ async function withBatch(line: string): Promise<string> {
 
 // Drains the board's queue for this session (reviews, preview answers, task moves) into the
 // conversation. A line stays on the board until its ack, which rides on the next poll.
-async function drain(pi: ExtensionAPI, ctx: ExtensionContext, sessionId: string, signal: AbortSignal) {
+// `prev` on the first poll makes the board deliver to this session what it still sends to the
+// old id (lib/session-events.js).
+async function drain(pi: ExtensionAPI, ctx: ExtensionContext, sessionId: string, prev: string | undefined, signal: AbortSignal) {
 	let board = "";
 	let seq = 0;
 	let first = true;
@@ -33,7 +40,10 @@ async function drain(pi: ExtensionAPI, ctx: ExtensionContext, sessionId: string,
 	while (!signal.aborted) {
 		try {
 			const q = new URLSearchParams({ wait: String(WAIT_SEC), got: String(seq), ack: String(seq), board });
-			if (first) q.set("first", "1");
+			if (first) {
+				q.set("first", "1");
+				if (prev) q.set("prev", prev);
+			}
 			const res = await boardFetch(`/api/sessions/${encodeURIComponent(sessionId)}/events?${q}`, { cache: "no-store", signal });
 			if (!res.ok) throw new Error(await errorText(res));
 			const got = (await res.json()) as Events;
@@ -57,13 +67,16 @@ export function registerInbox(pi: ExtensionAPI) {
 	if (process.env.PI_SUBAGENT_CHILD) return;
 	let stop: AbortController | null = null;
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		stop?.abort();
 		stop = null;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (!sessionId || !ctx.hasUI) return;
+		// pi loads the extension again for each session, so only the event knows the one before.
+		// A resumed session is not its successor.
+		const prev = event.reason === "new" || event.reason === "fork" ? sessionIdOf(event.previousSessionFile) : undefined;
 		stop = new AbortController();
-		void drain(pi, ctx, sessionId, stop.signal);
+		void drain(pi, ctx, sessionId, prev, stop.signal);
 	});
 
 	pi.on("session_shutdown", async () => {
