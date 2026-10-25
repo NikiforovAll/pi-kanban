@@ -29,9 +29,15 @@ const sections = [
       },
       {
         title: 'Start a session from the board',
-        body: 'Click + New or press [Ctrl+Alt+N]. Pick a folder from your projects, then give a name, a first prompt, a model, and a thinking level. [Ctrl+Alt+R] resumes a past session.',
+        body: 'Click + New or press [Ctrl+Alt+N]. Pick a folder from your projects, then give a name, a first prompt, a model, and a thinking level. [Ctrl+Alt+R] opens the same dialog to resume an older session.',
         shot: 'new-session',
         alt: 'New session dialog with the folder field showing two matching projects',
+      },
+      {
+        title: 'Jump to any session',
+        body: '[Ctrl+Shift+P] opens the session picker. Type to filter by name or project. [Tab] switches between the sessions on the board and all sessions, and [Ctrl+Space] peeks at one before you open it.',
+        shot: 'session-picker',
+        alt: 'The session picker filtered by "rate", with two sessions from acme-api',
       },
       {
         title: 'Hand work to another session',
@@ -129,6 +135,18 @@ const style = [
     alt: 'The color theme menu open over the board',
   },
   {
+    title: 'Zen mode: one session',
+    body: '[Ctrl+Shift+Z] hides every other session. The sidebar shows the context use, cost, scratchpad, linked docs, and agents of the open session. Press it again to see all sessions.',
+    shot: 'zen',
+    alt: 'Zen mode: the sidebar shows only redis-rate-limiter with its context, cost, scratchpad, and agents',
+  },
+  {
+    title: 'Zen mode: one group',
+    body: 'Select a group header in the sidebar and press [Ctrl+Shift+Z]. The sidebar then shows only the sessions in that group.',
+    shot: 'zen-group',
+    alt: 'Zen mode for the Release 2.4 group: the sidebar shows only its three sessions',
+  },
+  {
     title: 'Keep your hands on the keyboard',
     body: 'Arrow keys move through todos, [Tab] switches between the sidebar and the board or the open pane tab, and [\\] hides the sidebar. Press [?] for the full list.',
     shot: 'shortcuts',
@@ -139,14 +157,12 @@ const style = [
 const more = [
   { name: 'Groups and pins', body: 'Put sessions in groups. [.] pins a session to the top, and [>] makes the pin sticky.' },
   { name: 'Search', body: 'Find tasks, sessions, and projects from the sidebar.' },
-  { name: 'Session picker', body: '[Ctrl+Shift+P] jumps to any session by name.' },
-  { name: 'All terminals', body: '[Ctrl+Shift+`] lists the terminals the board runs. End the ones you are done with.' },
+  { name: 'All terminals', body: '[Ctrl+Shift+`] lists the terminals the board runs. End the ones you are done with.', shot: 'terminals', alt: 'The Terminals dialog with two running pi sessions' },
+  { name: 'Tool stats', body: 'Counts the tool calls of a session, with failures and their share of the context. Open it from session info.', shot: 'tool-stats', alt: 'Tool statistics for a session: calls, successes, and impact per tool' },
+  { name: 'Packages', body: '[Shift+X] lists the pi packages the board reads from, and installs the missing ones.', shot: 'packages', alt: 'The Packages dialog with five installed pi packages' },
+  { name: 'Storage manager', body: '[Shift+S] shows what the board keeps in your browser for each session, and clears it.', shot: 'storage', alt: 'The Storage Manager with tabs for sessions, scratchpads, linked docs, and groups' },
   { name: 'Context bar', body: 'Each session card shows how full its context window is.' },
-  { name: 'Zen mode', body: '[Ctrl+Shift+Z] shows only the session you work on.' },
   { name: 'Scratchpad', body: '[N] keeps notes for a session. pi gets a scratch folder for each session too.' },
-  { name: 'Tool stats', body: 'Counts the tool calls of a session. Open it from session info.' },
-  { name: 'Storage manager', body: '[Shift+S] shows what the board keeps in your browser for each session, and clears it.' },
-  { name: 'Packages', body: '[Shift+X] lists the pi packages the board reads from, and installs the missing ones.' },
   { name: 'Messages to pi', body: 'Review comments, card answers, and task moves reach pi as user messages.' },
   { name: 'Install as an app', body: 'The board is a PWA: install it from the browser to get its own window.' },
 ];
@@ -306,16 +322,29 @@ const companions = [
           <h2 id="more">More</h2>
           <p>Smaller things that save time every day.</p>
         </div>
-        <ul class="more">
-          {
-            more.map((m) => (
-              <li>
-                <h3>{m.name}</h3>
-                <p><Keys text={m.body} /></p>
-              </li>
-            ))
-          }
-        </ul>
+        <div class="items">
+          <ul class="more shots">
+            {
+              more.filter((m) => m.shot).map((m) => (
+                <li>
+                  <Shot themed={m.shot} alt={m.alt} />
+                  <h3>{m.name}</h3>
+                  <p><Keys text={m.body} /></p>
+                </li>
+              ))
+            }
+          </ul>
+          <ul class="more">
+            {
+              more.filter((m) => !m.shot).map((m) => (
+                <li>
+                  <h3>{m.name}</h3>
+                  <p><Keys text={m.body} /></p>
+                </li>
+              ))
+            }
+          </ul>
+        </div>
       </section>
 
       <section class="half" aria-labelledby="tools">
@@ -631,6 +660,17 @@ const companions = [
   .more li {
     padding-top: 1rem;
     border-top: 1px solid var(--c-border);
+  }
+  .more.shots {
+    grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+    gap: 2.5rem 2rem;
+  }
+  .more.shots li {
+    padding-top: 0;
+    border-top: 0;
+  }
+  .more.shots h3 {
+    margin-top: 1rem;
   }
   .more h3 {
     margin: 0 0 0.375rem;

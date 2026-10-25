@@ -181,6 +181,75 @@ const views = [
     },
   },
   {
+    name: 'session-picker',
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.keyboard.press('Control+Shift+P');
+      await page.click('#session-picker-scope [data-scope="all"]');
+      await page.fill('#session-picker-input', 'rate');
+      await page.waitForTimeout(800);
+    },
+  },
+  {
+    name: 'terminals',
+    terminal: [LIMITER, CHECKOUT, LOAD_TEST],
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.waitForSelector('.terminal-frame');
+      await page.evaluate(() => openTerminalManager());
+      await page.waitForTimeout(800);
+    },
+  },
+  {
+    name: 'zen',
+    terminal: [LIMITER],
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.waitForSelector('.terminal-frame');
+      await page.evaluate(() => toggleZenMode());
+      await page.waitForTimeout(1500);
+    },
+  },
+  {
+    name: 'zen-group',
+    terminal: [LIMITER],
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.waitForSelector('.terminal-frame');
+      await page.evaluate(() => {
+        zenGroup = [...document.querySelectorAll('.session-group-header')].find((h) => h.textContent.includes('Release')).dataset.groupId;
+        renderZenState();
+        renderSessions();
+        fetchSessions(false);
+      });
+      await page.waitForTimeout(1500);
+    },
+  },
+  {
+    name: 'tool-stats',
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.evaluate((id) => showToolStatsModal(id), LIMITER);
+      await page.waitForTimeout(800);
+    },
+  },
+  {
+    name: 'packages',
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.keyboard.press('Shift+X');
+      await page.waitForTimeout(800);
+    },
+  },
+  {
+    name: 'storage',
+    async run(page) {
+      await openSession(page, LIMITER);
+      await page.keyboard.press('Shift+S');
+      await page.waitForTimeout(800);
+    },
+  },
+  {
     name: 'cost',
     companion: 'pi-cost',
     async run(page, urls) {

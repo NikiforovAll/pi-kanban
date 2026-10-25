@@ -14,62 +14,81 @@
   const tool = (s) => esc(36) + '● ' + esc(0) + s;
   const HEADER = bold('pi') + dim(' v0.70.2');
 
-  function footer(cwd, model, ctx) {
+  const width = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').length;
+
+  function footer({ cwd, model, ctx }, cols) {
+    const left = `${cwd} (main)   ↑18k ↓4.2k   ${ctx}/200k`;
+    const right = `${model} • medium`;
+    const gap = cols - left.length - right.length;
     return [
-      dim('─'.repeat(78)),
+      dim('─'.repeat(cols)),
       `${accent('>')} `,
-      dim('─'.repeat(78)),
-      dim(`${cwd} (main)   ↑18k ↓4.2k   ${ctx}/200k`) + '          ' + dim(`${model} • medium`),
+      dim('─'.repeat(cols)),
+      gap >= 2 ? dim(left + ' '.repeat(gap) + right) : dim(left.slice(0, cols)),
     ];
   }
 
+  // History at the top, the status and the editor on the last rows, as in a pi session that has run a while.
+  function render({ history, status = [], ...info }, cols, rows) {
+    const bottom = [...status, ...footer(info, cols)];
+    const used = [...history, ...bottom].reduce((n, l) => n + Math.max(1, Math.ceil(width(l) / cols)), 0);
+    const lines = [...history, ...Array(Math.max(0, rows - used)).fill(''), ...bottom];
+    return '\x1b[3J\x1b[2J\x1b[H' + lines.join('\r\n') + `\x1b[${rows - 2};3H`;
+  }
+
   const SCREENS = {
-    [ID(1)]: [
-      HEADER,
-      '',
-      user('Add a Redis-backed rate limiter to the API. Plan it first and open the plan in a pane, then build it with tests.'),
-      '',
-      'I read how the middleware is wired. The plan is in _plans/rate-limiter.md and is open in a pane.',
-      '',
-      tool('pane_add _plans/rate-limiter.md'),
-      tool('subagent scout: list every public route that takes an API key'),
-      dim('  scout: 14 public routes, 11 take an API key'),
-      '',
-      tool('$ npm test -- rate-limit'),
-      ok('  PASS ') + 'test/rate-limit.test.ts (3 tests)',
-      '',
-      tool('show "Limiter benchmark" (html)'),
-      tool('dispatch_start rate-limit-load-test'),
-      dim('  report: p95 21 ms, 429 rate 0.4%'),
-      '',
-      'The token bucket is in src/middleware/rate-limit.ts. The load test ran in its own session and reported back.',
-      'Integration tests are next. The reviewer subagent is reading the diff now.',
-      '',
-      warn('⠋') + ' Working... ' + dim('reviewer'),
-      '',
-      ...footer('~/code/acme-api', 'claude-sonnet-4-5', '41.8%'),
-    ],
-    [ID(3)]: [
-      HEADER,
-      '',
-      user('Split checkout into address, payment and review steps. Ask me before you pick a layout.'),
-      '',
-      'The review step works, and payment is behind checkout.payment-v2. One choice is yours: how the step indicator looks.',
-      '',
-      tool('ask "Step indicator layout" step-layout.html'),
-      dim('  waiting for your answer on the board'),
-      '',
-      ...footer('~/code/acme-web', 'gemini-2.5-pro', '22.4%'),
-    ],
+    [ID(1)]: {
+      cwd: '~/code/acme-api',
+      model: 'claude-sonnet-4-5',
+      ctx: '41.8%',
+      history: [
+        HEADER,
+        '',
+        user('Add a Redis-backed rate limiter to the API. Plan it first and open the plan in a pane, then build it with tests.'),
+        '',
+        'I read how the middleware is wired. The plan is in _plans/rate-limiter.md and is open in a pane.',
+        '',
+        tool('pane_add _plans/rate-limiter.md'),
+        tool('subagent scout: list every public route that takes an API key'),
+        dim('  scout: 14 public routes, 11 take an API key'),
+        '',
+        tool('$ npm test -- rate-limit'),
+        ok('  PASS ') + 'test/rate-limit.test.ts (3 tests)',
+        '',
+        tool('show "Limiter benchmark" (html)'),
+        tool('dispatch_start rate-limit-load-test'),
+        dim('  report: p95 21 ms, 429 rate 0.4%'),
+        '',
+        'The token bucket is in src/middleware/rate-limit.ts. The load test ran in its own session and reported back.',
+        'Integration tests are next. The reviewer subagent is reading the diff now.',
+      ],
+      status: [warn('⠋') + ' Working... ' + dim('reviewer'), ''],
+    },
+    [ID(3)]: {
+      cwd: '~/code/acme-web',
+      model: 'gemini-2.5-pro',
+      ctx: '22.4%',
+      history: [
+        HEADER,
+        '',
+        user('Split checkout into address, payment and review steps. Ask me before you pick a layout.'),
+        '',
+        'The review step works, and payment is behind checkout.payment-v2. One choice is yours: how the step indicator looks.',
+        '',
+        tool('ask "Step indicator layout" step-layout.html'),
+        dim('  waiting for your answer on the board'),
+      ],
+      status: [''],
+    },
   };
 
-  const generic = (id) => [
-    HEADER,
-    '',
-    dim(`Resumed session ${id}`),
-    '',
-    ...footer('~/code', 'claude-sonnet-4-5', '9.6%'),
-  ];
+  const generic = (id) => ({
+    cwd: '~/code',
+    model: 'claude-sonnet-4-5',
+    ctx: '9.6%',
+    history: [HEADER, '', dim(`Resumed session ${id}`)],
+    status: [''],
+  });
 
   class DemoSocket {
     constructor(url) {
@@ -89,12 +108,11 @@
         return;
       }
       if (msg.t === 'hello') {
-        const lines = SCREENS[msg.id] || generic(msg.id);
-        this.screen = new TextEncoder().encode('\x1b[3J\x1b[2J\x1b[H' + lines.join('\r\n'));
+        this.screen = SCREENS[msg.id] || generic(msg.id);
         setTimeout(() => this.onmessage?.({ data: JSON.stringify({ t: 'ready', attached: true }) }), 0);
       }
-      if (this.screen && (msg.t === 'hello' || msg.t === 'resize')) {
-        const data = this.screen.slice().buffer;
+      if (this.screen && (msg.t === 'hello' || msg.t === 'resize') && msg.cols > 0 && msg.rows > 0) {
+        const data = new TextEncoder().encode(render(this.screen, msg.cols, msg.rows)).buffer;
         setTimeout(() => this.onmessage?.({ data }), 0);
       }
     }
