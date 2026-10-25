@@ -5,13 +5,18 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
+const seed = require('../../demo/seed.js');
+const SKILLS_DIR = fileURLToPath(new URL('../../skills', import.meta.url));
 const FAKE_HOME = '/home/dev';
 const API = `${FAKE_HOME}/code/acme-api`;
 const PKG = `${FAKE_HOME}/.pi/agent/npm/node_modules`;
 
-const pkgTool = (pkg, name, description) => ({ name, description, sourceInfo: { path: `${PKG}/${pkg}/extensions/index.ts`, source: `npm:${pkg}`, scope: 'user', origin: 'package', baseDir: `${PKG}/${pkg}` } });
+const pkgInfo = (pkg, file = 'extensions/index.ts') => ({ path: `${PKG}/${pkg}/${file}`, source: `npm:${pkg}`, scope: 'user', origin: 'package', baseDir: `${PKG}/${pkg}` });
+const pkgTool = (pkg, name, description) => ({ name, description, sourceInfo: pkgInfo(pkg) });
+const kanbanSkill = (name, description) => ({ name: `skill:${name}`, description, source: 'skill', sourceInfo: pkgInfo('pi-kanban', `skills/${name}/SKILL.md`) });
 const builtin = (name, description) => ({ name, description });
 
 const TOOLS = [
@@ -21,20 +26,15 @@ const TOOLS = [
   builtin('write', 'Write content to a file. Creates the file if it does not exist.'),
   builtin('grep', 'Search file contents for a pattern.'),
   builtin('find', 'Find files by glob pattern.'),
-  pkgTool('pi-kanban', 'show', 'Show the user a card on the pi-kanban board: a table, chart, diagram or mockup.'),
-  pkgTool('pi-kanban', 'ask', 'Ask the user a question on the pi-kanban board and wait for the answer.'),
-  pkgTool('pi-kanban', 'pane_add', 'Add a tab for this session beside Board on the pi-kanban board.'),
-  pkgTool('pi-kanban', 'link_doc', 'Link a file or an http(s) URL to this session on the pi-kanban board.'),
-  pkgTool('pi-kanban', 'dispatch_start', 'Start a task in a new pi session in the board terminal.'),
-  pkgTool('pi-kanban', 'dispatch_wait', 'Wait for the report of a dispatched session.'),
+  pkgTool('pi-kanban', 'ask', 'Ask the user a question on an HTML card in a pi-kanban modal and wait for the answer.'),
   pkgTool('pi-subagents', 'subagent', 'Run a task in a subagent with its own context and tools.'),
   pkgTool('@juicesharp/rpiv-todo', 'todo', 'Keep a todo list for the current task.'),
 ];
 
 const COMMANDS = [
-  { name: 'kanban', description: 'Open the pi-kanban board, or act on this session on it', source: 'extension', sourceInfo: TOOLS[6].sourceInfo },
-  { name: 'cost', description: 'Show what this session costs', source: 'extension', sourceInfo: { ...TOOLS[6].sourceInfo, path: `${PKG}/pi-cost/extensions/cost.ts`, source: 'npm:pi-cost', baseDir: `${PKG}/pi-cost` } },
-  { name: 'skill:visualize', description: 'Present a topic as one self-contained HTML page', source: 'skill', sourceInfo: { path: `${FAKE_HOME}/.pi/agent/skills/visualize/SKILL.md`, scope: 'user', origin: 'top-level' } },
+  { name: 'kanban', description: 'Open the pi-kanban board, or act on this session on it', source: 'extension', sourceInfo: pkgInfo('pi-kanban') },
+  { name: 'cost', description: 'Show what this session costs', source: 'extension', sourceInfo: pkgInfo('pi-cost', 'extensions/cost.ts') },
+  ...fs.readdirSync(SKILLS_DIR).map((name) => kanbanSkill(name, /^description:\s*(.*)$/m.exec(fs.readFileSync(path.join(SKILLS_DIR, name, 'SKILL.md'), 'utf8'))[1])),
   { name: 'review', description: 'Review the current diff', source: 'prompt', sourceInfo: { path: `${API}/.pi/prompts/review.md`, scope: 'project', origin: 'top-level' } },
 ];
 
@@ -42,7 +42,7 @@ const SYSTEM_PROMPT = `You are an expert coding assistant operating inside pi, a
 
 Available tools:
 - read, bash, edit, write, grep, find
-- show, ask, pane_add, link_doc, dispatch_start, dispatch_wait (pi-kanban)
+- ask (pi-kanban)
 - subagent (pi-subagents), todo (rpiv-todo)
 
 Guidelines:
@@ -70,7 +70,7 @@ function writeSnapshot(agentDir, sessionId) {
     sessionId,
     sessionName: 'redis-rate-limiter',
     cwd: API,
-    model: 'anthropic/claude-sonnet-4-5',
+    model: seed.modelRef(seed.MODELS.sonnet),
     systemPrompt: SYSTEM_PROMPT,
     commands: COMMANDS,
     tools: TOOLS,
@@ -132,8 +132,7 @@ export async function startCompanions({ repoRoot, sessionId }) {
   const saved = { ...process.env };
   Object.assign(process.env, env);
   try {
-    const { seedFiles } = require('../../demo/seed.js');
-    await seedFiles({ root: tmp, now: Date.now() });
+    await seed.seedFiles({ root: tmp, now: Date.now() });
   } finally {
     for (const k of Object.keys(env)) saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]);
   }

@@ -29,7 +29,7 @@ delete process.env.PI_CODING_AGENT_SESSION_DIR;
 const { encodeProjectDirName } = require('../lib/board-dir');
 const { createShowStore } = require('../lib/show');
 const { readTerminalConfig, clientConfigFor } = require('../lib/terminal');
-const { IDS, SHOW_IDS, LIVE_START_MIN, seedFiles, seedLive, seedBoard } = require('../demo/seed');
+const { IDS, SHOW_IDS, LIVE_START_MIN, MODELS, seedFiles, seedLive, seedBoard } = require('../demo/seed');
 
 // The server marks projects under its temp dir as temp, and the New session dialog hides those,
 // so it gets a temp dir outside the seed. It runs without a terminal, so the terminal config and replies are built here.
@@ -164,14 +164,7 @@ function liveReplies({ pads, projects }, list, now) {
     '/api/version': { version: DEMO_VERSION },
     '/api/terminals': { sessions: [term(IDS.limiter, TERMINALS.limiter, projects.api), term(IDS.checkout, TERMINALS.checkout, projects.web)] },
     '/api/terminals/stats': { pk: null, host: null, terminals: {} },
-    '/api/pi/models': {
-      models: [
-        { provider: 'anthropic', id: 'claude-sonnet-4-5' },
-        { provider: 'anthropic', id: 'claude-haiku-4-5' },
-        { provider: 'openai', id: 'gpt-5.1' },
-        { provider: 'google', id: 'gemini-2.5-pro' },
-      ],
-    },
+    '/api/pi/models': { models: Object.values(MODELS).map((m) => ({ provider: m.provider, id: m.modelId })) },
   };
   const shows = createShowStore({ load: () => ({ [TERMINALS.limiter]: IDS.limiter }), onChange() {}, resolveDir: (id) => (id === IDS.limiter ? pads.limiter : null) });
   for (const terminalId of Object.values(TERMINALS)) {

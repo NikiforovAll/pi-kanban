@@ -1,6 +1,5 @@
 // Captures the landing and docs screenshots from the static demo build.
 // Run `npm run build:demo` in the repo root first, then `npm run shots` here.
-import http from 'node:http';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -8,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import sharp from 'sharp';
 import { startCompanions } from './companions.mjs';
+import { serveStatic } from './static-server.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.resolve(here, '../../dist');
@@ -24,16 +24,7 @@ if (!fs.existsSync(path.join(dist, 'mock.js'))) {
   process.exit(1);
 }
 
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
-const server = http
-  .createServer((req, res) => {
-    const file = path.join(dist, decodeURIComponent(req.url.split('?')[0]).replace(/\/$/, '/index.html'));
-    fs.readFile(file, (err, data) => {
-      if (err) return res.writeHead(404).end();
-      res.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream' }).end(data);
-    });
-  })
-  .listen(PORT);
+const server = serveStatic(dist, PORT);
 
 const { IDS } = createRequire(import.meta.url)('../../demo/seed.js');
 const { limiter: LIMITER, checkout: CHECKOUT, loadTest: LOAD_TEST } = IDS;

@@ -8,7 +8,9 @@
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "shots": "node scripts/capture-shots.mjs"
+    "shots": "node scripts/capture-shots.mjs",
+    "images": "node scripts/make-images.mjs",
+    "check": "node scripts/landing-check.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.4",

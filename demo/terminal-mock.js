@@ -39,7 +39,7 @@
   const SCREENS = {
     [ID(1)]: {
       cwd: '~/code/acme-api',
-      model: 'claude-sonnet-4-5',
+      model: 'claude-sonnet-5-5',
       ctx: '41.8%',
       history: [
         HEADER,
@@ -48,15 +48,16 @@
         '',
         'I read how the middleware is wired. The plan is in _plans/rate-limiter.md and is open in a pane.',
         '',
-        tool('pane_add _plans/rate-limiter.md'),
+        tool('$ pi-kanban pane add _plans/rate-limiter.md'),
         tool('subagent scout: list every public route that takes an API key'),
         dim('  scout: 14 public routes, 11 take an API key'),
         '',
         tool('$ npm test -- rate-limit'),
         ok('  PASS ') + 'test/rate-limit.test.ts (3 tests)',
         '',
-        tool('show "Limiter benchmark" (html)'),
-        tool('dispatch_start rate-limit-load-test'),
+        tool('$ pi-kanban show bench.html --title "Limiter benchmark"'),
+        tool('$ pi-kanban dispatch start --cwd . --name rate-limit-load-test --spec-file load-test.md'),
+        tool(`$ pi-kanban dispatch wait ${ID(4)}`),
         dim('  report: p95 21 ms, 429 rate 0.4%'),
         '',
         'The token bucket is in src/middleware/rate-limit.ts. The load test ran in its own session and reported back.',
@@ -84,7 +85,7 @@
 
   const generic = (id) => ({
     cwd: '~/code',
-    model: 'claude-sonnet-4-5',
+    model: 'claude-sonnet-5-5',
     ctx: '9.6%',
     history: [HEADER, '', dim(`Resumed session ${id}`)],
     status: [''],

@@ -23,7 +23,7 @@
 
   // The board shows the terminal only with a token; the fake socket in terminal.html takes any.
   try {
-    sessionStorage.setItem('terminal-token', 'd'.repeat(64));
+    if (!/[#&]t=/.test(location.hash)) history.replaceState(null, '', `${location.pathname}${location.search}#t=${'d'.repeat(64)}`);
     if (!localStorage.getItem('theme')) localStorage.setItem('theme', 'dark');
     if (!localStorage.getItem('terminal-sessions')) {
       localStorage.setItem('terminal-sessions', JSON.stringify(R['/api/terminals'].sessions.map((s) => s.id)));

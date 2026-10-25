@@ -6,6 +6,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { reportText } = require('../lib/dispatch-reports');
 
 const ID = (n) => `01a30000-0000-7000-8000-${String(n).padStart(12, '0')}`;
 const IDS = {
@@ -23,10 +24,12 @@ const minutesAgo = (now) => (min) => new Date(now - min * 60_000).toISOString();
 const callId = (sessionId, at, i) => `call_${sessionId.slice(-2)}_${at}_${i}`;
 
 const MODELS = {
-  sonnet: { provider: 'anthropic', modelId: 'claude-sonnet-4-5', api: 'anthropic-messages', contextWindow: 200000 },
+  sonnet: { provider: 'anthropic', modelId: 'claude-sonnet-5-5', api: 'anthropic-messages', contextWindow: 200000 },
   gpt: { provider: 'openai', modelId: 'gpt-5.1', api: 'openai-responses', contextWindow: 400000 },
   gemini: { provider: 'google', modelId: 'gemini-2.5-pro', api: 'google-generative-ai', contextWindow: 1048576 },
+  haiku: { provider: 'anthropic', modelId: 'claude-haiku-5-5', api: 'anthropic-messages', contextWindow: 200000 },
 };
+const modelRef = (m) => `${m.provider}/${m.modelId}`;
 
 const KNOBS_TABLE = '| Knob | Default | Notes |\n|---|---|---|\n| `RATE_WINDOW_MS` | 60000 | Window length |\n| `RATE_LIMIT` | 600 | Requests per key per window |\n| `RATE_BURST` | 50 | Extra requests in a burst |\n| `RATE_KEY_PREFIX` | `rl:` | Redis key prefix |\n';
 const SCOUT = {
@@ -182,6 +185,8 @@ const ASK_HTML = `<style>
   };
 </script>
 `;
+const LOAD_SPEC = 'Write a k6 load test for the rate limiter, run it against staging for 5 minutes at 200 VUs, and report p95 latency and the 429 rate.';
+const SHOWN_NOTE = 'The user sees the rendered card and you do not: in your reply, say what the card shows, and take the render as given.';
 const REPORT = 'Load test done. k6, 200 VUs for 5 min against staging: p95 21 ms (18 ms without the limiter), 429 rate 0.4%, all from the two keys over 600 req/min. Script: load/rate-limit.k6.js. No errors.';
 
 function sessions({ api, web, docs }, pads) {
@@ -208,7 +213,7 @@ function sessions({ api, web, docs }, pads) {
           text: 'The plan is in `_plans/rate-limiter.md`. It is open in a pane on the board.',
           tools: [
             { name: 'write', args: { path: path.join(api, '_plans', 'rate-limiter.md'), content: '# Plan: Redis rate limiter' }, result: 'Wrote 812 bytes.' },
-            { name: 'pane_add', args: { target: '_plans/rate-limiter.md' }, result: 'Added a pane: rate-limiter.md' },
+            { name: 'bash', args: { command: 'pi-kanban pane add _plans/rate-limiter.md' }, result: 'p1  rate-limiter.md' },
           ],
         },
         { at: 90, tools: [{ name: 'todo', args: { action: 'create', tasks: TODO_LIMITER.map((t) => t.subject) }, result: '4 tasks', details: { tasks: TODO_LIMITER.map((t) => ({ ...t, status: 'pending' })) } }] },
@@ -224,22 +229,22 @@ function sessions({ api, web, docs }, pads) {
         {
           at: 62,
           text: 'The benchmark is on the board as a card.',
-          tools: [{ name: 'show', args: { title: 'Limiter benchmark', key: 'bench', kind: 'html' }, result: 'Card 1/1 on the board. Write the card to its file.' }],
+          tools: [{ name: 'bash', args: { command: 'pi-kanban show bench.html --title "Limiter benchmark" --key bench' }, result: `Shown "Limiter benchmark" (bench, 1/1). ${SHOWN_NOTE}` }],
         },
         {
           at: 58,
           text: 'I dispatched the load test to its own session, so this one can keep going.',
           tools: [
-            { name: 'dispatch_start', args: { task: 'Write a k6 load test for the rate limiter, run it against staging for 5 minutes at 200 VUs, and report p95 latency and the 429 rate.', name: 'rate-limit-load-test' }, result: `Started session ${IDS.loadTest} in ${api}. Call dispatch_wait with this session id for its report.` },
+            { name: 'bash', args: { command: `pi-kanban dispatch start --cwd . --name rate-limit-load-test --spec "${LOAD_SPEC}"` }, result: `Started session ${IDS.loadTest} in ${api}` },
           ],
         },
-        { at: 30, tools: [{ name: 'dispatch_wait', args: { session: IDS.loadTest }, result: `Report from ${IDS.loadTest}:\n${REPORT}` }] },
+        { at: 30, tools: [{ name: 'bash', args: { command: `pi-kanban dispatch wait ${IDS.loadTest}` }, result: reportText(IDS.loadTest, { status: 'reported', text: REPORT }) }] },
         { at: 25, user: 'Show me the tuning knobs as a table, and open the tuning doc next to it.' },
         {
           at: 24,
           tools: [
-            { name: 'show', args: { title: 'Tuning knobs', key: 'knobs', kind: 'markdown' }, result: 'Card 2/2 on the board.' },
-            { name: 'pane_add', args: { target: 'docs/tuning.md' }, result: 'Added a pane: tuning.md' },
+            { name: 'bash', args: { command: 'pi-kanban show knobs.md --title "Tuning knobs" --key knobs' }, result: `Shown "Tuning knobs" (knobs, 2/2). ${SHOWN_NOTE}` },
+            { name: 'bash', args: { command: 'pi-kanban pane add docs/tuning.md' }, result: 'p2  tuning.md' },
           ],
         },
         {
@@ -287,7 +292,7 @@ function sessions({ api, web, docs }, pads) {
       name: 'rate-limit-load-test',
       startMin: 57,
       steps: [
-        { at: 57, user: 'Write a k6 load test for the rate limiter, run it against staging for 5 minutes at 200 VUs, and report p95 latency and the 429 rate.' },
+        { at: 57, user: LOAD_SPEC },
         { at: 56, tools: [{ name: 'todo', args: { action: 'create' }, result: '3 tasks', details: { tasks: TODO_LOAD } }] },
         { at: 50, tools: [{ name: 'write', args: { path: path.join(api, 'load', 'rate-limit.k6.js'), content: "import http from 'k6/http';" }, result: 'Wrote 640 bytes.' }] },
         { at: 40, tools: [{ name: 'bash', args: { command: 'k6 run --vus 200 --duration 5m load/rate-limit.k6.js' }, result: 'http_req_duration..: avg=11ms p(95)=21ms\nhttp_reqs..........: 412800\nchecks.............: 99.6% (429: 0.4%)' }] },
@@ -303,7 +308,7 @@ function sessions({ api, web, docs }, pads) {
       startMin: 52,
       steps: [
         { at: 52, user: 'Write a getting-started page for API keys and limits. Link it to this session.' },
-        { at: 47, tools: [{ name: 'write', args: { path: path.join(docs, 'docs', 'getting-started.md'), content: '# Getting started' }, result: 'Wrote 230 bytes.' }, { name: 'link_doc', args: { path: 'docs/getting-started.md' }, result: 'Linked getting-started.md.' }] },
+        { at: 47, tools: [{ name: 'write', args: { path: path.join(docs, 'docs', 'getting-started.md'), content: '# Getting started' }, result: 'Wrote 230 bytes.' }, { name: 'bash', args: { command: 'pi-kanban doc link docs/getting-started.md' }, result: `Document linked to session ${IDS.gettingStarted.slice(0, 8)}: ${path.join(docs, 'docs', 'getting-started.md')}` }] },
         { at: 44, text: 'The page is linked to this session; open it from the session card.' },
       ],
     },
@@ -399,13 +404,13 @@ async function seedFiles({ root, now = Date.now() }) {
 
   const activity = path.join(kanban, 'agent-activity', IDS.limiter);
   const scoutCall = callId(IDS.limiter, SCOUT.at, 0);
-  const scoutResult = { details: { results: [{ agent: 'scout', model: 'anthropic/claude-haiku-4-5', finalOutput: SCOUT.result, exitCode: 0 }] } };
+  const scoutResult = { details: { results: [{ agent: 'scout', model: modelRef(MODELS.haiku), finalOutput: SCOUT.result, exitCode: 0 }] } };
   const reviewStart = startLines(callId(IDS.limiter, REVIEW.at, 1), REVIEW.args, at(REVIEW.at));
   await appendAgentLines(activity, [
     ...startLines(scoutCall, SCOUT.args, at(SCOUT.at)),
     ...endLines(scoutCall, 1, scoutResult, false, at(SCOUT.at - 2)),
     ...reviewStart,
-    { agentId: reviewStart[0].agentId, event: 'update', model: 'anthropic/claude-sonnet-4-5', updatedAt: at(REVIEW.at - 1) },
+    { agentId: reviewStart[0].agentId, event: 'update', model: modelRef(MODELS.sonnet), updatedAt: at(REVIEW.at - 1) },
   ]);
 
   write(path.join(pads.limiter, 'bench.txt'), 'scenario        p50   p95   p99\nno limiter      9ms   18ms  31ms\nredis bucket   11ms   21ms  35ms\nin-memory      10ms   19ms  33ms\n');
@@ -455,4 +460,4 @@ async function seedBoard({ post, projects, report }) {
   await post(`/api/dispatch/${IDS.loadTest}/report`, { text: report });
 }
 
-module.exports = { IDS, SHOW_IDS, LIVE_START_MIN, seedFiles, seedLive, seedBoard };
+module.exports = { IDS, SHOW_IDS, LIVE_START_MIN, MODELS, modelRef, seedFiles, seedLive, seedBoard };
