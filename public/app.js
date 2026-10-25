@@ -14626,7 +14626,8 @@ window.addEventListener('message', (e) => {
 
 function terminalInitOptions(themeOptions) {
   return {
-    fontFamily: getComputedStyle(document.body).getPropertyValue('--font-mono').trim() || 'monospace',
+    fontFamily: appConfig.terminal.fontFamily
+      || getComputedStyle(document.body).getPropertyValue('--font-mono').trim() || 'monospace',
     fontSize: currentTerminalFontSize(),
     scrollback: appConfig.terminal.scrollback,
     windowsPty: appConfig.terminal.windowsPty,

@@ -551,6 +551,18 @@ describe('readTerminalConfig', () => {
     const config = readTerminalConfig({ argv: [], env: {} });
     assert.deepEqual(clientConfigFor(config, false), { available: false });
     assert.equal(clientConfigFor(config, true).fontSize, 13);
+    assert.equal(clientConfigFor(config, true).fontFamily, null);
+  });
+  it('takes the font family from config.json and refuses anything but a font list', (t) => {
+    t.mock.method(console, 'error', () => {});
+    const font = (fontFamily) => readTerminalConfig({ argv: [], env: {}, file: { fontFamily } }).fontFamily;
+    const meslo = "'MesloLGM Nerd Font', 'Cascadia Mono', monospace";
+    assert.equal(font(` ${meslo} `), meslo);
+    assert.equal(clientConfigFor(readTerminalConfig({ argv: [], env: {}, file: { fontFamily: meslo } }), true).fontFamily, meslo);
+    for (const bad of ['', 'Mono; color: red', 'a{}', '<b>', 42, 'x'.repeat(201)]) assert.equal(font(bad), null, String(bad));
+    assert.equal(console.error.mock.callCount(), 6);
+    assert.equal(font(undefined), null);
+    assert.equal(console.error.mock.callCount(), 6);
   });
 });
 
